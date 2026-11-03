@@ -182,7 +182,7 @@ export function ImageGallery({ images, load, align, compact = false, thumbnail =
           image={image}
           load={load}
           variant={variant}
-          ordinal={align === 'end' && !thumbnail ? index + 1 : undefined}
+          {...(align === 'end' && !thumbnail ? { ordinal: index + 1 } : {})}
           fileDrag={fileDrag}
           labels={labels}
           getTriggerProps={getTriggerProps}
