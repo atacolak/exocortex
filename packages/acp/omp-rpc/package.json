@@ -53,6 +53,8 @@
     "@deepseek-ai/cordis": "workspace:~",
     "@deepseek-ai/dsh-api-session-controller": "workspace:*",
     "@deepseek-ai/dsh-client-connection": "workspace:*",
+    "@deepseek-ai/dsh-scope": "workspace:*",
+    "@deepseek-ai/dsh-session-persistence-jsonl": "workspace:*",
     "@deepseek-ai/dsh-workspace": "workspace:*"
   }
 }

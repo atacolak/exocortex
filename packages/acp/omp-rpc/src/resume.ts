@@ -481,7 +481,27 @@ export async function ompHydrationEvents(path: string, limit = 200): Promise<Omp
     selected.unshift(events)
     total += events.length
   }
-  return selected.flat()
+  return selected.flatMap((events, index) => {
+    const turn = index + 1
+    return events.map((event): OmpHydrationEvent => {
+      switch (event.type) {
+        case 'turn/start':
+          return { type: 'turn/start', data: { ...event.data, turn } }
+        case 'turn/end':
+          return { type: 'turn/end', data: { ...event.data, turn } }
+        case 'step/start':
+          return { type: 'step/start', data: { ...event.data, turn } }
+        case 'step/end':
+          return { type: 'step/end', data: { ...event.data, turn } }
+        case 'assistant/message':
+          return { type: 'assistant/message', data: { ...event.data, turn } }
+        case 'tool/result':
+          return { type: 'tool/result', data: { ...event.data, turn } }
+        case 'user/message':
+          return event
+      }
+    })
+  })
 }
 
 /**

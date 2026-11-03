@@ -1,8 +1,10 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
-import { Session, SessionId } from '@deepseek-ai/dsh-session'
+import { Context } from '@deepseek-ai/cordis'
+import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import { SESSION_FORMAT_VERSION, Session, SessionId } from '@deepseek-ai/dsh-session'
+import { afterEach, describe, expect, it, onTestFinished } from 'vitest'
 import {
   hydrateOmpSession,
   ompHydrationEvents,
@@ -188,8 +190,57 @@ describe('ompHydrationEvents', () => {
       'step/end',
       'turn/end',
     ])
-    expect(events[0]?.data).toEqual({ turn: 3 })
+    expect(events[0]?.data).toEqual({ turn: 1 })
     expect(events[2]?.data).toMatchObject({ content: [{ type: 'text', text: 'third' }] })
+  })
+
+  it('renumbers retained turns from one after the limit drops earlier turns', async () => {
+    const path = await transcript([
+      { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'one' }] } },
+      { type: 'message', message: { role: 'assistant', content: [{ type: 'text', text: 'first reply' }] } },
+      { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'two' }] } },
+      { type: 'message', message: { role: 'assistant', content: [{ type: 'text', text: 'second reply' }] } },
+      { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'three' }] } },
+      { type: 'message', message: { role: 'assistant', content: [{ type: 'text', text: 'third reply' }] } },
+    ])
+
+    const events = await ompHydrationEvents(path, 12)
+
+    expect(events.filter(event => event.type === 'turn/start').map(event => event.data.turn)).toEqual([1, 2])
+    expect(events.filter(event => event.type === 'turn/end').map(event => event.data.turn)).toEqual([1, 2])
+    expect(events
+      .filter(event => event.type === 'assistant/message')
+      .map(event => event.data.turn)).toEqual([1, 2])
+    expect(events
+      .filter(event => event.type === 'step/start')
+      .map(event => event.data.turn)).toEqual([1, 2])
+
+    const session = Session.create(SessionId('hydrated-renumber'))
+    await hydrateOmpSession(session, path, 12)
+    const root = await mkdtemp(join(tmpdir(), 'dsh-hydrate-log-'))
+    onTestFinished(() => rm(root, { recursive: true, force: true }))
+    const ctx = new Context()
+    onTestFinished(() => ctx.fiber.dispose())
+    await ctx.plugin(JsonlSessionPersistence, { root, compression: 'none' })
+    const handle = await ctx.sessionPersistence.create({
+      version: SESSION_FORMAT_VERSION,
+      id: session.id,
+      createdAt: 1,
+      cwd: '/work',
+      isSeeded: false,
+    })
+    try {
+      await handle.append(session.snapshotEvents())
+    } finally {
+      await handle.close()
+    }
+    const reopened = await ctx.sessionPersistence.open(session.id, 'read')
+    try {
+      const stored = await reopened.read()
+      expect(stored.events.filter(event => event.type === 'turn/start').map(event => event.data.turn)).toEqual([1, 2])
+    } finally {
+      await reopened.close()
+    }
   })
 })
 
