@@ -68,13 +68,14 @@ function dimensionsOf(image: MessageImageSpec): { readonly width: number; readon
  * @param props.labels - resolved strings (tooltip, loading, retry, lightbox).
  * @returns the bounded thumbnail button, or the retry control on failure.
  */
-export function MessageImage({ image, load, variant, labels, fileDrag, getTriggerProps }: {
+export function MessageImage({ image, load, variant, labels, fileDrag, getTriggerProps, ordinal }: {
   image: MessageImageSpec
   load: ImageLoader
   variant: 'single' | 'tile' | 'thumbnail'
   fileDrag: FileDragActions
   labels: MessageImageLabels
   getTriggerProps: ContextMenuBindings['getTriggerProps']
+  ordinal?: number
 }) {
   const preview = 'preview' in image ? image.preview : undefined
   const attachment = 'attachment' in image ? image.attachment : undefined
@@ -143,6 +144,7 @@ export function MessageImage({ image, load, variant, labels, fileDrag, getTrigge
         {...contextMenuProps}
         onClick={() => { if (src !== null) setOpen(true) }}
       >
+        {ordinal !== undefined && <span className={css.badge} aria-hidden>#{ordinal}</span>}
         {src === null
           ? (
             <span className={css.loading} aria-hidden={loadingThumbnail || undefined}>
@@ -180,6 +182,7 @@ export function ImageGallery({ images, load, align, compact = false, thumbnail =
           image={image}
           load={load}
           variant={variant}
+          ordinal={align === 'end' && !thumbnail ? index + 1 : undefined}
           fileDrag={fileDrag}
           labels={labels}
           getTriggerProps={getTriggerProps}

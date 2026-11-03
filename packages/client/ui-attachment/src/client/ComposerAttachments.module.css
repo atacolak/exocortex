@@ -12,6 +12,27 @@
   height: 64px;
 }
 
+/* Ordinal matching the `[Image #N]` marker the composer writes at the caret.
+   Top-left: the removal control owns the top-right and the progress track the
+   bottom edge. */
+.badge {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  z-index: 1;
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  corner-shape: round;
+  background: var(--dsw-alias-button-contrast-fill);
+  color: var(--dsw-alias-label-primary-inverted);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 16px;
+  text-align: center;
+  pointer-events: none;
+}
+
 .thumbnail {
   width: 64px;
   height: 64px;

@@ -1,7 +1,21 @@
-import { readFileSync } from 'node:fs'
+import { globSync, readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { PROXY_ENV_NAMES } from '../packages/util/http-proxy/src/policy.ts'
-import { clearAmbientProxyEnv, TEST_PROXY_SETUP_FILE, vitestConfigFiles } from './test-proxy-environment.ts'
+import { clearAmbientProxyEnv, TEST_PROXY_SETUP_FILE } from './test-proxy-environment.ts'
+
+/**
+ * Every Vitest configuration in the repository, discovered rather than listed: the web suites carry
+ * no `setupFiles` today, and a hand-written list would let one of them gain a setup without gaining
+ * this one. The wiring test asserts only over the configurations that declare a setup at all.
+ * Discovery lives here, not in the setup module: a setup file runs inside every suite's environment,
+ * jsdom included, where `node:` builtins are unavailable and importing them fails the whole file.
+ *
+ * @returns repository-relative config paths, sorted.
+ */
+function vitestConfigFiles(): string[] {
+  return globSync('vitest*.ts', { cwd: resolve(import.meta.dirname, '..') }).sort()
+}
 
 describe('ambient proxy environment', () => {
   it('clears every name the policy resolver reads, in both casings', () => {
