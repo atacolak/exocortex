@@ -221,3 +221,23 @@ describe('hydrateOmpSession', () => {
     ])
   })
 })
+
+describe('ompHydrationEvents trigger cards', () => {
+  it('classifies background notices and hcom mail as native trigger cards', async () => {
+    const path = await transcript([
+      { type: 'message', message: { role: 'user', content: [{ type: 'text', text: '<system-notice>\nBackground job abc has completed. Resume your work.\n</system-notice>' }] } },
+      { type: 'message', message: { role: 'assistant', content: [{ type: 'text', text: 'resumed' }] } },
+      { type: 'message', message: { role: 'user', content: [{ type: 'text', text: '<hcom from="lead">ship it</hcom>' }] } },
+      { type: 'message', message: { role: 'assistant', content: [{ type: 'text', text: 'shipping' }] } },
+      { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'plain question' }] } },
+    ])
+
+    const users = (await ompHydrationEvents(path)).filter(event => event.type === 'user/message')
+
+    expect(users.map(event => event.data.source)).toEqual([
+      { kind: 'subagent-settled', form: 'notice', summary: 'Background job abc has completed. Resume your work.' },
+      { kind: 'agent-message', form: 'relay' },
+      { kind: 'user' },
+    ])
+  })
+})

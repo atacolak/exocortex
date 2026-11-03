@@ -7,6 +7,7 @@ import { OmpBindings } from '../src/bindings.ts'
 import {
   ompLaunchArgv,
   ompLaunchEnvironment,
+  ompTodoItems,
   parseOmpCommandInput,
   planOmpAttach,
 } from '../src/bridge.ts'
@@ -142,5 +143,37 @@ describe('omp transcript planning', () => {
     expect(await planOmpAttach({ sessionId: session('child'), bindings })).toEqual({
       mode: 'attach', resumePath: own,
     })
+  })
+})
+
+describe('omp todo projection', () => {
+  it('maps active phases and drops passive ones', () => {
+    expect(ompTodoItems({
+      todoPhases: [
+        {
+          name: 'Plan',
+          kind: 'continuing',
+          tasks: [
+            { content: 'read the code', status: 'completed' },
+            { content: 'write the fix', status: 'in_progress' },
+            { content: 'run tests', status: 'pending' },
+            { content: 'dropped work', status: 'abandoned' },
+            { content: 'waiting on peer', status: 'blocked' },
+          ],
+        },
+        { name: 'Notes', kind: 'passive', tasks: [{ content: 'not a task', status: 'pending' }] },
+      ],
+    })).toEqual([
+      { content: 'read the code', status: 'completed' },
+      { content: 'write the fix', status: 'in_progress' },
+      { content: 'run tests', status: 'pending' },
+      { content: 'dropped work', status: 'pending' },
+      { content: 'waiting on peer', status: 'pending' },
+    ])
+  })
+
+  it('reports no todos for a state without phases', () => {
+    expect(ompTodoItems({ sessionId: 's1' })).toEqual([])
+    expect(ompTodoItems(undefined)).toEqual([])
   })
 })

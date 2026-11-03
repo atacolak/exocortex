@@ -5,6 +5,7 @@ import type {} from '@deepseek-ai/dsh-commands'
 import { createToolResultMessage, createUserMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
+import type { TodoItem } from '@deepseek-ai/dsh-tool-todo'
 import type { OmpBindings } from './bindings.ts'
 import { OmpModelCatalogSync, type CatalogSyncOutcome, type OmpModelSelection } from './catalog.ts'
 import { OmpRpcClient } from './client.ts'
@@ -158,6 +159,29 @@ export interface OmpAttachPlan {
   readonly forkPath?: string
 }
 
+/** Convert OMP's todo phases into the whole-list snapshot DSH's TodoPanel records. */
+export function ompTodoItems(state: unknown): TodoItem[] {
+  const phases = objectOf(state)?.todoPhases
+  if (!Array.isArray(phases)) return []
+  const todos: TodoItem[] = []
+  for (const phase of phases) {
+    const record = objectOf(phase)
+    if (record === undefined || record.kind === 'passive' || !Array.isArray(record.tasks)) continue
+    for (const task of record.tasks) {
+      const row = objectOf(task)
+      if (row === undefined || typeof row.content !== 'string' || row.content.length === 0) continue
+      todos.push({ content: row.content, status: ompTodoStatus(row.status) })
+    }
+  }
+  return todos
+}
+
+function ompTodoStatus(value: unknown): TodoItem['status'] {
+  if (value === 'completed') return 'completed'
+  if (value === 'in_progress') return 'in_progress'
+  return 'pending'
+}
+
 async function existingFile(path: string): Promise<boolean> {
   const info = await stat(path).catch(() => undefined)
   return info?.isFile() === true
@@ -188,6 +212,7 @@ export async function planOmpAttach(options: {
 
 interface LiveAttachment {
   readonly agent: Agent
+  readonly client: OmpRpcClient
   readonly launched: LaunchedOmp
   readonly driver: OmpAgentDriver
   readonly hostTools: OmpHostToolBridge
@@ -196,6 +221,7 @@ interface LiveAttachment {
   readonly disposeCommands: () => void
   detachStream: () => void
   readonly cursor: LiveCursor
+  todos: TodoItem[]
 }
 
 interface LiveCursor {
@@ -269,9 +295,13 @@ export class OmpBridge {
         resolveImages: refs => this.readImages(refs),
         onTool: (events) => { pendingTools.push(...events) },
         onContinue: () => { this.continueTurn(agent) },
+        onUnsolicitedWake: ({ text, source }) => {
+          agent.followup(createUserMessage({ content: [{ type: 'text', text }], source }))
+        },
       })
       const live: LiveAttachment = {
         agent,
+        client,
         launched,
         driver,
         hostTools,
@@ -280,9 +310,11 @@ export class OmpBridge {
         disposeCommands: this.registerCommands(agent, client),
         detachStream: () => {},
         cursor,
+        todos: [],
       }
       live.detachStream = this.bindStream(live)
       await hostTools.sync()
+      await this.publishTodos(live)
       this.attachments.set(agent.id, live)
       agent.ctx.effect(() => () => this.detach(agent.id), 'omp-rpc attachment')
       return { client, launched, catalog, session, cwd: options.cwd }
@@ -309,6 +341,7 @@ export class OmpBridge {
     const live = this.attachments.get(id)
     if (live === undefined) return
     this.attachments.delete(id)
+    live.driver.close()
     live.detachStream()
     live.disposeCommands()
     live.hostTools.close()
@@ -324,8 +357,10 @@ export class OmpBridge {
   private bindStream(live: LiveAttachment): () => void {
     const stopStep = live.agent.ctx.on('agent/step-stream', async (payload, next) => {
       if (payload.agent !== live.agent) return next()
+      const nextTurn = payload.turn !== live.cursor.turn
       live.cursor.turn = payload.turn
       live.cursor.step = payload.step
+      if (nextTurn && live.todos.length > 0) live.agent.session.append('todo/write', { todos: live.todos })
       const stream: AgentStepStream = (request, signal) => live.driver.stream(request, signal)
       return stream
     })
@@ -337,7 +372,7 @@ export class OmpBridge {
         return
       }
       const tools = live.pendingTools.splice(0)
-      for (const event of tools) this.projectTool(live.cursor, event)
+      for (const event of tools) this.projectTool(live, event)
     })
     return () => {
       stopStep()
@@ -404,7 +439,8 @@ export class OmpBridge {
     }
   }
 
-  private projectTool(cursor: LiveCursor, event: OmpToolEvent): void {
+  private projectTool(live: LiveAttachment, event: OmpToolEvent): void {
+    const cursor = live.cursor
     const callId = ToolCallId(event.toolCallId)
     if (event.kind === 'start') {
       cursor.agent.session.append('tool/call', {
@@ -424,6 +460,14 @@ export class OmpBridge {
       step: cursor.step,
       message: createToolResultMessage({ callId, content, isError: event.isError }),
     }, { surfaceOp: 'append' })
+    if (event.toolName === 'todo' && !event.isError) void this.publishTodos(live)
+  }
+
+  private async publishTodos(live: LiveAttachment): Promise<void> {
+    const state = await live.client.request({ type: 'get_state' }).catch(() => undefined)
+    if (state === undefined) return
+    live.todos = ompTodoItems(state)
+    live.agent.session.append('todo/write', { todos: live.todos })
   }
 }
 

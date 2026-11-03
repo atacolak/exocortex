@@ -359,3 +359,106 @@ describe('OmpAgentDriver', () => {
     ])
   })
 })
+
+describe('OmpAgentDriver unsolicited wakes', () => {
+  it('opens a live turn and classifies a background system notice', () => {
+    const client = new FakeClient()
+    const wakes: unknown[] = []
+    const driver = new OmpAgentDriver(client, { onUnsolicitedWake: (wake) => { wakes.push(wake) } })
+    const notice = '<system-notice>\nBackground job abc has completed. Resume your work.\n</system-notice>'
+
+    client.emit({ type: 'agent_start' })
+    client.emit({ type: 'message_start', message: { role: 'user' } })
+    client.emit({ type: 'message_end', message: { role: 'user', content: [{ type: 'text', text: notice }] } })
+
+    expect(wakes).toEqual([{
+      text: notice,
+      source: {
+        kind: 'subagent-settled',
+        form: 'notice',
+        summary: 'Background job abc has completed. Resume your work.',
+      },
+    }])
+    driver.close()
+  })
+
+  it('classifies hcom actor mail as an agent message relay', () => {
+    const client = new FakeClient()
+    const wakes: unknown[] = []
+    const driver = new OmpAgentDriver(client, { onUnsolicitedWake: (wake) => { wakes.push(wake) } })
+    const mail = '<hcom from="lead">ship it</hcom>'
+
+    client.emit({ type: 'agent_start' })
+    client.emit({ type: 'message_end', message: { role: 'custom', content: mail } })
+
+    expect(wakes).toEqual([{
+      text: mail,
+      source: { kind: 'agent-message', form: 'relay' },
+    }])
+    driver.close()
+  })
+
+  it('attributes an assistant reply with no waking message to a generic background wake', () => {
+    const client = new FakeClient()
+    const wakes: unknown[] = []
+    const driver = new OmpAgentDriver(client, { onUnsolicitedWake: (wake) => { wakes.push(wake) } })
+
+    client.emit({ type: 'agent_start' })
+    client.emit({ type: 'message_start', message: { role: 'assistant' } })
+
+    expect(wakes).toEqual([{
+      text: 'Background agent wake',
+      source: { kind: 'omp-wake', form: 'notice', summary: 'Background agent wake' },
+    }])
+    driver.close()
+  })
+
+  it('never treats the prompt it sent as an unsolicited wake', async () => {
+    const client = new FakeClient()
+    const wakes: unknown[] = []
+    const driver = new OmpAgentDriver(client, { onUnsolicitedWake: (wake) => { wakes.push(wake) } })
+    const consume = (async () => {
+      for await (const _chunk of driver.stream(request([user('u1', 'hello')]), new AbortController().signal)) { /* drain */ }
+    })()
+    await tick()
+
+    client.emit({ type: 'agent_start' })
+    client.settle()
+    client.emit(messageUpdate('m1', { type: 'text_start', contentIndex: 0 }, assistantMessage('', 'stop', { input: 1, output: 1 })))
+    client.emit(messageUpdate('m1', { type: 'text_end', contentIndex: 0, content: 'ok' }, assistantMessage('ok', 'stop', { input: 1, output: 1 })))
+    settlePrompt(client)
+    await consume
+
+    expect(wakes).toEqual([])
+    expect(client.commands.map(command => command.type)).toEqual(['prompt'])
+  })
+
+  it('consumes the buffered wake run without prompting or steering again', async () => {
+    const client = new FakeClient()
+    const wakes: unknown[] = []
+    const driver = new OmpAgentDriver(client, { onUnsolicitedWake: (wake) => { wakes.push(wake) } })
+    const mail = '<hcom from="lead">ship it</hcom>'
+
+    client.emit({ type: 'agent_start' })
+    client.emit({ type: 'message_start', message: { role: 'user' } })
+    client.emit({ type: 'message_end', message: { role: 'user', content: [{ type: 'text', text: mail }] } })
+    client.emit(messageUpdate('w1', { type: 'text_start', contentIndex: 0 }, assistantMessage('', 'stop', { input: 1, output: 1 })))
+    client.emit(messageUpdate('w1', { type: 'text_delta', contentIndex: 0, delta: 'ack' }, assistantMessage('ack', 'stop', { input: 1, output: 1 })))
+    client.emit(messageUpdate('w1', { type: 'text_end', contentIndex: 0, content: 'ack' }, assistantMessage('ack', 'stop', { input: 1, output: 1 })))
+    client.emit({ type: 'agent_end', isTerminal: true })
+
+    const chunks: StreamChunk[] = []
+    for await (const chunk of driver.stream(request([]), new AbortController().signal)) chunks.push(chunk)
+
+    expect(wakes).toEqual([{ text: mail, source: { kind: 'agent-message', form: 'relay' } }])
+    expect(chunks).toEqual([
+      { type: 'block-start', index: 0, blockType: 'text' },
+      { type: 'text-delta', index: 0, text: 'ack' },
+      { type: 'block-end', index: 0, block: { type: 'text', text: 'ack' } },
+      { type: 'usage', usage: { inputTokens: 1, outputTokens: 1 } },
+      { type: 'finish', reason: { kind: 'stop' } },
+    ])
+    expect(client.commands).toEqual([])
+    driver.close()
+  })
+})

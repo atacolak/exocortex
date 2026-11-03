@@ -14,10 +14,13 @@ import {
   createUserMessage,
   ToolCallId,
   type ContentBlock,
+  type MessageSourceMap,
 } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import { normalizeSessionTitle } from '@deepseek-ai/dsh-session-title'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
+import { ompTriggerSource } from './driver.ts'
+import type { OmpTriggerSource } from './types.ts'
 
 /** A resume or open request the HTTP surface can report with a stable status. */
 export class OmpResumeError extends Error {
@@ -281,6 +284,11 @@ function partsOf(content: unknown): TranscriptContentPart[] {
   return content.filter((part): part is TranscriptContentPart => typeof part === 'object' && part !== null)
 }
 
+function userMessageSource(content: readonly ContentBlock[]): MessageSourceMap['user'] | OmpTriggerSource {
+  const text = content.map(block => block.type === 'text' ? block.text : '').join('\n')
+  return ompTriggerSource(text) ?? { kind: 'user' }
+}
+
 function textBlocks(content: unknown): ContentBlock[] {
   const blocks: ContentBlock[] = []
   for (const part of partsOf(content)) {
@@ -423,7 +431,7 @@ export async function ompHydrationEvents(path: string, limit = 200): Promise<Omp
       closeTurn()
       openTurn().push({
         type: 'user/message',
-        data: createUserMessage({ content, source: { kind: 'user' } }),
+        data: createUserMessage({ content, source: userMessageSource(content) }),
       })
       continue
     }
