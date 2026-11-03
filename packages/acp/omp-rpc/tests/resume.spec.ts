@@ -104,6 +104,7 @@ describe('ompHydrationEvents', () => {
       'step/start',
       'user/message',
       'assistant/message',
+      'tool/call',
       'tool/result',
       'step/end',
       'step/start',
@@ -134,6 +135,13 @@ describe('ompHydrationEvents', () => {
     expect(events[4]?.data).toMatchObject({
       turn: 1,
       step: 1,
+      callId: 'call-1',
+      name: 'read',
+      arguments: '{"path":"/tmp/a"}',
+    })
+    expect(events[5]?.data).toMatchObject({
+      turn: 1,
+      step: 1,
       message: {
         role: 'tool',
         source: { kind: 'tool' },
@@ -141,8 +149,8 @@ describe('ompHydrationEvents', () => {
         isError: false,
       },
     })
-    expect(events[7]?.data).toMatchObject({ turn: 1, step: 2 })
-    expect(events[9]?.data).toEqual({ turn: 1, reason: { kind: 'completed' } })
+    expect(events[8]?.data).toMatchObject({ turn: 1, step: 2 })
+    expect(events[10]?.data).toEqual({ turn: 1, reason: { kind: 'completed' } })
   })
 
   it('starts a new turn at each user message and drops empty messages', async () => {
@@ -238,6 +246,148 @@ describe('ompHydrationEvents', () => {
     try {
       const stored = await reopened.read()
       expect(stored.events.filter(event => event.type === 'turn/start').map(event => event.data.turn)).toEqual([1, 2])
+    } finally {
+      await reopened.close()
+    }
+  })
+  it('advertises each surviving tool call and drops orphan calls before the next message', async () => {
+    const path = await transcript([
+      { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'one' }] } },
+      {
+        type: 'message',
+        message: {
+          role: 'assistant',
+          content: [
+            { type: 'text', text: 'checking' },
+            { type: 'toolCall', id: 'call-1', name: 'read', arguments: { path: '/tmp/a' } },
+            { type: 'toolCall', id: 'call-orphan', name: 'bash', arguments: { command: 'true' } },
+          ],
+        },
+      },
+      { type: 'message', message: { role: 'toolResult', toolCallId: 'call-1', isError: true, content: [{ type: 'text', text: 'boom' }] } },
+      { type: 'message', message: { role: 'toolResult', toolCallId: 'call-never', content: [{ type: 'text', text: 'ignored' }] } },
+      { type: 'message', message: { role: 'assistant', content: [{ type: 'text', text: 'done' }] } },
+      { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'two' }] } },
+      {
+        type: 'message',
+        message: {
+          role: 'assistant',
+          content: [
+            { type: 'thinking', thinking: 'hmm' },
+            { type: 'toolCall', id: 'call-2', name: 'grep', arguments: '{"pattern":"x"}' },
+          ],
+        },
+      },
+      { type: 'message', message: { role: 'toolResult', toolCallId: 'call-2', isError: true, content: [{ type: 'text', text: 'nope' }] } },
+      { type: 'message', message: { role: 'assistant', content: [{ type: 'text', text: 'finished' }] } },
+    ])
+
+    const events = await ompHydrationEvents(path)
+
+    expect(events.map(event => event.type)).toEqual([
+      'turn/start',
+      'step/start',
+      'user/message',
+      'assistant/message',
+      'tool/call',
+      'tool/result',
+      'step/end',
+      'step/start',
+      'assistant/message',
+      'step/end',
+      'turn/end',
+      'turn/start',
+      'step/start',
+      'user/message',
+      'assistant/message',
+      'tool/call',
+      'tool/result',
+      'step/end',
+      'step/start',
+      'assistant/message',
+      'step/end',
+      'turn/end',
+    ])
+    expect(events
+      .filter(event => event.type === 'tool/call')
+      .map(event => event.data)).toEqual([
+      { turn: 1, step: 1, callId: 'call-1', name: 'read', arguments: '{"path":"/tmp/a"}' },
+      { turn: 2, step: 1, callId: 'call-2', name: 'grep', arguments: '{"pattern":"x"}' },
+    ])
+    expect(events
+      .filter(event => event.type === 'tool/result')
+      .map(event => event.data.message.toolCallId)).toEqual(['call-1', 'call-2'])
+    expect(events[3]?.data).toMatchObject({
+      message: {
+        content: [
+          { type: 'text', text: 'checking' },
+          { type: 'tool-call', id: 'call-1', name: 'read' },
+        ],
+      },
+    })
+  })
+
+  it('round-trips hydrated tool calls through a persisted zstd session log after slicing turns', async () => {
+    const path = await transcript([
+      { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'one' }] } },
+      {
+        type: 'message',
+        message: {
+          role: 'assistant',
+          content: [
+            { type: 'text', text: 'checking' },
+            { type: 'toolCall', id: 'call-1', name: 'read', arguments: { path: '/tmp/a' } },
+          ],
+        },
+      },
+      { type: 'message', message: { role: 'toolResult', toolCallId: 'call-1', isError: true, content: [{ type: 'text', text: 'boom' }] } },
+      { type: 'message', message: { role: 'assistant', content: [{ type: 'text', text: 'done' }] } },
+      { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'two' }] } },
+      {
+        type: 'message',
+        message: {
+          role: 'assistant',
+          content: [
+            { type: 'thinking', thinking: 'hmm' },
+            { type: 'toolCall', id: 'call-2', name: 'grep', arguments: '{"pattern":"x"}' },
+          ],
+        },
+      },
+      { type: 'message', message: { role: 'toolResult', toolCallId: 'call-2', isError: true, content: [{ type: 'text', text: 'nope' }] } },
+      { type: 'message', message: { role: 'assistant', content: [{ type: 'text', text: 'finished' }] } },
+    ])
+    const session = Session.create(SessionId('hydrated-tool-calls'))
+    await hydrateOmpSession(session, path, 20)
+
+    const root = await mkdtemp(join(tmpdir(), 'dsh-hydrate-log-'))
+    onTestFinished(() => rm(root, { recursive: true, force: true }))
+    const ctx = new Context()
+    onTestFinished(() => ctx.fiber.dispose())
+    await ctx.plugin(JsonlSessionPersistence, { root, compression: 'zstd' })
+    const handle = await ctx.sessionPersistence.create({
+      version: SESSION_FORMAT_VERSION,
+      id: session.id,
+      createdAt: 1,
+      cwd: '/work',
+      isSeeded: false,
+    })
+    try {
+      await handle.append(session.snapshotEvents())
+    } finally {
+      await handle.close()
+    }
+
+    const reopened = await ctx.sessionPersistence.open(session.id, 'read')
+    try {
+      const stored = await reopened.read()
+      expect(stored.events.filter(event => event.type === 'turn/start').map(event => event.data.turn)).toEqual([1])
+      expect(stored.events
+        .filter(event => event.type === 'tool/call')
+        .map(event => ({ turn: event.data.turn, step: event.data.step, callId: event.data.callId })))
+        .toEqual([{ turn: 1, step: 1, callId: 'call-2' }])
+      expect(stored.events
+        .filter(event => event.type === 'tool/result')
+        .map(event => event.data.message.isError)).toEqual([true])
     } finally {
       await reopened.close()
     }
