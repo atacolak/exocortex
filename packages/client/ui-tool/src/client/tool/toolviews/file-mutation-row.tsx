@@ -51,6 +51,7 @@ export function FileMutationRow({
       toolName={toolName}
       icon={FILE_MUTATION_ICON}
       title={t(model.titleKey)}
+      intent={model.intent}
       summary={model.summary}
       summarySuffix={size !== null && model.summary !== '' ? size : undefined}
       output={model.output}

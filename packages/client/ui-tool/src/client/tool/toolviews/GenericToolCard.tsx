@@ -60,6 +60,7 @@ export function GenericToolCard({
       toolName={toolName}
       icon={VARIANT_ICONS[model.variant]}
       title={t(model.titleKey)}
+      intent={model.intent}
       summary={model.summary}
       // Single-file tools never expose an args body — the path link is the only
       // args interaction. A card is not an args body: a read/write/edit row is

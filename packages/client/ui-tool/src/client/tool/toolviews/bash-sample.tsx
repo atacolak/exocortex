@@ -71,7 +71,8 @@ export const BashRow = memo(function BashRow({ toolName, block, sessionId, useSe
       : null,
     [genericBody, model.bodyRaw, model.variant, open],
   )
-  const normalSummary = terminal?.description ?? model.summary
+  // The intent heading already states the task; the terminal description would repeat it.
+  const normalSummary = (model.intent === undefined ? terminal?.description : undefined) ?? model.summary
   const exitLabel = terminalExitLabel(terminalModel, t)
   const settlementLine = exitLabel !== null ? null : state === 'error'
     ? model.errorSummary ?? normalSummary
@@ -109,7 +110,7 @@ export const BashRow = memo(function BashRow({ toolName, block, sessionId, useSe
         <span className={css.leading}>{leading}</span>
         {status !== null && <span className={css.visuallyHidden}>{status}</span>}
         <TextShimmer active={running}>
-          <TextShimmer className={css.title}>{t(model.titleKey)}</TextShimmer>
+          <TextShimmer className={css.title}>{model.intent ?? t(model.titleKey)}</TextShimmer>
           <span className={css.sep} data-shimmer-decoration aria-hidden />
           <span className={clsx(
             css.summary,

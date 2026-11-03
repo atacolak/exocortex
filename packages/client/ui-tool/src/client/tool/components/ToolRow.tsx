@@ -38,6 +38,11 @@ export interface ToolRowProps {
   toolName?: string | undefined
   icon: ReactNode
   title: string
+  /**
+   * The model's own task intent. When present it becomes the collapsed
+   * heading in place of the localized tool title; the summary still follows.
+   */
+  intent?: string | undefined
   summary: string
   /**
    * Trailing summary fragment rendered outside the ellipsized summary text, so
@@ -132,6 +137,7 @@ export const ToolRow = memo(function ToolRow({
   toolName,
   icon,
   title,
+  intent,
   summary,
   summarySuffix,
   bodyRaw,
@@ -185,7 +191,9 @@ export const ToolRow = memo(function ToolRow({
   )
   const status = stateStatus(state, t)
   const running = state === 'running' || state === 'preparing'
-  const normalSummary = terminalBody?.description ?? (open ? detailsBody?.expandedSummary ?? summary : summary)
+  // The intent heading already states the task; the terminal description would repeat it.
+  const normalSummary = (intent === undefined ? terminalBody?.description : undefined)
+    ?? (open ? detailsBody?.expandedSummary ?? summary : summary)
   const exitLabel = terminalExitLabel(terminal, t)
   // Generic failures retain their first result line; command exits keep their description.
   const failureLine = state === 'error' && exitLabel === null ? errorSummary ?? normalSummary : null
@@ -404,7 +412,7 @@ export const ToolRow = memo(function ToolRow({
         leadingClassName={css.leading}
         titleClassName={css.title}
         icon={icon}
-        title={title}
+        title={intent ?? title}
         running={running}
         open={open}
         expandable={expandable}

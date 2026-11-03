@@ -32,6 +32,7 @@ export function WebRow({ toolName, block, useContextMenu, sessionId, inspect, us
       title={t(toolName === 'web_search'
         ? WEB_TITLE_KEYS.web_search
         : toolName === 'web_fetch' ? WEB_TITLE_KEYS.web_fetch : model.titleKey)}
+      intent={model.intent}
       summary={model.summary}
       output={model.output}
       errorSummary={model.errorSummary}

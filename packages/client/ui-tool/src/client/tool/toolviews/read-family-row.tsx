@@ -56,6 +56,7 @@ export function readFamilyRow(
       toolName={toolName}
       icon={<IconBrowseOutlineRegular size={14} />}
       title={t(model.titleKey)}
+      intent={model.intent}
       summary={model.summary}
       bodyRaw={null}
       output={model.output}
