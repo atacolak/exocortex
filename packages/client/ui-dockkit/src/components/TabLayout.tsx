@@ -3,7 +3,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { MutableRefObject, ReactNode } from 'react'
 import clsx from 'clsx'
 import type { DockIntents } from '../contract/adapter.ts'
-import type { LayoutState, PaneId, PaneNode, TabId, TabRecord } from '../contract/types.ts'
+import type { LayoutState, NodeId, PaneId, PaneNode, SplitAxis, SplitId, TabId, TabRecord } from '../contract/types.ts'
 import { findTabPane, floatRect, getNode, getPane } from '../engine/tree.ts'
 import type { SizePreview } from './PaneTree.tsx'
 import type { PaneCallbacks } from './render.ts'
@@ -27,10 +27,72 @@ interface LayoutProps extends TabRetention {
   readonly intents: DockIntents
 }
 
+/** One docked pane's box as fractions of the layout. */
+interface DockSlot {
+  readonly left: number
+  readonly top: number
+  readonly width: number
+  readonly height: number
+}
+
+/** One split boundary's box as fractions of the layout. */
+interface DividerSlot extends DockSlot {
+  readonly splitId: SplitId
+  readonly index: number
+  readonly axis: SplitAxis
+}
+
+/**
+ * Flatten the docked tree into pane boxes and split boundaries.
+ * @param state - committed layout.
+ * @param preview - live divider fractions, if a drag is in progress.
+ * @returns every docked pane's box and every divider's line, in tree order.
+ */
+function slotsOf(state: LayoutState, preview: SizePreview | undefined): {
+  readonly panes: ReadonlyMap<PaneId, DockSlot>
+  readonly dividers: readonly DividerSlot[]
+} {
+  const panes = new Map<PaneId, DockSlot>()
+  const dividers: DividerSlot[] = []
+  const walk = (nodeId: NodeId, slot: DockSlot): void => {
+    const node = getNode(state, nodeId)
+    if (node.kind === 'pane') { panes.set(node.id, slot); return }
+    const sizes = preview?.splitId === node.id ? preview.sizes : node.sizes
+    let offset = 0
+    node.children.forEach((childId, index) => {
+      const size = sizes[index] ?? 0
+      const start = node.axis === 'row' ? slot.left + slot.width * offset : slot.top + slot.height * offset
+      if (index > 0) {
+        dividers.push(node.axis === 'row'
+          ? { splitId: node.id, index: index - 1, axis: node.axis, left: start, top: slot.top, width: 0, height: slot.height }
+          : { splitId: node.id, index: index - 1, axis: node.axis, left: slot.left, top: start, width: slot.width, height: 0 })
+      }
+      walk(childId, node.axis === 'row'
+        ? { left: start, top: slot.top, width: slot.width * size, height: slot.height }
+        : { left: slot.left, top: start, width: slot.width, height: slot.height * size })
+      offset += size
+    })
+  }
+  walk(state.rootId, { left: 0, top: 0, width: 1, height: 1 })
+  return { panes, dividers }
+}
+
+/** Inline placement for one fractional box. */
+function slotStyle(slot: DockSlot): { left: string; top: string; width: string; height: string } {
+  return {
+    left: `${slot.left * 100}%`,
+    top: `${slot.top * 100}%`,
+    width: `${slot.width * 100}%`,
+    height: `${slot.height * 100}%`,
+  }
+}
+
 interface TabHostProps extends LayoutProps {
   readonly tab: TabRecord
   readonly pane: PaneNode
-  readonly column: number
+  readonly slot: DockSlot | undefined
+  readonly column: number | undefined
+  readonly row: number | undefined
   readonly floats: ReturnType<typeof useFloatGestures>
   readonly focusRequest: MutableRefObject<{ readonly tabId: TabId; readonly origin: Element | null } | undefined>
   /** Chip-box offsets by pane, read and recorded by each selected tab's strip. */
@@ -38,8 +100,8 @@ interface TabHostProps extends LayoutProps {
 }
 
 /** A tab's ancestors stay identical across selection, pane moves and floating. */
-function TabHost({ state, callbacks, intents, tab, pane, column, floats, focusRequest, offsets, keepMounted,
-  active = true }: TabHostProps): ReactNode {
+function TabHost({ state, callbacks, intents, tab, pane, slot, column, row, floats, focusRequest, offsets,
+  keepMounted, active = true }: TabHostProps): ReactNode {
   const floating = pane.host === 'float'
   const selected = floating || pane.activeTabId === tab.id
   const visible = active && selected && (floating || state.expanded)
@@ -80,8 +142,11 @@ function TabHost({ state, callbacks, intents, tab, pane, column, floats, focusRe
   const depth = lifted === undefined ? state.floats.indexOf(pane.id) + 1 : state.floats.length + 1
   return (
     <div className={clsx(css.tabCell, floating && css.floatingCell)} hidden={!selected}
-      data-dockkit-host={floating ? 'float' : 'dock'} data-dockkit-column={floating ? undefined : column}
-      style={{ gridColumn: floating ? 1 : column * 2 + 1, gridRow: 1, order: floating ? depth : 0 }}>
+      data-dockkit-host={floating ? 'float' : 'dock'}
+      data-dockkit-column={floating ? undefined : column} data-dockkit-row={floating ? undefined : row}
+      style={floating
+        ? { zIndex: `calc(var(--dsh-dockkit-float-layer, 60) + ${depth})` }
+        : slotStyle(slot as DockSlot)}>
       <section ref={host} tabIndex={-1} className={clsx(css.tabHost, floating ? css.float : css.pane)}
         aria-hidden={!visible || undefined}
         data-dockkit-content={tab.id}
@@ -90,6 +155,7 @@ function TabHost({ state, callbacks, intents, tab, pane, column, floats, focusRe
         data-dockkit-float={floating ? pane.id : undefined}
         data-dockkit-float-active={floating && state.activePaneId === pane.id || undefined}
         data-dockkit-column={!floating ? column : undefined}
+        data-dockkit-row={!floating ? row : undefined}
         style={rect === undefined ? undefined : floatStyle(rect, lifted !== undefined)}
         onPointerDown={() => { if (floating) floats.raise(pane.id) }}
         onClick={() => { if (!floating && state.activePaneId !== pane.id) callbacks.onFocusPane(pane.id) }}>
@@ -111,10 +177,9 @@ function TabHost({ state, callbacks, intents, tab, pane, column, floats, focusRe
 }
 
 /**
- * One or two horizontal panes; CSS resolves content sizes from track fractions.
+ * A recursive split tree with stable tab containers across pane moves and floats.
  * @param props - committed layout, gesture preview and body retention policy.
- * @returns stable tab containers, including floating tabs.
- * @throws if the docked tree is not one pane or two horizontal panes.
+ * @returns stable tab containers positioned over every docked pane, including floating tabs.
  */
 export function TabLayout(props: LayoutProps): ReactNode {
   const { state, callbacks, preview } = props
@@ -130,31 +195,37 @@ export function TabLayout(props: LayoutProps): ReactNode {
       callbacks.onFocusTab(tabId)
     },
   }
-  const root = getNode(state, state.rootId)
-  if (root.kind === 'split' && (root.axis !== 'row' || root.children.length !== 2)) {
-    throw new Error('DockLayout requires one pane or two horizontally split panes')
-  }
-  const panes = root.kind === 'pane' ? [root] : root.children.map(id => getPane(state, id))
-  const sizes = root.kind === 'split' ? preview?.splitId === root.id ? preview.sizes : root.sizes : [1]
+  const { panes: slots, dividers } = slotsOf(state, preview)
   const floats = useFloatGestures(state, props.intents)
-  const columns = sizes.map(size => `minmax(0, ${size}fr)`).join(' 0px ')
+  const root = getNode(state, state.rootId)
+  const columnOf = (slot: DockSlot): number => slot.left === 0 ? 0 : 1
+  const rowOf = (slot: DockSlot): number => slot.top === 0 ? 0 : 1
   return (
-    <div className={css.tabLayout} data-dockkit-split={root.kind === 'split' ? root.id : undefined}
-      style={{ gridTemplateColumns: columns }}>
+    <div className={css.tabLayout} data-dockkit-split={root.kind === 'split' ? root.id : undefined}>
       {/* Logical order changes must not make React move a connected webview's ancestor. */}
       {Object.values(state.tabs).sort((a, b) => a.id.localeCompare(b.id)).map((tab) => {
         const pane = findTabPane(state, tab.id)
+        const slot = pane.host === 'float' ? undefined : slots.get(pane.id)
         return <TabHost key={tab.id} {...props} callbacks={tabCallbacks} tab={tab} pane={pane}
-          column={panes.findIndex(candidate => candidate.id === pane.id)} floats={floats} focusRequest={focusRequest} offsets={offsets} />
+          slot={slot} column={slot === undefined ? undefined : columnOf(slot)}
+          row={slot === undefined ? undefined : rowOf(slot)}
+          floats={floats} focusRequest={focusRequest} offsets={offsets} />
       })}
-      {panes.filter(pane => pane.tabs.length === 0).map(pane => (
-        <div key={pane.id} className={css.emptyTabHost} data-dockkit-empty style={{ gridColumn: panes.indexOf(pane) * 2 + 1, gridRow: 1 }}>
-          <TabPanel state={state} pane={pane} callbacks={callbacks} />
-        </div>
+      {[...slots].map(([id, slot]) => {
+        const pane = getPane(state, id)
+        return pane.tabs.length === 0
+          ? <div key={pane.id} className={css.emptyTabHost} data-dockkit-empty
+            data-dockkit-column={columnOf(slot)} data-dockkit-row={rowOf(slot)} style={slotStyle(slot)}>
+            <TabPanel state={state} pane={pane} callbacks={callbacks} />
+          </div>
+          : null
+      })}
+      {dividers.map(divider => (
+        <div key={`${divider.splitId}:${divider.index}`} className={clsx(css.divider, css.tabLayoutDivider)}
+          data-dockkit-divider={`${divider.splitId}:${divider.index}`} data-dockkit-axis={divider.axis}
+          style={slotStyle(divider)}
+          onPointerDown={(event) => { callbacks.onDividerPressed(divider.splitId, divider.index, event) }} />
       ))}
-      {root.kind === 'split' && <div className={clsx(css.divider, css.tabLayoutDivider)}
-        data-dockkit-divider={`${root.id}:0`} style={{ gridColumn: 2, gridRow: 1 }}
-        onPointerDown={(event) => { callbacks.onDividerPressed(root.id, 0, event) }} />}
     </div>
   )
 }

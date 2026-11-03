@@ -37,7 +37,7 @@ import { sidebarTargetFromElement, type SidebarRightTarget } from './focus.ts'
 import { randomUUID } from '@deepseek-ai/dsh-util-crypto'
 import { createSnapshotStore, type ObservableSnapshot, type SnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type { FloatRect, LayoutState, PaneId, TabId, TabRecord } from '@deepseek-ai/dsh-client-ui-dockkit'
-import { activeDockPaneId, canSplit, findContentTab, findPaneContentTab, dockPaneIds, findTabPane, getPane } from '@deepseek-ai/dsh-client-ui-dockkit'
+import { activeDockPaneId, canSplit, findContentTab, findPaneContentTab, findTabPane, getPane } from '@deepseek-ai/dsh-client-ui-dockkit'
 import type { BoundActions } from '@deepseek-ai/dsh-client-ui-slots'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { SidebarRightNavigationParams, SidebarRightResourceParams, SidebarRightTabParamsFor } from './contract/params.ts'
@@ -504,7 +504,6 @@ export class SidebarRightController implements ISidebarRight {
       && target.host === 'dock'
       && target.tabs.length > 0
       && canSplit(layout)
-      && dockPaneIds(layout).length < 2
       && this.mounted.getSnapshot() === sessionId
       && this.canSplitPane(sessionId, target.id)
     const commit = (): void => { actions.openContent(sessionId, {
@@ -737,7 +736,7 @@ export class SidebarRightController implements ISidebarRight {
     if (target.host === 'float') return 'float'
     if (!layout.expanded) return 'collapsed'
     if (getPane(layout, target.paneId).tabs.length === 0) return 'empty'
-    if (!canSplit(layout) || dockPaneIds(layout).length >= 2) return 'budget'
+    if (!canSplit(layout)) return 'budget'
     if (!this.canSplitPane(target.sessionId, target.paneId)) return 'width'
     return undefined
   }
@@ -767,7 +766,7 @@ export class SidebarRightController implements ISidebarRight {
     const target = paneId ?? activeDockPaneId(layout)
     const node = layout.nodes[target]
     if (node === undefined || node.kind !== 'pane' || node.host !== 'dock') return undefined
-    if (!canSplit(layout) || dockPaneIds(layout).length >= 2 || !this.canSplitPane(sessionId, target)) return undefined
+    if (!canSplit(layout) || !this.canSplitPane(sessionId, target)) return undefined
     let created: PaneId | undefined
     this.host.openWithFocus(sessionId, () => {
       actions.splitPane(sessionId, target, (id) => { created = id })

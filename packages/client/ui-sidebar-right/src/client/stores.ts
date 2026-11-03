@@ -346,10 +346,10 @@ export function createSidebarRightStore(
       // actions return nothing; it is not called when nothing was split.
       splitPane: (d, sessionId: string, paneId?: PaneId, settled?: (paneId: PaneId) => void) => {
         d.bySession = seat(d, sessionId, (s) => {
-          const next = advance(s, (state, mint, makeTab) => dockPaneIds(state).length >= 2
-            || getPane(state, paneId ?? activeDockPaneId(state)).tabs.length === 0
-            ? []
-            : planSplitPane(state, mint, paneId, makeTab), seed)
+          const next = advance(s, (state, mint, makeTab) =>
+            getPane(state, paneId ?? activeDockPaneId(state)).tabs.length === 0
+              ? []
+              : planSplitPane(state, mint, paneId, makeTab), seed)
           if (settled !== undefined && next !== s) {
             const before = new Set(dockPaneIds(s.layout))
             for (const id of dockPaneIds(next.layout)) {
@@ -465,13 +465,11 @@ export function createSidebarRightStore(
         d.bySession = seat(d, sessionId, s =>
           advance(s, state => arriving(state, tabId, toPaneId, () => planPlaceTab(state, tabId, toPaneId, index)), seed))
       },
-      // Only a centre release lands in the target pane; an edge release makes a
-      // new pane, where nothing can already be — and when the release drags a
-      // pane's only tab to that pane's own edge, the default page backfills it.
+      // Only a centre release lands in the target pane; an edge release splits
+      // the target pane along that edge, and when the release drags a pane's
+      // only tab to that pane's own edge, the default page backfills it.
       dropTab: (d, sessionId: string, tabId: TabId, paneId: PaneId, zone: DockZone) => {
         d.bySession = seat(d, sessionId, s => advance(s, (state, mint, makeTab) => {
-          if (zone === 'top' || zone === 'bottom') return []
-          if (zone !== 'center' && dockPaneIds(state).length >= 2) return []
           const plan = (): readonly LayoutOp[] => planDropTab(state, mint, tabId, paneId, zone, makeTab)
           return zone === 'center' ? arriving(state, tabId, paneId, plan) : plan()
         }, seed))

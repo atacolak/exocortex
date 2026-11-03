@@ -10,7 +10,7 @@
  */
 import { describe, expect, it, vi } from 'vitest'
 import type { LayoutState, PaneId, TabId } from '@deepseek-ai/dsh-client-ui-dockkit'
-import { dockPaneIds, findTabPane, getPane, getSplit } from '@deepseek-ai/dsh-client-ui-dockkit'
+import { dockPaneIds, findTabPane, getPane, getSplit, MAX_DOCK_PANES } from '@deepseek-ai/dsh-client-ui-dockkit'
 import { createSidebarRightStore } from '../src/client/stores.ts'
 import { pageAddress } from '../src/client/contract/seed.ts'
 
@@ -37,7 +37,7 @@ function harness() {
 }
 
 describe('createSidebarRightStore — the sequence', () => {
-  it.each(['left', 'right'] as const)('splits one pane at its %s edge and records the tab move as one reversible intent', (zone) => {
+  it.each([['left', 'row'], ['right', 'row'], ['top', 'column'], ['bottom', 'column']] as const)('splits one pane at its %s edge on the %s axis and records the tab move as one reversible intent', (zone, axis) => {
     const { actions, layout, entries, guide, expand } = harness()
     expand()
     actions.openContent(SESSION, {
@@ -53,8 +53,9 @@ describe('createSidebarRightStore — the sequence', () => {
 
     const split = getSplit(layout(), layout().rootId)
     const destination = findTabPane(layout(), text.id)
-    expect(split.axis).toBe('row')
-    expect(split.children).toEqual(zone === 'left' ? [destination.id, home] : [home, destination.id])
+    const leading = zone === 'left' || zone === 'top'
+    expect(split.axis).toBe(axis)
+    expect(split.children).toEqual(leading ? [destination.id, home] : [home, destination.id])
     expect(split.sizes).toEqual([0.5, 0.5])
     expect(destination.tabs).toEqual([text.id])
     expect(destination.activeTabId).toBe(text.id)
@@ -141,36 +142,39 @@ describe('createSidebarRightStore — the sequence', () => {
     expect(dockPaneIds(layout())).toEqual([secondPane])
   })
 
-  it('allows two docked panes and rejects further splits without recording', () => {
+  it('allows four docked panes and rejects further splits without recording', () => {
     const { actions, layout, entries, expand } = harness()
     expand()
-    actions.splitPane(SESSION)
-    expect(dockPaneIds(layout())).toHaveLength(2)
+    for (let count = 1; count < MAX_DOCK_PANES; count++) {
+      const settled = vi.fn<(paneId: PaneId) => void>()
+      actions.splitPane(SESSION, undefined, settled)
+      expect(dockPaneIds(layout())).toHaveLength(count + 1)
+      expect(settled).toHaveBeenCalledTimes(1)
+    }
     const before = entries()
     const settled = vi.fn()
     actions.splitPane(SESSION, undefined, settled)
-    expect(dockPaneIds(layout())).toHaveLength(2)
+    expect(dockPaneIds(layout())).toHaveLength(MAX_DOCK_PANES)
     expect(entries()).toBe(before)
     expect(settled).not.toHaveBeenCalled()
+    const pane = dockPaneIds(layout()).at(-1)!
+    actions.dropTab(SESSION, getPane(layout(), pane).tabs[0]!, pane, 'right')
+    expect(dockPaneIds(layout())).toHaveLength(MAX_DOCK_PANES)
+    expect(entries()).toBe(before)
   })
 
-  it('rejects vertical drops and keeps split ratios within twenty to eighty percent', () => {
-    const { actions, layout, entries, guide, expand } = harness()
+  it('keeps split ratios within twenty to eighty percent', () => {
+    const { actions, layout, entries, expand } = harness()
     expand()
     actions.openContent(SESSION, { kind: 'text', contentId: 'file:a', title: 'a' }, () => {})
     const before = entries()
-    actions.dropTab(SESSION, guide(), layout().activePaneId, 'top')
-    actions.dropTab(SESSION, guide(), layout().activePaneId, 'bottom')
-    expect(entries()).toBe(before)
     actions.splitPane(SESSION)
     const split = getSplit(layout(), layout().rootId).id
     actions.resizeSplit(SESSION, split, [0.01, 0.99])
     expect(getSplit(layout(), split).sizes).toEqual([0.2, 0.8])
     actions.resizeSplit(SESSION, split, [0.99, 0.01])
     expect(getSplit(layout(), split).sizes).toEqual([0.8, 0.2])
-    const splitCount = entries()
-    actions.dropTab(SESSION, guide(), layout().activePaneId, 'right')
-    expect(entries()).toBe(splitCount)
+    expect(entries()).toBeGreaterThan(before)
   })
 
   it('materializes a session empty on open without recording, then seeds the guide with the first expansion', () => {

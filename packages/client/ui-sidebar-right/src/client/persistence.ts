@@ -1,6 +1,6 @@
 /** Validated current-layout snapshots; undo history belongs to the live window. */
 import { z } from 'zod'
-import { EMPTY_HISTORY, type LayoutState } from '@deepseek-ai/dsh-client-ui-dockkit'
+import { EMPTY_HISTORY, MAX_DOCK_PANES, type LayoutState } from '@deepseek-ai/dsh-client-ui-dockkit'
 import type { SurfaceState } from './stores.ts'
 
 /** Persistence namespace shared by scoped stores and startup discovery. */
@@ -27,31 +27,42 @@ const envelope = z.object({ bySession: z.record(z.string(), z.unknown()) })
 function validateReferences(value: z.infer<typeof surface>): void {
   const { layout, minted } = value
   const reject: () => never = () => { throw new Error('Invalid saved sidebar layout references') }
-  const visited = new Set<string>()
-  const usedTabs = new Set<string>()
-  const pending = [{ id: layout.rootId, host: 'dock' }, ...layout.floats.map(id => ({ id, host: 'float' }))]
   for (const [id, entry] of [...Object.entries(layout.nodes), ...Object.entries(layout.tabs)]) {
     if (entry.id !== id || Number(id.replace(/^[a-z]+/u, '')) > minted) reject()
   }
-  for (const { id, host } of pending) {
+  const visited = new Set<string>()
+  const usedTabs = new Set<string>()
+  let dockedPanes = 0
+  const pending: { id: string; host: 'dock' | 'float' }[] = [
+    { id: layout.rootId, host: 'dock' },
+    ...layout.floats.map(id => ({ id, host: 'float' as const })),
+  ]
+  while (pending.length > 0) {
+    const { id, host } = pending.pop()!
     const entry = layout.nodes[id]
-    if (visited.has(id) || entry === undefined) reject()
+    if (entry === undefined || visited.has(id)) reject()
     visited.add(id)
     if (entry.kind === 'split') {
-      if (host !== 'dock' || id !== layout.rootId || entry.axis !== 'row' || entry.children.length !== 2
-        || entry.children.length !== entry.sizes.length
+      if (host !== 'dock' || entry.children.length < 2 || entry.children.length !== entry.sizes.length
         || Math.abs(entry.sizes.reduce((sum, size) => sum + size, 0) - 1) > 1e-9) reject()
-      pending.push(...entry.children.map(id => ({ id, host })))
+      pending.push(...entry.children.map(child => ({ id: child, host: 'dock' as const })))
+      continue
+    }
+    if (entry.host !== host) reject()
+    if (host === 'float') {
+      if (entry.rect === undefined || entry.tabs.length !== 1) reject()
     } else {
-      if (entry.host !== host || (host === 'float' ? entry.rect === undefined || entry.tabs.length !== 1 : entry.rect !== undefined)) reject()
-      if (entry.tabs.length === 0 ? entry.activeTabId !== undefined : !entry.tabs.includes(entry.activeTabId ?? '')) reject()
-      for (const tab of entry.tabs) {
-        if (usedTabs.has(tab) || layout.tabs[tab] === undefined) reject()
-        usedTabs.add(tab)
-      }
+      if (entry.rect !== undefined) reject()
+      dockedPanes += 1
+    }
+    if (entry.tabs.length === 0 ? entry.activeTabId !== undefined : !entry.tabs.includes(entry.activeTabId ?? '')) reject()
+    for (const tab of entry.tabs) {
+      if (usedTabs.has(tab) || layout.tabs[tab] === undefined) reject()
+      usedTabs.add(tab)
     }
   }
-  if (visited.size !== Object.keys(layout.nodes).length || usedTabs.size !== Object.keys(layout.tabs).length
+  if (dockedPanes === 0 || dockedPanes > MAX_DOCK_PANES
+    || visited.size !== Object.keys(layout.nodes).length || usedTabs.size !== Object.keys(layout.tabs).length
     || layout.nodes[layout.activePaneId]?.kind !== 'pane') reject()
 }
 
