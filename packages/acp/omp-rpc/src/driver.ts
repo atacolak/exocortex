@@ -341,8 +341,8 @@ export function pureUserTurns(messages: readonly RequestMessage[]): OmpUserTurn[
 interface PromptState {
   readonly id: string
   readonly channel: FrameChannel
-  readonly detach: () => void
-  readonly accepted: Promise<void>
+  detach: () => void
+  accepted: Promise<void>
   readonly commandOutputs: string[]
   readonly stash: OmpAgentEvent[]
   closed: boolean
@@ -416,7 +416,7 @@ export class OmpAgentDriver {
     } else {
       for (const turn of pending) {
         signal.throwIfAborted()
-        await this.steer(state, turn)
+        await this.steer(turn)
         this.markSent([turn])
       }
     }
@@ -513,9 +513,7 @@ export class OmpAgentDriver {
             break
           }
           case 'command_output': {
-            const text = typeof (frame as { text?: unknown }).text === 'string'
-              ? (frame as { text: string }).text
-              : undefined
+            const text = typeof frame.text === 'string' ? frame.text : undefined
             if (text !== undefined) state.commandOutputs.push(text)
             break
           }
@@ -631,6 +629,7 @@ export class OmpAgentDriver {
       type: 'prompt',
       id,
       message: text,
+      streamingBehavior: 'steer',
       ...images.length === 0 ? {} : { images },
     } as unknown as OmpRpcCommand
     state.accepted = this.client.request(prompt)
@@ -649,7 +648,7 @@ export class OmpAgentDriver {
     return state
   }
 
-  private async steer(state: PromptState, turn: OmpUserTurn): Promise<void> {
+  private async steer(turn: OmpUserTurn): Promise<void> {
     const images = await this.imagesOf([...turn.images])
     await this.client.request({
       type: 'steer',
@@ -674,7 +673,7 @@ export class OmpAgentDriver {
     return await state.channel.next()
   }
 
-  private toolStart(frame: OmpRpcFrame): OmpToolEvent | undefined {
+  private toolStart(frame: OmpAgentEvent): OmpToolEvent | undefined {
     const toolCallId = typeof frame.toolCallId === 'string' ? frame.toolCallId : ''
     const toolName = typeof frame.toolName === 'string' ? frame.toolName : ''
     if (toolCallId.length === 0 || toolName.length === 0) return undefined
@@ -686,7 +685,7 @@ export class OmpAgentDriver {
     }
   }
 
-  private toolEnd(frame: OmpRpcFrame): OmpToolEvent | undefined {
+  private toolEnd(frame: OmpAgentEvent): OmpToolEvent | undefined {
     const toolCallId = typeof frame.toolCallId === 'string' ? frame.toolCallId : ''
     const toolName = typeof frame.toolName === 'string' ? frame.toolName : ''
     if (toolCallId.length === 0 || toolName.length === 0) return undefined

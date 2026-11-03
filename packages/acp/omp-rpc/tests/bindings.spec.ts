@@ -43,7 +43,47 @@ describe('OmpBindings', () => {
     expect(JSON.parse(await readFile(file, 'utf8'))).toEqual({
       version: 1,
       sessions: { 'session-1': binding },
+      forks: {},
     })
+  })
+
+  it('persists a pending branch fork across store instances', async () => {
+    const file = join(await sandbox(), 'bindings.json')
+    const fork = {
+      forkFromPath: '/home/sf/.omp/agent/sessions/-workspace/parent.jsonl',
+      cwd: '/home/sf/workspace',
+      updatedAt: '2026-11-04T00:00:00.000Z',
+    }
+
+    await new OmpBindings(file).setFork(SessionId('child'), fork)
+
+    expect(await new OmpBindings(file).getFork(SessionId('child'))).toEqual(fork)
+    expect(JSON.parse(await readFile(file, 'utf8'))).toMatchObject({
+      forks: { child: fork },
+    })
+  })
+
+  it('drops a pending fork without touching the resumed bindings', async () => {
+    const file = join(await sandbox(), 'bindings.json')
+    const store = new OmpBindings(file)
+    await store.set(SessionId('child'), {
+      ompSessionId: 'omp-child', path: '/child.jsonl', cwd: '/c', updatedAt: '2026-11-04T00:00:00.000Z',
+    })
+    await store.setFork(SessionId('child'), {
+      forkFromPath: '/parent.jsonl', cwd: '/p', updatedAt: '2026-11-04T00:00:00.000Z',
+    })
+
+    await store.deleteFork(SessionId('child'))
+
+    expect(await store.getFork(SessionId('child'))).toBeUndefined()
+    expect(await store.get(SessionId('child'))).toMatchObject({ ompSessionId: 'omp-child' })
+  })
+
+  it('reads a bindings file written before fork records existed', async () => {
+    const file = join(await sandbox(), 'bindings.json')
+    await writeFile(file, JSON.stringify({ version: 1, sessions: {} }))
+
+    expect(await new OmpBindings(file).getFork(SessionId('child'))).toBeUndefined()
   })
 
   it('serializes concurrent writes without losing an entry', async () => {

@@ -291,6 +291,7 @@ export class SessionCommandController {
         )
       }
     }
+    this.ctx.emit('session/forked', request.sessionId, childId)
     return { sessionId: childId }
   }
 

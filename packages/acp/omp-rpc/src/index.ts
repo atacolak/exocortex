@@ -23,7 +23,9 @@ import { defaultOmpBindingsFile, OmpBindings } from './bindings.ts'
 import {
   OmpBridge,
   parseOmpCommandInput,
+  planOmpAttach,
   type OmpAttachOptions,
+  type OmpAttachPlan,
   type OmpAttachment,
 } from './bridge.ts'
 import { DEFAULT_OMP_HOST_TOOLS } from './cordis-tools.ts'
@@ -84,6 +86,8 @@ export interface OmpRpcConfig {
   readonly home?: string
   /** Attach every OMP-preset session to OMP before its first step, resuming its durable transcript binding. */
   readonly autoAttach?: boolean
+  /** hcom extension mounted into every launch; defaults to `~/.omp/agent/extensions/hcom.ts`, and an empty string disables it. */
+  readonly hcomExtension?: string
   /** Durable session-to-transcript bindings file; defaults to `$DSH_HOME/omp/bindings.json`. */
   readonly bindingsFile?: string
   /** Optional extension UI answerer supplied by a composed surface. */
@@ -101,6 +105,7 @@ export const Config: Schema<OmpRpcConfig> = Schema.object({
   cwd: Schema.string(),
   home: Schema.string(),
   autoAttach: Schema.boolean(),
+  hcomExtension: Schema.string(),
   bindingsFile: Schema.string(),
   asker: Schema.any(),
   onSurface: Schema.any(),
@@ -144,10 +149,12 @@ interface OmpTranscriptOpened {
  * @param config - executable, transcript root, profile, and host tool selection.
  */
 export function apply(ctx: Context, config: OmpRpcConfig): void {
+  const hcomExtension = config.hcomExtension ?? join(config.home ?? homedir(), '.omp', 'agent', 'extensions', 'hcom.ts')
   const bridge = new OmpBridge({
     ctx,
     subprocess: ctx.subprocess,
     executable: config.executable ?? 'omp',
+    ...hcomExtension.length === 0 ? {} : { hcomExtension },
     ...config.asker === undefined ? {} : { asker: config.asker },
     ...config.onSurface === undefined ? {} : { onSurface: config.onSurface },
   })
@@ -184,6 +191,23 @@ export function apply(ctx: Context, config: OmpRpcConfig): void {
   const warn = (message: string, error?: unknown): void => {
     ctx.logger.warn(`[omp-rpc] ${message}${error === undefined ? '' : `: ${error instanceof Error ? error.message : String(error)}`}`)
   }
+
+  const recordBranchFork = (sourceSessionId: SessionId, childSessionId: SessionId): void => {
+    void (async () => {
+      try {
+        const source = await bindings.get(sourceSessionId)
+        if (source === undefined || !(await existingFile(source.path))) return
+        await bindings.setFork(childSessionId, {
+          forkFromPath: source.path,
+          cwd: source.cwd,
+          updatedAt: new Date().toISOString(),
+        })
+      } catch (error: unknown) {
+        warn(`cannot record OMP branch for session "${childSessionId}"`, error)
+      }
+    })()
+  }
+  ctx.on('session/forked', recordBranchFork)
 
   const forgetBinding = async (id: SessionId): Promise<void> => {
     try {
@@ -307,18 +331,22 @@ export function apply(ctx: Context, config: OmpRpcConfig): void {
         if (bridge.attached(payload.agent.id)) return next()
         const profile = profileOf(payload.agent)
         if (profile === undefined) return next()
-        const binding = await readBinding(payload.agent.id)
-        const resumePath = binding !== undefined && await existingFile(binding.path) ? binding.path : undefined
+        let plan: OmpAttachPlan
+        try {
+          plan = await planOmpAttach({ sessionId: payload.agent.id, bindings })
+        } catch (error: unknown) {
+          warn(`cannot read OMP bindings for session "${payload.agent.id}"; starting a fresh OMP session`, error)
+          plan = { mode: 'attach' }
+        }
         let attachment: OmpAttachment
         try {
           attachment = await bridge.attach(payload.agent, attachOptions(payload.agent, {
-            mode: 'attach',
             preset: profile,
-            ...resumePath === undefined ? {} : { resumePath },
+            ...plan,
           }))
         } catch (error: unknown) {
-          if (resumePath === undefined) throw error
-          warn(`cannot resume transcript ${resumePath}; starting a fresh OMP session`, error)
+          if (plan.resumePath === undefined) throw error
+          warn(`cannot resume transcript ${plan.resumePath}; starting a fresh OMP session`, error)
           await forgetBinding(payload.agent.id)
           attachment = await bridge.attach(payload.agent, attachOptions(payload.agent, {
             mode: 'attach',
@@ -326,6 +354,13 @@ export function apply(ctx: Context, config: OmpRpcConfig): void {
           }))
         }
         await rememberBinding(payload.agent, attachment, profile)
+        if (plan.forkPath !== undefined) {
+          try {
+            await bindings.deleteFork(payload.agent.id)
+          } catch (error: unknown) {
+            warn(`cannot drop consumed branch fork for session "${payload.agent.id}"`, error)
+          }
+        }
         return next()
       })
     }

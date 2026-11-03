@@ -242,6 +242,24 @@ describe('OmpAgentDriver', () => {
     expect(client.promptText(1)).toBe('again')
   })
 
+  it('steers a prompt when OMP is already processing a background wake', async () => {
+    const client = new FakeClient()
+    const driver = new OmpAgentDriver(client)
+    const consume = (async () => {
+      for await (const _chunk of driver.stream(request([user('u1', 'wake reply')]), new AbortController().signal)) { /* drain */ }
+    })()
+    await tick()
+
+    expect(client.commands.find(command => command.type === 'prompt')).toMatchObject({
+      type: 'prompt',
+      message: 'wake reply',
+      streamingBehavior: 'steer',
+    })
+    client.settle()
+    settlePrompt(client)
+    await consume
+  })
+
   it('restarts a replay session when the assembled history shrinks', async () => {
     const client = new FakeClient()
     const driver = new OmpAgentDriver(client)

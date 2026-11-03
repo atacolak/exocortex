@@ -1,5 +1,15 @@
-import { describe, expect, it } from 'vitest'
-import { ompLaunchArgv, parseOmpCommandInput } from '../src/bridge.ts'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { SessionId } from '@deepseek-ai/dsh-session'
+import { afterEach, describe, expect, it } from 'vitest'
+import { OmpBindings } from '../src/bindings.ts'
+import {
+  ompLaunchArgv,
+  ompLaunchEnvironment,
+  parseOmpCommandInput,
+  planOmpAttach,
+} from '../src/bridge.ts'
 
 describe('omp commands', () => {
   it('parses a preset and a transcript identity', () => {
@@ -39,5 +49,98 @@ describe('omp commands', () => {
     expect(ompLaunchArgv({ executable: 'omp', mode: 'fork', sessionDir: '/tmp/omp', forkPath: '/tmp/s.jsonl' })).toEqual([
       'omp', '--mode', 'rpc', '--session-dir', '/tmp/omp', '--fork', '/tmp/s.jsonl',
     ])
+  })
+})
+
+describe('omp launch extensions', () => {
+  it('mounts extension modules before the RPC mode', () => {
+    expect(ompLaunchArgv({
+      executable: 'omp', mode: 'attach', sessionDir: '/tmp/omp', extensions: ['/home/x/hcom.ts'],
+    })).toEqual([
+      'omp', '-e', '/home/x/hcom.ts', '--mode', 'rpc', '--session-dir', '/tmp/omp',
+    ])
+  })
+
+  it('marks every launch as an Exocortex origin', () => {
+    expect(ompLaunchEnvironment()).toEqual({ EXOCORTEX_ENV: '1' })
+  })
+
+  it('binds the launch into hcom when the binder extension is mounted', () => {
+    expect(ompLaunchEnvironment({ hcom: true })).toEqual({
+      EXOCORTEX_ENV: '1',
+      HCOM_LAUNCHED: '1',
+    })
+  })
+})
+
+describe('omp transcript planning', () => {
+  const roots: string[] = []
+  const session = (id: string): SessionId => SessionId(id)
+
+  async function workdir(): Promise<string> {
+    const root = await mkdtemp(join(tmpdir(), 'omp-plan-'))
+    roots.push(root)
+    return root
+  }
+
+  async function transcript(root: string, name: string): Promise<string> {
+    const path = join(root, name)
+    await writeFile(path, '')
+    return path
+  }
+
+  afterEach(async () => {
+    await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
+  })
+
+  it('resumes the transcript this session already owns', async () => {
+    const root = await workdir()
+    const bindings = new OmpBindings(join(root, 'bindings.json'))
+    const path = await transcript(root, 'own.jsonl')
+    await bindings.set(session('child'), {
+      ompSessionId: 'omp-own', path, cwd: root, updatedAt: '2026-11-04T00:00:00.000Z',
+    })
+    expect(await planOmpAttach({ sessionId: session('child'), bindings })).toEqual({
+      mode: 'attach', resumePath: path,
+    })
+  })
+
+  it('forks the recorded branch parent when this session owns no transcript', async () => {
+    const root = await workdir()
+    const bindings = new OmpBindings(join(root, 'bindings.json'))
+    const path = await transcript(root, 'parent.jsonl')
+    await bindings.setFork(session('child'), {
+      forkFromPath: path, cwd: root, updatedAt: '2026-11-04T00:00:00.000Z',
+    })
+    expect(await planOmpAttach({ sessionId: session('child'), bindings })).toEqual({
+      mode: 'fork', forkPath: path,
+    })
+  })
+
+  it('starts fresh when the recorded branch parent is gone', async () => {
+    const root = await workdir()
+    const bindings = new OmpBindings(join(root, 'bindings.json'))
+    await bindings.setFork(session('child'), {
+      forkFromPath: join(root, 'missing.jsonl'), cwd: root, updatedAt: '2026-11-04T00:00:00.000Z',
+    })
+    expect(await planOmpAttach({ sessionId: session('child'), bindings })).toEqual({
+      mode: 'attach',
+    })
+  })
+
+  it('prefers an own transcript over the recorded branch parent', async () => {
+    const root = await workdir()
+    const bindings = new OmpBindings(join(root, 'bindings.json'))
+    const own = await transcript(root, 'own.jsonl')
+    const parent = await transcript(root, 'parent.jsonl')
+    await bindings.set(session('child'), {
+      ompSessionId: 'omp-own', path: own, cwd: root, updatedAt: '2026-11-04T00:00:00.000Z',
+    })
+    await bindings.setFork(session('child'), {
+      forkFromPath: parent, cwd: root, updatedAt: '2026-11-04T00:00:00.000Z',
+    })
+    expect(await planOmpAttach({ sessionId: session('child'), bindings })).toEqual({
+      mode: 'attach', resumePath: own,
+    })
   })
 })

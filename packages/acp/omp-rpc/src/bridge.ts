@@ -1,10 +1,11 @@
-import { mkdir } from 'node:fs/promises'
+import { mkdir, stat } from 'node:fs/promises'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentStepStream } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-commands'
 import { createToolResultMessage, createUserMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
+import type { OmpBindings } from './bindings.ts'
 import { OmpModelCatalogSync, type CatalogSyncOutcome, type OmpModelSelection } from './catalog.ts'
 import { OmpRpcClient } from './client.ts'
 import { DEFAULT_OMP_HOST_TOOLS, ompCordisHostTools } from './cordis-tools.ts'
@@ -12,7 +13,13 @@ import { OmpAgentDriver, type OmpImageInput, type OmpImageRef, type OmpToolEvent
 import { OmpHostToolBridge } from './host-tools.ts'
 import { launchOmp, type LaunchedOmp } from './launch.ts'
 import { OmpUiBridge, type OmpUiAsker } from './ui.ts'
-import type { OmpExtensionUiRequest, OmpRpcCommand } from './types.ts'
+import type { OmpExtensionUiRequest, OmpPromptResultFrame, OmpRpcCommand } from './types.ts'
+
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'omp-continue': { kind: 'omp-continue' }
+  }
+}
 
 /** How a harness agent joins an OMP process. */
 export type OmpAttachMode = 'attach' | 'fork'
@@ -72,6 +79,8 @@ export interface OmpBridgeOptions {
   readonly subprocess: SubprocessRuntime
   /** OMP executable name or absolute path resolved by the subprocess provider. */
   readonly executable: string
+  /** hcom extension mounted into every launch; omitted starts unregistered processes. */
+  readonly hcomExtension?: string
   readonly asker?: OmpUiAsker
   readonly onSurface?: (request: OmpExtensionUiRequest) => void
 }
@@ -96,7 +105,7 @@ export function parseOmpCommandInput(rawInput: string): OmpCommandInput {
  * Build the OMP RPC argv for one attachment. Fork starts a fresh transcript so
  * the harness history is replayed into it; attach resumes an explicitly named
  * transcript, and starts a fresh one in the shared OMP root when none is named.
- * @param options - executable, mode, profile, and transcript directory.
+ * @param options - executable, mode, profile, extension modules, and transcript directory.
  * @returns argv beginning with the OMP executable.
  */
 export function ompLaunchArgv(options: {
@@ -107,8 +116,13 @@ export function ompLaunchArgv(options: {
   readonly sessionId?: string
   readonly resumePath?: string
   readonly forkPath?: string
+  readonly extensions?: readonly string[]
 }): string[] {
-  const argv = [options.executable, '--mode', 'rpc', '--session-dir', options.sessionDir]
+  const argv = [
+    options.executable,
+    ...(options.extensions ?? []).flatMap(extension => ['-e', extension]),
+    '--mode', 'rpc', '--session-dir', options.sessionDir,
+  ]
   if (options.preset !== undefined) argv.push('--agent', options.preset)
   if (options.mode === 'attach') {
     if (options.resumePath !== undefined) argv.push('--resume', options.resumePath)
@@ -117,6 +131,59 @@ export function ompLaunchArgv(options: {
     argv.push('--fork', options.forkPath)
   }
   return argv
+}
+
+/**
+ * Environment every OMP RPC launch inherits. `EXOCORTEX_ENV` marks the process
+ * as Exocortex-owned; the hcom extension binds identities only when the launch
+ * carries `HCOM_LAUNCHED`.
+ * @param options - whether the mounted extensions include the hcom binder.
+ * @returns the environment additions for the OMP child process.
+ */
+export function ompLaunchEnvironment(options: { readonly hcom?: boolean } = {}): Record<string, string> {
+  return {
+    EXOCORTEX_ENV: '1',
+    ...options.hcom === true ? { HCOM_LAUNCHED: '1' } : {},
+  }
+}
+
+/** How one harness session joins an OMP transcript. */
+export interface OmpAttachPlan {
+  readonly mode: OmpAttachMode
+  /** OMP session id to resume for `attach`. */
+  readonly sessionId?: string
+  /** Transcript path to resume for `attach`; wins over {@link sessionId}. */
+  readonly resumePath?: string
+  /** Parent transcript path to copy for `fork`. */
+  readonly forkPath?: string
+}
+
+async function existingFile(path: string): Promise<boolean> {
+  const info = await stat(path).catch(() => undefined)
+  return info?.isFile() === true
+}
+
+/**
+ * Resolve how one harness session joins OMP: resume the transcript it already
+ * owns, else fork the parent transcript recorded for a Branch child, else start
+ * a fresh transcript. A recorded transcript is only usable while its file
+ * remains on disk.
+ * @param options - harness session identity and durable bindings.
+ * @returns the attach or fork inputs for {@link OmpBridge.attach}.
+ */
+export async function planOmpAttach(options: {
+  readonly sessionId: SessionId
+  readonly bindings: Pick<OmpBindings, 'get' | 'getFork'>
+}): Promise<OmpAttachPlan> {
+  const own = await options.bindings.get(options.sessionId)
+  if (own !== undefined && await existingFile(own.path)) {
+    return { mode: 'attach', resumePath: own.path }
+  }
+  const fork = await options.bindings.getFork(options.sessionId)
+  if (fork !== undefined && await existingFile(fork.forkFromPath)) {
+    return { mode: 'fork', forkPath: fork.forkFromPath }
+  }
+  return { mode: 'attach' }
 }
 
 interface LiveAttachment {
@@ -161,10 +228,18 @@ export class OmpBridge {
     await this.detach(agent.id)
     await mkdir(options.sessionDir, { recursive: true })
     const executable = await this.options.subprocess.resolveExecutable(this.options.executable, undefined)
+    const hcomExtension = this.options.hcomExtension !== undefined
+      && await existingFile(this.options.hcomExtension)
+      ? this.options.hcomExtension
+      : undefined
     const launched = launchOmp(this.options.subprocess, {
-      argv: ompLaunchArgv({ ...options, executable }),
+      argv: ompLaunchArgv({
+        ...options,
+        executable,
+        ...hcomExtension === undefined ? {} : { extensions: [hcomExtension] },
+      }),
       cwd: options.cwd,
-      env: { EXOCORTEX_ENV: '1' },
+      env: ompLaunchEnvironment({ hcom: hcomExtension !== undefined }),
     })
     let client: OmpRpcClient | undefined
     try {
@@ -284,7 +359,7 @@ export class OmpBridge {
   private continueTurn(agent: Agent): void {
     agent.inbox.append('next-step', createUserMessage({
       content: [{ type: 'text', text: 'omp:continue' }],
-      source: { kind: 'runtime-context' },
+      source: { kind: 'omp-continue' },
     }))
   }
 
@@ -376,10 +451,11 @@ export async function runOmpCommand(
   const stop = client.onFrame((frame) => {
     if (frame.type === 'command_output' && typeof frame.text === 'string') outputs.push(frame.text)
     if (frame.type !== 'prompt_result') return
+    const result = frame as OmpPromptResultFrame
     settled = true
     resolve({
-      status: frame.status,
-      ...frame.error?.message === undefined ? {} : { message: frame.error.message },
+      status: result.status,
+      ...result.error?.message === undefined ? {} : { message: result.error.message },
     })
   })
   const abort = (): void => {

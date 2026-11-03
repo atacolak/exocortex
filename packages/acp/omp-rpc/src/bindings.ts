@@ -24,6 +24,20 @@ export interface OmpBinding {
   readonly updatedAt: string
 }
 
+/**
+ * One pending native fork recorded when a Harness session was branched from
+ * another; the first attachment copies this transcript and then drops the
+ * record.
+ */
+export interface OmpForkBinding {
+  /** Absolute parent transcript path the first attachment forks. */
+  readonly forkFromPath: string
+  /** Working directory of the parent transcript. */
+  readonly cwd: string
+  /** ISO timestamp when the branch was recorded. */
+  readonly updatedAt: string
+}
+
 /** A bindings file that exists but cannot be read or understood. */
 export class OmpBindingsError extends Error {
   /**
@@ -39,6 +53,7 @@ export class OmpBindingsError extends Error {
 interface OmpBindingsFile {
   readonly version: 1
   readonly sessions: Readonly<Record<string, OmpBinding>>
+  readonly forks: Readonly<Record<string, OmpForkBinding>>
 }
 
 const BINDINGS_VERSION = 1
@@ -71,6 +86,19 @@ function bindingOf(value: unknown): OmpBinding | undefined {
   }
 }
 
+function forkBindingOf(value: unknown): OmpForkBinding | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const record = value as Record<string, unknown>
+  if (typeof record.forkFromPath !== 'string' || record.forkFromPath.length === 0) return undefined
+  if (typeof record.cwd !== 'string' || record.cwd.length === 0) return undefined
+  if (typeof record.updatedAt !== 'string' || record.updatedAt.length === 0) return undefined
+  return {
+    forkFromPath: record.forkFromPath,
+    cwd: record.cwd,
+    updatedAt: record.updatedAt,
+  }
+}
+
 function bindingsFileOf(text: string, path: string): OmpBindingsFile {
   let parsed: unknown
   try {
@@ -94,7 +122,18 @@ function bindingsFileOf(text: string, path: string): OmpBindingsFile {
     if (binding === undefined) throw new OmpBindingsError(`OMP bindings file has an invalid entry "${id}": ${path}`)
     sessions[id] = binding
   }
-  return { version: BINDINGS_VERSION, sessions }
+  const forks: Record<string, OmpForkBinding> = {}
+  if (record.forks !== undefined) {
+    if (typeof record.forks !== 'object' || record.forks === null || Array.isArray(record.forks)) {
+      throw new OmpBindingsError(`OMP bindings file has no forks object: ${path}`)
+    }
+    for (const [id, value] of Object.entries(record.forks)) {
+      const fork = forkBindingOf(value)
+      if (fork === undefined) throw new OmpBindingsError(`OMP bindings file has an invalid fork entry "${id}": ${path}`)
+      forks[id] = fork
+    }
+  }
+  return { version: BINDINGS_VERSION, sessions, forks }
 }
 
 /**
@@ -133,6 +172,7 @@ export class OmpBindings {
       const next: OmpBindingsFile = {
         version: BINDINGS_VERSION,
         sessions: { ...state.sessions, [id]: binding },
+        forks: state.forks,
       }
       await this.write(next)
       this.state = next
@@ -149,7 +189,51 @@ export class OmpBindings {
       if (state.sessions[id] === undefined) return
       const sessions = { ...state.sessions }
       delete sessions[id]
-      const next: OmpBindingsFile = { version: BINDINGS_VERSION, sessions }
+      const next: OmpBindingsFile = { version: BINDINGS_VERSION, sessions, forks: state.forks }
+      await this.write(next)
+      this.state = next
+    })
+  }
+
+  /**
+   * Read the pending native fork for one Branch child.
+   * @param id - Harness session identity.
+   * @returns the recorded parent transcript, or undefined when no branch awaits attachment.
+   */
+  async getFork(id: SessionId): Promise<OmpForkBinding | undefined> {
+    await this.tail
+    return (await this.load()).forks[id]
+  }
+
+  /**
+   * Record the parent transcript a Branch child forks at its first attachment.
+   * @param id - Harness session identity.
+   * @param fork - parent transcript facts to persist.
+   */
+  async setFork(id: SessionId, fork: OmpForkBinding): Promise<void> {
+    await this.enqueue(async () => {
+      const state = await this.load()
+      const next: OmpBindingsFile = {
+        version: BINDINGS_VERSION,
+        sessions: state.sessions,
+        forks: { ...state.forks, [id]: fork },
+      }
+      await this.write(next)
+      this.state = next
+    })
+  }
+
+  /**
+   * Forget one pending native fork; other bindings and forks stay intact.
+   * @param id - Harness session identity.
+   */
+  async deleteFork(id: SessionId): Promise<void> {
+    await this.enqueue(async () => {
+      const state = await this.load()
+      if (state.forks[id] === undefined) return
+      const forks = { ...state.forks }
+      delete forks[id]
+      const next: OmpBindingsFile = { version: BINDINGS_VERSION, sessions: state.sessions, forks }
       await this.write(next)
       this.state = next
     })
@@ -162,7 +246,7 @@ export class OmpBindings {
       throw new OmpBindingsError(`cannot read OMP bindings file: ${this.file}`, { cause: error })
     })
     this.state = text === undefined
-      ? { version: BINDINGS_VERSION, sessions: {} }
+      ? { version: BINDINGS_VERSION, sessions: {}, forks: {} }
       : bindingsFileOf(text, this.file)
     return this.state
   }
