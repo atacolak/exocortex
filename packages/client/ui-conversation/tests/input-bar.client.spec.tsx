@@ -293,6 +293,17 @@ function writeDraft(shell: SessionInputShell, text: string): void {
   act(() => { shell.setDraft(text) })
 }
 
+describe('expand affordance', () => {
+  it('appears on the hero composer as soon as the draft overflows', () => {
+    const { view, shell } = bench({ variant: 'hero' })
+    const scrollport = view.container.querySelector<HTMLElement>('[data-input-scroll]')!
+    Object.defineProperty(scrollport, 'clientHeight', { value: 100, configurable: true })
+    Object.defineProperty(scrollport, 'scrollHeight', { value: 400, configurable: true })
+    writeDraft(shell, 'a draft taller than the collapsed scrollport')
+    expect(view.getByRole('button', { name: '展开输入框' })).toBeTruthy()
+  })
+})
+
 describe('composer focus handoff', () => {
   it.each(['hero', 'composer'] as const)('focuses the %s editor when its card background is pressed', (variant) => {
     const { view, shell, textarea } = bench({ variant })

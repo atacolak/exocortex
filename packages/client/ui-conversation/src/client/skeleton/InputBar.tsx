@@ -522,7 +522,7 @@ export const InputBar = memo(function InputBar({
           <div className={css.overlayAnchor} data-composer-overlay>{renderSlot('conversation.input.overlay', {})}</div>
         )}
         {accessory !== undefined && <div className={css.accessory}>{accessory}</div>}
-        {variant === 'composer' && showExpand && (
+        {!workspaceTrigger && showExpand && (
           <Tooltip label={t(expanded ? 'input.collapse' : 'input.expand')} side="top" delayMs={500}>
             <button
               type="button"

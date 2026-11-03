@@ -180,7 +180,7 @@
 .expand {
   position: absolute;
   top: 8px;
-  right: 10px;
+  right: 14px;
   z-index: 2;
   display: grid;
   place-items: center;
@@ -215,7 +215,7 @@
    so the draft's tail never hides behind it. */
 .card[data-composer-scrollable] .input,
 .card[data-composer-expanded] .input {
-  padding-right: 34px;
+  padding-right: 40px;
 }
 
 @media (hover: none), (pointer: coarse) {
