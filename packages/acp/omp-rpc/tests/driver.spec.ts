@@ -189,7 +189,7 @@ describe('pureUserTurns', () => {
   it('keeps real user prose and images and drops assembled context and echoes', () => {
     const image = {
       type: 'image' as const,
-      attachment: { attachmentId: 'img-1', mediaType: 'image/png' },
+      attachment: { attachmentId: 'img-1' as never, mediaType: 'image/png' as const, bytes: 68, width: 1, height: 1 },
     }
     const messages: GenerateOptions['messages'] = [
       user('u1', 'first'),
