@@ -6,6 +6,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
 import type { SessionBinding } from '@deepseek-ai/dsh-api-session-controller/client'
+import type { PromptContentPart } from '@deepseek-ai/dsh-api-session-controller/types'
+import { bytesToBase64 } from '@deepseek-ai/dsh-util-crypto'
 import type { GroupKey } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { createSnapshotStore, type ObservableSnapshot } from '@deepseek-ai/dsh-client-store'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
@@ -28,6 +30,7 @@ import type {
   ChatFlowDataInjected, ChatFlowInjected, ChatNodeInjected, ChatScrollPosition, ChatViewInjected,
   QuotaNoticeInjected, QuotaNoticeState,
 } from './contract/slots.ts'
+import type { ChatNode } from './contract/chat-nodes.ts'
 import type { ChatSnapshot } from './contract/snapshot.ts'
 import { EMPTY_CHAT_SNAPSHOT } from './contract/snapshot.ts'
 import { ApprovalCommand } from './chat/ApprovalCommand.tsx'
@@ -73,6 +76,45 @@ export const CHAT_NODE_INJECT: ChatNodeInjected = {
     disclosure: (_standard, { disclosureReset }) => bindDisclosure(disclosureReset),
     groupAction: (_standard, { useGroupAction }) => useGroupAction,
   },
+}
+
+/** One durable user block replayed through the browser's prompt contract. */
+interface ReplayBlock {
+  readonly type: string
+  readonly text?: string
+  readonly attachment?: ImageAttachmentRef
+  readonly offloaded?: true
+}
+
+/**
+ * Rebuild a submitted prompt from the durable user message. File blocks carry
+ * upload receipts that only the draft owns, so a replay keeps text and images.
+ * @param session - Session binding whose attachment scope resolves images.
+ * @param content - Durable user content in submission order.
+ * @returns Prompt parts, or null when nothing replayable remains.
+ */
+export async function replayUserContent(
+  session: SessionBinding['session'],
+  content: readonly unknown[],
+): Promise<PromptContentPart[] | null> {
+  const parts: PromptContentPart[] = []
+  for (const raw of content as readonly ReplayBlock[]) {
+    if (raw.type === 'text' && typeof raw.text === 'string' && raw.text !== '') {
+      parts.push({ type: 'text', text: raw.text })
+      continue
+    }
+    if (raw.type !== 'image' || raw.attachment === undefined || raw.offloaded === true) continue
+    const attachment = raw.attachment
+    const resolved = await session.readAttachment(attachment)
+    if (!resolved.ok) continue
+    parts.push({
+      type: 'image',
+      mediaType: attachment.mediaType,
+      data: bytesToBase64(resolved.value.data),
+      ...attachment.name === undefined ? {} : { name: attachment.name },
+    })
+  }
+  return parts.length === 0 ? null : parts
 }
 
 /** Services required by the Chat target and its presentation registrations. */
@@ -297,6 +339,18 @@ export function apply(ctx: Context): void {
               else chatScrollPositions.set(sessionId, position)
             },
             read: () => chatScrollPositions.get(sessionId) ?? null,
+          },
+          retryTurn: (turn) => {
+            const snapshot = chat.getSnapshot()
+            const source = snapshot.locations.getTurn(turn)
+              .map(key => snapshot.nodes.get(key))
+              .find((candidate): candidate is ChatNode<'user'> => candidate?.kind === 'user')
+            if (source === undefined) return
+            void replayUserContent(session, source.data.content).then((parts) => {
+              if (parts !== null) return session.prompt(parts, 'queue')
+            }).catch(() => {
+              // A rejected replay leaves the transcript and Session untouched.
+            })
           },
           forkAt: (seq) => {
             const turn = [...chat.getSnapshot().timeline.turns.values()].find(turn => turn.end?.seq === seq)

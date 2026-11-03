@@ -51,6 +51,14 @@ describe('DocumentTitle', () => {
     expect(document.title).toBe('DeepSeek Harness')
   })
 
+  it('strips private-use NerdFont glyphs that browser chrome renders as tofu', () => {
+    const { sessionId, sessions, props } = titleSources()
+    sessions.update((state) => { state.byId[sessionId]!.title = '\u{f0626} Testing the Todo \uE0B0' })
+    document.title = 'stale title'
+    render(<DocumentTitle {...props} productTitle="Exocortex" />)
+    expect(document.title).toBe('Testing the Todo — Exocortex')
+  })
+
   it('uses the localized product title supplied by the frame', () => {
     const { sessionId, sessions, props } = titleSources()
     sessions.update((state) => { state.byId[sessionId]!.title = 'First title' })

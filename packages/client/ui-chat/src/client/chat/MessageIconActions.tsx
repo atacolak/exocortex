@@ -1,9 +1,11 @@
 // Shared IconActions chrome for user and assistant messages: copy
-// live, optional branch wiring, and an optional date-aware clock.
+// live, a Retry/Branch more menu on settled answers, and an optional
+// date-aware clock.
 
-import { useId, type ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import {
-  IconBranchOutlineRegular, IconCheckOutlineRegular, IconCopyOutlineRegular, Tooltip, useClipboardCopy,
+  IconBranchOutlineRegular, IconCheckOutlineRegular, IconCopyOutlineRegular, IconEllipsisOutlineRegular,
+  IconRefreshOutlineRegular, Menu, MenuItemButton, Tooltip, useClipboardCopy,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ChatViewSlotProps } from '../contract/slots.ts'
 import { formatMessageClock } from './message-chrome.ts'
@@ -21,16 +23,18 @@ export interface MessageIconActionsProps {
   onBranch?: (() => void) | undefined
   /** The message is not a completed transcript tail, so branch stays visible but unavailable. */
   branchUnavailable?: boolean | undefined
+  /** Re-submit this Turn's user content; omission hides the retry action. */
+  onRetry?: (() => void) | undefined
   /** Parent layout class composed onto the actions row. */
   className?: string | undefined
   /**
    * Slot-rendered actions owned by independent plugins, placed between the
-   * built-in copy and branch controls.
+   * built-in copy and more controls.
    */
   extraActions?: ReactNode
   /**
    * Icon-row Turn-usage trigger (the TurnUsagePanel pill), seated after the
-   * branch control at the end of the icon cluster.
+   * more control at the end of the icon cluster.
    */
   usageAction?: ReactNode
   /** The owning view's locale seat, passed down as a plain prop. */
@@ -38,22 +42,24 @@ export interface MessageIconActionsProps {
 }
 
 /**
- * Copy / branch (/ clock) IconActions row shared by user and assistant chrome.
- * @param props - Copy text, event time, clock side, branch callback, className.
+ * Copy / more (/ clock) IconActions row shared by user and assistant chrome.
+ * @param props - Copy text, event time, clock side, retry and branch callbacks, className.
  * @returns The actions row element.
  */
 export function MessageIconActions({
-  text, time, clock, onBranch, branchUnavailable = false, className,
+  text, time, clock, onBranch, branchUnavailable = false, onRetry, className,
   extraActions, usageAction, t,
 }: MessageIconActionsProps) {
   const day = useCalendarDay()
-  const reasonId = useId()
+  const [open, setOpen] = useState(false)
   const { copied, onCopy } = useClipboardCopy(text)
   const clockEl = time === undefined ? null : (
     <span className={clock === 'start' ? css.timeStart : css.timeEnd}>
       {formatMessageClock(time, t, day)}
     </span>
   )
+  const close = (): void => { setOpen(false) }
+  const hasMenu = onRetry !== undefined || onBranch !== undefined
   return (
     <div className={className === undefined ? css.actions : `${css.actions} ${className}`} data-clock={clock}>
       {clock === 'start' ? clockEl : null}
@@ -63,24 +69,47 @@ export function MessageIconActions({
         </button>
       </Tooltip>
       {extraActions}
-      {onBranch !== undefined && (
-        <Tooltip label={branchUnavailable ? t('message.branchUnavailable') : t('message.branch')} side="bottom" openOnClick={branchUnavailable}>
-          {/* Native disabled buttons do not deliver the hover/focus events Tooltip needs. */}
-          <button
-            type="button"
-            className={css.action}
-            aria-label={t('message.branch')}
-            aria-disabled={branchUnavailable || undefined}
-            aria-describedby={branchUnavailable ? reasonId : undefined}
-            data-unavailable={branchUnavailable || undefined}
-            onClick={branchUnavailable ? undefined : onBranch}
-          >
-            <IconBranchOutlineRegular />
-          </button>
-        </Tooltip>
-      )}
-      {onBranch !== undefined && branchUnavailable && (
-        <span id={reasonId} className={css.visuallyHidden}>{t('message.branchUnavailable')}</span>
+      {hasMenu && (
+        <Menu
+          open={open}
+          onClose={close}
+          portal
+          autoFocus
+          side="bottom"
+          align="end"
+          anchor={(
+            <Tooltip label={t('message.actions')} side="bottom">
+              <button
+                type="button"
+                className={css.action}
+                aria-label={t('message.actions')}
+                aria-haspopup="menu"
+                aria-expanded={open}
+                onClick={() => { setOpen(value => !value) }}
+              >
+                <IconEllipsisOutlineRegular />
+              </button>
+            </Tooltip>
+          )}
+        >
+          {onRetry !== undefined && (
+            <MenuItemButton icon={<IconRefreshOutlineRegular />} onSelect={() => {
+              close()
+              onRetry()
+            }}>{t('message.retry')}</MenuItemButton>
+          )}
+          {onBranch !== undefined && (
+            <MenuItemButton
+              icon={<IconBranchOutlineRegular />}
+              disabled={branchUnavailable}
+              disabledReason={branchUnavailable ? t('message.branchUnavailable') : undefined}
+              onSelect={() => {
+                close()
+                onBranch()
+              }}
+            >{t('message.branch')}</MenuItemButton>
+          )}
+        </Menu>
       )}
       {clock === 'end'
         ? <span className={css.endInfo}>{usageAction}{clockEl}</span>

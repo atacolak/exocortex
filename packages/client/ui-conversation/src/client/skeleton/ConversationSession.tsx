@@ -2,11 +2,12 @@
 
 import { useLayoutEffect, useMemo, useRef, useState } from 'react'
 import clsx from 'clsx'
-import { Button, IconEllipsisOutlineRegular, Menu, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, IconEditOutlineRegular, IconEllipsisOutlineRegular, Menu, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SessionListState, SessionSummary } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type {
-  ConversationSessionHeaderSlotProps, ConversationSessionSlotProps, ConversationViewActionsOwnerProps,
+  ConversationSessionHeaderInjected, ConversationSessionHeaderSlotProps, ConversationSessionSlotProps,
+  ConversationViewActionsOwnerProps,
 } from '../contract/slots.ts'
 import { resolveActiveView } from '../view-selection.ts'
 import { FIXED_VIEW_ID } from '../view-pins.ts'
@@ -100,6 +101,111 @@ function equalBreadcrumbs(left: readonly Breadcrumb[], right: readonly Breadcrum
     })
 }
 
+/** Approximate caret width of one editable title in `ch` units, clamped to the row. */
+function titleWidthUnits(text: string): number {
+  let units = 0
+  for (const glyph of text) units += WIDE_GLYPH.test(glyph) ? 2 : 1
+  return Math.min(64, Math.max(6, units + 1))
+}
+
+interface SessionTitleProps {
+  readonly sessionId: SessionId
+  readonly title: string
+  readonly subagent: boolean
+  readonly renameSession: ConversationSessionHeaderInjected['renameSession']
+  readonly t: ConversationSessionHeaderSlotProps['t']
+}
+
+/**
+ * The current Session title as plain text on the window drag row; a click, the
+ * hover pencil, or Enter on the pencil swaps it for an auto-sized input that
+ * saves through the same Session rename the sidebar uses.
+ */
+function SessionTitle({ sessionId, title, subagent, renameSession, t }: SessionTitleProps) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(title)
+  const [error, setError] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
+  const composing = useRef(false)
+  const settled = useRef(false)
+  const input = useRef<HTMLInputElement>(null)
+  useLayoutEffect(() => {
+    if (!editing) return
+    input.current?.focus()
+    input.current?.select()
+  }, [editing])
+  const begin = (): void => {
+    setDraft(title)
+    setError(null)
+    setSaving(false)
+    settled.current = false
+    setEditing(true)
+  }
+  const cancel = (): void => {
+    settled.current = true
+    setEditing(false)
+    setError(null)
+    setSaving(false)
+  }
+  const commit = (): void => {
+    if (settled.current || saving) return
+    const next = draft.trim()
+    // The sidebar's rule: a Session must carry a name, an unchanged title is allowed.
+    if (next === '') { cancel(); return }
+    settled.current = true
+    setSaving(true)
+    renameSession(sessionId, next).then(() => {
+      setSaving(false)
+      setEditing(false)
+    }).catch((reason: unknown) => {
+      settled.current = false
+      setSaving(false)
+      setError(reason instanceof Error ? reason.message : String(reason))
+      input.current?.focus()
+    })
+  }
+  if (editing) {
+    return (
+      <>
+        <input
+          ref={input}
+          className={clsx(css.crumbTitleInput, subagent && css.crumbSubagent)}
+          style={{ width: `${titleWidthUnits(draft)}ch` }}
+          value={draft}
+          aria-label={t('session.rename')}
+          aria-invalid={error !== null}
+          disabled={saving}
+          onChange={(event) => { setDraft(event.target.value); setError(null) }}
+          onCompositionStart={() => { composing.current = true }}
+          onCompositionEnd={() => { composing.current = false }}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' && !composing.current) {
+              event.preventDefault()
+              commit()
+            }
+            if (event.key === 'Escape') {
+              event.preventDefault()
+              cancel()
+            }
+          }}
+          onBlur={commit}
+        />
+        {error !== null && <span className={css.crumbRenameError} role="alert">{error}</span>}
+      </>
+    )
+  }
+  return (
+    <>
+      <span className={clsx(css.crumb, subagent && css.crumbSubagent, css.crumbCurrent)} title={t('session.rename')} onClick={begin}>
+        {title}
+      </span>
+      <button type="button" className={css.crumbEdit} aria-label={t('session.rename')} onClick={begin}>
+        <IconEditOutlineRegular size={13} />
+      </button>
+    </>
+  )
+}
+
 /**
  * Renders Session header chrome above the resident conversation scrollport.
  * @param props - Strict Session store, view ledger, navigation, render, and locale shares.
@@ -107,7 +213,7 @@ function equalBreadcrumbs(left: readonly Breadcrumb[], right: readonly Breadcrum
  */
 export function ConversationSessionHeader({
   sessionId, hideChrome, useSessions, useConversationViews, useStore,
-  renderSlot, open, useContextMenu, selectView, setPinned, t, useEntryPins, useEntryActions,
+  renderSlot, open, renameSession, useContextMenu, selectView, setPinned, t, useEntryPins, useEntryActions,
 }: ConversationSessionHeaderProps) {
   const { getTriggerProps } = useContextMenu()
   const tabs = useConversationViews(value => value)
@@ -157,9 +263,13 @@ export function ConversationSessionHeader({
                   // base.css) and leave the title inert for dragging too.
                   const title = last
                     ? (
-                      <span className={clsx(css.crumb, summary.subagent && css.crumbSubagent, css.crumbCurrent)}>
-                        {summary.displayTitle}
-                      </span>
+                      <SessionTitle
+                        sessionId={summary.id}
+                        title={summary.displayTitle}
+                        subagent={summary.subagent}
+                        renameSession={renameSession}
+                        t={t}
+                      />
                     )
                     : (
                       <button

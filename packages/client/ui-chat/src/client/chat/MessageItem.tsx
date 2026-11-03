@@ -3,7 +3,9 @@ import type { ReactNode } from 'react'
 import type { PendingSubmission } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { PropsRenderFactories, PropsRenderSlots } from '@deepseek-ai/dsh-client-ui-slots'
 import type { UserTextFacts } from '@deepseek-ai/dsh-client-ui-conversation/client'
-import { JsonBlock, StateDot, TextShimmer } from '@deepseek-ai/dsh-client-ui-primitives'
+import {
+  Button, IconRefreshOutlineRegular, JsonBlock, StateDot, TextShimmer,
+} from '@deepseek-ai/dsh-client-ui-primitives'
 import type {
   ChatNodeOwnerProps, ChatNodeViewProps, ChatViewSlotProps, UserContentAttachment, UserContentData, UserContentInput,
 } from '../contract/slots.ts'
@@ -129,18 +131,26 @@ function ModelRetryItem({ node, active, t }: {
 }
 
 /** Persistent, turn-positioned feedback for a terminal failure. */
-function TurnErrorItem({ node, t }: {
+function TurnErrorItem({ node, onRetry, t }: {
   node: TurnErrorNode
+  onRetry?: (() => void) | undefined
   t: ChatViewSlotProps['t']
 }) {
   return (
-    <div className={css.turnErrorRow} role="status">
-      <StateDot state="error" className={css.turnErrorDot} />
-      <div className={css.turnErrorCopy}>
-        <span className={css.turnErrorTitle}>{node.code === 'ACCOUNT_SIGNED_OUT' || node.code === 'INTERRUPTED' ? t('message.taskStopped') : t('message.turnError')}</span>
-        <span className={css.turnErrorMessage}>{failureMessage(node.message, node.code, t)}</span>
+    <div className={css.turnErrorRow} data-turn-error={node.turn}>
+      <div className={css.turnErrorStatus} role="status">
+        <StateDot state="error" className={css.turnErrorDot} />
+        <div className={css.turnErrorCopy}>
+          <span className={css.turnErrorTitle}>{node.code === 'ACCOUNT_SIGNED_OUT' || node.code === 'INTERRUPTED' ? t('message.taskStopped') : t('message.turnError')}</span>
+          <span className={css.turnErrorMessage}>{failureMessage(node.message, node.code, t)}</span>
+        </div>
+        {node.code !== undefined && node.code !== 'INTERRUPTED' && <code className={css.turnErrorCode}>{node.code}</code>}
       </div>
-      {node.code !== undefined && node.code !== 'INTERRUPTED' && <code className={css.turnErrorCode}>{node.code}</code>}
+      {onRetry !== undefined && (
+        <Button variant="ghost" size="sm" className={css.turnErrorRetry} icon={<IconRefreshOutlineRegular />} onClick={onRetry}>
+          {t('message.retry')}
+        </Button>
+      )}
     </div>
   )
 }
@@ -386,8 +396,9 @@ export const RetryNodeView = memo(function RetryNodeView({ node, t }: ChatNodeVi
 })
 
 /** Terminal turn-error keyed Chat renderer. */
-export const TurnErrorNodeView = memo(function TurnErrorNodeView({ node, t }: ChatNodeViewProps<'turn-error'>) {
-  return <TurnErrorItem node={node.data} t={t} />
+export const TurnErrorNodeView = memo(function TurnErrorNodeView({ node, retryTurn, t, useAccess }: ChatNodeViewProps<'turn-error'>) {
+  const retryAllowed = useAccess('session/prompt') !== false
+  return <TurnErrorItem node={node.data} {...retryAllowed ? { onRetry: () => { retryTurn(node.data.turn) } } : {}} t={t} />
 })
 
 /** Max-tokens turn-end notice keyed Chat renderer. */

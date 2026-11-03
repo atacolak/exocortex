@@ -242,6 +242,8 @@ export interface ChatNodeOwnerProps {
   openFile: (path: string, options?: OpenFileOptions) => void
   inspectCall: ((callId: ToolCallId) => void) | undefined
   forkAt: (seq: number) => void
+  /** Re-submit this Turn's user content as a fresh prompt on the same Session. */
+  retryTurn: (turn: number) => void
   /** Session-authorized image loader supplied by the Chat view. */
   loadImage: MessageImageLoader
   /** Turn-process state when this Node belongs to a projected Turn. */
@@ -356,6 +358,7 @@ export interface ChatViewInjected {
     read: () => ChatScrollPosition | null
   }
   forkAt: (seq: number) => void
+  retryTurn: (turn: number) => void
 }
 
 /** Session-owned node sources shared with the view, plus the flow's connection state. */
@@ -368,7 +371,7 @@ export type ChatFlowDataInjected = Pick<ChatViewInjected, 'keyedHooks'> & {
 
 /** Ordered rows and reconciled local echoes rendered inside one Chat viewport. */
 export interface ChatFlowOwnerProps extends Pick<ChatNodeOwnerProps,
-  'cwd' | 'openFile' | 'inspectCall' | 'forkAt' | 'loadImage'> {
+  'cwd' | 'openFile' | 'inspectCall' | 'forkAt' | 'retryTurn' | 'loadImage'> {
   readonly entries: readonly RenderEntry[]
   readonly pendingInputs: readonly (PendingSubmission | InboxState['next-step'][number])[]
   readonly lastInputTurn: number | undefined

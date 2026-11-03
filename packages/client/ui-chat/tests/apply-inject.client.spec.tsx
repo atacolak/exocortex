@@ -292,6 +292,26 @@ describe('Chat inject API', () => {
     await b.runtime.dispose()
   })
 
+  it('replays a turn user prompt with its images on the same Session', async () => {
+    const b = await bench()
+    const { replayUserContent } = await import('../src/client/apply.ts')
+    const parts = await replayUserContent(b.session as never, [
+      { type: 'text', text: 'again' },
+      { type: 'file', attachment: { attachmentId: AttachmentId('file-1') } },
+      { type: 'image', attachment: ATTACHMENT },
+    ])
+    expect(b.session.readAttachment).toHaveBeenCalledWith(ATTACHMENT)
+    expect(parts).toEqual([
+      { type: 'text', text: 'again' },
+      { type: 'image', mediaType: 'image/png', data: 'AQ==' },
+    ])
+
+    b.session.readAttachment.mockResolvedValueOnce({ ok: false, error: { code: 'NOT_FOUND' } as never })
+    expect(await replayUserContent(b.session as never, [{ type: 'image', attachment: ATTACHMENT }])).toBeNull()
+    expect(await replayUserContent(b.session as never, [{ type: 'text', text: '' }])).toBeNull()
+    await b.runtime.dispose()
+  })
+
   it('addresses file paths under the Session\'s scope and opens them in the right Sidebar', async () => {
     const b = await bench()
     const { injected } = b.chatViewApi(b.rootReference)

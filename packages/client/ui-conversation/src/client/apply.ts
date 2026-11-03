@@ -57,6 +57,13 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
   }
 }
 
+declare module '@deepseek-ai/dsh-api-session-controller/client' {
+  interface SessionReferenceSourceMap {
+    /** A Session header inline rename held only until the Remote reply settles. */
+    sessionHeaderRename: unknown
+  }
+}
+
 /** Services required by the Conversation plugin. */
 export const inject = [
   'slots', 'sessions', 'fileUpload', 'uiSession', 'uiWorkspace', 'locale', 'configForms',
@@ -452,6 +459,14 @@ export function apply(ctx: Context, config: Config = Config({})): void {
       hooks: { conversationViews, entryPins: viewPins.unpinned, entryActions: viewActions },
       setPinned: viewPins.setPinned,
       open: (id) => { workspaceNavigation.openSession(id) },
+      renameSession: async (id, title) => {
+        const result = await sessions.using(
+          id,
+          { source: 'sessionHeaderRename' },
+          reference => reference.binding.session.rename(title),
+        )
+        if (!result.ok) throw new Error(result.error.message)
+      },
       selectView: (view) => {
         activateView(sessionId, view)
         actions.setView(view)
