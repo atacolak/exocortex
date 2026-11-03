@@ -9,8 +9,6 @@ import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ToolCallViewProps } from '../../contract/slots.ts'
 import {
   isBackgroundShellCall,
-  isSettledPersistentShellCall,
-  isSpilledShellCall,
   localizeTerminalCardModel,
   terminalBlockLabels,
   terminalCardModel,
@@ -58,11 +56,11 @@ export const BashRow = memo(function BashRow({ toolName, block, sessionId, useSe
   const status = stateStatus(state, t)
   const { expanded, toggle: toggleExpand } = useDisclosure()
   const background = isBackgroundShellCall(block)
-  // Failed or interrupted background launches retain raw input/output, as do
-  // other execution failures, persistent results, and spill previews.
-  const genericBody = terminal === null
-    && (model.state === 'error' || isSettledPersistentShellCall(block) || isSpilledShellCall(block) || background)
-    && (model.bodyRaw !== null || model.output !== null)
+  const hasBody = model.bodyRaw !== null || model.output !== null
+  // Every dispatched shell keeps its plain-text input and output reachable:
+  // without a terminal card, the row itself is the disclosure. Preparation is
+  // the one stage that stays collapsed, because the call is still streaming.
+  const genericBody = terminal === null && hasBody && model.state !== 'preparing'
   const expandable = terminal !== null || genericBody
   const open = expanded && expandable
   const body = useMemo(
@@ -71,12 +69,16 @@ export const BashRow = memo(function BashRow({ toolName, block, sessionId, useSe
       : null,
     [genericBody, model.bodyRaw, model.variant, open],
   )
-  // The intent heading already states the task; the terminal description would repeat it.
-  const normalSummary = (model.intent === undefined ? terminal?.description : undefined) ?? model.summary
+  // The intent heading already states the task; the command (or terminal
+  // description) waits for the disclosure so the collapsed row reads as one
+  // sentence.
+  const authoredSummary = (model.intent === undefined ? terminal?.description : undefined) ?? model.summary
+  const visibleSummary = model.intent !== undefined && !open ? '' : authoredSummary
   const exitLabel = terminalExitLabel(terminalModel, t)
   const settlementLine = exitLabel !== null ? null : state === 'error'
-    ? model.errorSummary ?? normalSummary
+    ? model.errorSummary ?? visibleSummary
     : state === 'stopped' ? t('bash.stopped') : null
+  const summaryText = settlementLine ?? visibleSummary
   const running = state === 'running' || state === 'preparing'
   const toggleFromKeyboard = useCallback((event: KeyboardEvent<HTMLDivElement>) => {
     if (!expandable || (event.key !== 'Enter' && event.key !== ' ')) return
@@ -111,14 +113,18 @@ export const BashRow = memo(function BashRow({ toolName, block, sessionId, useSe
         {status !== null && <span className={css.visuallyHidden}>{status}</span>}
         <TextShimmer active={running}>
           <TextShimmer className={css.title}>{model.intent ?? t(model.titleKey)}</TextShimmer>
-          <span className={css.sep} data-shimmer-decoration aria-hidden />
-          <span className={clsx(
-            css.summary,
-            exitLabel === null && state === 'error' && css.errorSummary,
-            exitLabel === null && state === 'stopped' && css.stoppedSummary,
-          )}>
-            <TextShimmer>{settlementLine ?? normalSummary}</TextShimmer>
-          </span>
+          {summaryText !== '' && (
+            <>
+              <span className={css.sep} data-shimmer-decoration aria-hidden />
+              <span className={clsx(
+                css.summary,
+                exitLabel === null && state === 'error' && css.errorSummary,
+                exitLabel === null && state === 'stopped' && css.stoppedSummary,
+              )}>
+                <TextShimmer>{summaryText}</TextShimmer>
+              </span>
+            </>
+          )}
           {exitLabel !== null && <ExitCodeBadge label={exitLabel} />}
         </TextShimmer>
       </div>

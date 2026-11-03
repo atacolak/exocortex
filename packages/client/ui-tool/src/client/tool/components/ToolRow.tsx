@@ -40,7 +40,8 @@ export interface ToolRowProps {
   title: string
   /**
    * The model's own task intent. When present it becomes the collapsed
-   * heading in place of the localized tool title; the summary still follows.
+   * heading in place of the localized tool title, and the raw summary stays
+   * behind the disclosure until the row expands.
    */
   intent?: string | undefined
   summary: string
@@ -191,9 +192,12 @@ export const ToolRow = memo(function ToolRow({
   )
   const status = stateStatus(state, t)
   const running = state === 'running' || state === 'preparing'
-  // The intent heading already states the task; the terminal description would repeat it.
-  const normalSummary = (intent === undefined ? terminalBody?.description : undefined)
-    ?? (open ? detailsBody?.expandedSummary ?? summary : summary)
+  // The intent heading already states the task; its raw command/path summary
+  // waits for the disclosure so the collapsed row reads as one sentence.
+  const intentCollapsed = intent !== undefined && !open
+  const normalSummary = intentCollapsed ? ''
+    : (intent === undefined ? terminalBody?.description : undefined)
+      ?? (open ? detailsBody?.expandedSummary ?? summary : summary)
   const exitLabel = terminalExitLabel(terminal, t)
   // Generic failures retain their first result line; command exits keep their description.
   const failureLine = state === 'error' && exitLabel === null ? errorSummary ?? normalSummary : null
@@ -201,8 +205,8 @@ export const ToolRow = memo(function ToolRow({
   // Diff totals remain visible after the optional summary suffix.
   const diffStat = useMemo(() => diffBody === null ? null : diffTotals(diffBody.card.diffs), [diffBody])
   const settledWithCue = state === 'error' || state === 'stopped'
-  const suffix = settledWithCue ? null : summarySuffix ?? null
-  const totals = settledWithCue ? null : diffStat
+  const suffix = settledWithCue || intentCollapsed ? null : summarySuffix ?? null
+  const totals = settledWithCue || intentCollapsed ? null : diffStat
   const openFile = useMemo(() => filePath !== undefined && onOpenFile !== undefined && !settledWithCue
     ? (event: MouseEvent<HTMLButtonElement>) => {
       event.stopPropagation()
@@ -222,49 +226,53 @@ export const ToolRow = memo(function ToolRow({
   // The code variant's program renders through CodeBlock (shiki), so only its
   // output joins the IN/OUT card; every other variant's input does too.
   const cardBody = variant === 'code' ? null : bodyText
-  const collapsedContent = useMemo(() => summaryText !== '' && (
-    /* An empty summary drops the separator with it (a row that is only
-       its title shows no trailing dot). */
+  const collapsedContent = useMemo(() => (summaryText !== '' || exitLabel !== null) && (
+    /* A row that is only its title shows neither a trailing separator nor a
+       summary; an exit capsule still stands on its own. */
     <>
-      <span className={css.sep} data-shimmer-decoration aria-hidden />
-      {exitLabel === null && openFile !== undefined ? (
-        <button
-          type="button"
-          className={css.fileLink}
-          {...fileContextMenuProps}
-          onClick={openFile}
-          onKeyDown={(event) => {
-            summaryLinkKeyDown(event)
-            fileContextMenuProps?.onKeyDown?.(event)
-          }}
-        >
-          <TextShimmer>{summaryText}</TextShimmer>
-        </button>
-      ) : exitLabel === null && linkHref !== undefined ? (
-        <a
-          className={css.fileLink}
-          href={linkHref}
-          {...urlContextMenuProps}
-          target="_blank"
-          rel="noopener noreferrer"
-          onClick={stopLinkClick}
-          onKeyDown={(event) => {
-            summaryLinkKeyDown(event)
-            urlContextMenuProps?.onKeyDown?.(event)
-          }}
-        >
-          <TextShimmer>{summaryText}</TextShimmer>
-        </a>
-      ) : (
-        <span
-          className={clsx(
-            css.summary,
-            exitLabel === null && state === 'error' && css.errorSummary,
-            exitLabel === null && state === 'stopped' && css.stoppedSummary,
+      {summaryText !== '' && (
+        <>
+          <span className={css.sep} data-shimmer-decoration aria-hidden />
+          {exitLabel === null && openFile !== undefined ? (
+            <button
+              type="button"
+              className={css.fileLink}
+              {...fileContextMenuProps}
+              onClick={openFile}
+              onKeyDown={(event) => {
+                summaryLinkKeyDown(event)
+                fileContextMenuProps?.onKeyDown?.(event)
+              }}
+            >
+              <TextShimmer>{summaryText}</TextShimmer>
+            </button>
+          ) : exitLabel === null && linkHref !== undefined ? (
+            <a
+              className={css.fileLink}
+              href={linkHref}
+              {...urlContextMenuProps}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={stopLinkClick}
+              onKeyDown={(event) => {
+                summaryLinkKeyDown(event)
+                urlContextMenuProps?.onKeyDown?.(event)
+              }}
+            >
+              <TextShimmer>{summaryText}</TextShimmer>
+            </a>
+          ) : (
+            <span
+              className={clsx(
+                css.summary,
+                exitLabel === null && state === 'error' && css.errorSummary,
+                exitLabel === null && state === 'stopped' && css.stoppedSummary,
+              )}
+            >
+              <TextShimmer>{summaryText}</TextShimmer>
+            </span>
           )}
-        >
-          <TextShimmer>{summaryText}</TextShimmer>
-        </span>
+        </>
       )}
       {exitLabel !== null && <ExitCodeBadge label={exitLabel} />}
       {suffix !== null && (
