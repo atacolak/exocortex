@@ -17,7 +17,8 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import type { ChangeEvent, KeyboardEvent, MouseEvent } from 'react'
 import clsx from 'clsx'
 import {
-  focusWithoutRing, IconPlusOutlineMedium, IconWarningOutlineRegular, isMobileDevice, Toast, Tooltip,
+  focusWithoutRing, IconFullscreenOutlineRegular, IconPlusOutlineMedium, IconWarningOutlineRegular, isMobileDevice, Toast,
+  Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 // Type-only: the `plan` projection key merge (the TodoDock posture — the
 // composer reads a host-computed value; the domain owns the key).
@@ -67,7 +68,9 @@ export const InputBar = memo(function InputBar({
   void useLexicon // hook seat stays bound by the inject compartment; text-ref decoration rides the shell's editor transforms
   const commandMenuOpen = useMenuLauncher(source => source === 'command')
   const [activity, setActivity] = useState(false)
+  const [expanded, setExpanded] = useState(false)
   useEffect(() => { setActivity(false) }, [sessionId])
+  useEffect(() => { setExpanded(false) }, [sessionId])
   const promptError = useSession(s => s.promptError) ?? null
   const running = useSession(s => s.running) ?? false
   const subagent = useSession(s => s.subagent) ?? null
@@ -270,8 +273,19 @@ export const InputBar = memo(function InputBar({
       }
       return addFiles(files, directories)
     })()
-    if (rejected !== null) showToast(rejected)
-  }, [uploadDenied, locked, machineBusy, subagent, continuable, addFiles, attachments, imageLimits, showToast, t])
+    if (rejected !== null) {
+      showToast(rejected)
+      return
+    }
+    // Each accepted image gets a stable-looking `[Image #N]` marker at the
+    // caret: the sent prompt then names the attachment it travels with, and
+    // the rail badge carries the same ordinal. Numbering continues after the
+    // images already staged in this draft.
+    const images = files.filter(file => !directories?.has(file) && isImageMediaType(file.type))
+    if (images.length === 0 || keyboard === undefined) return
+    const used = attachments.filter(attachment => attachment.kind === 'image').length
+    keyboard.paste(images.map((_, index) => `[Image #${String(used + index + 1)}]`).join(' '))
+  }, [uploadDenied, locked, machineBusy, subagent, continuable, addFiles, attachments, imageLimits, showToast, t, keyboard])
 
   const canAcceptDrop = !uploadDenied && (subagent === null || continuable) && !locked && !machineBusy && addFiles !== undefined
 
@@ -440,6 +454,7 @@ export const InputBar = memo(function InputBar({
         tabIndex={-1}
         className={clsx(css.card, workspaceTrigger && css.cardWorkspaceTrigger)}
         data-composer-card
+        data-composer-expanded={expanded || undefined}
         onClick={workspaceTrigger ? onRequestWorkspace : undefined}
         onPointerDown={workspaceTrigger ? (e) => { e.stopPropagation() } : undefined}
         onMouseDown={onCardMouseDown}
@@ -448,6 +463,20 @@ export const InputBar = memo(function InputBar({
           <div className={css.overlayAnchor} data-composer-overlay>{renderSlot('conversation.input.overlay', {})}</div>
         )}
         {accessory !== undefined && <div className={css.accessory}>{accessory}</div>}
+        {variant === 'composer' && (
+          <Tooltip label={t(expanded ? 'input.collapse' : 'input.expand')} side="top" delayMs={500}>
+            <button
+              type="button"
+              className={css.expand}
+              aria-label={t(expanded ? 'input.collapse' : 'input.expand')}
+              aria-expanded={expanded}
+              onMouseDown={keepFocus}
+              onClick={() => { setExpanded(value => !value) }}
+            >
+              <IconFullscreenOutlineRegular size={14} />
+            </button>
+          </Tooltip>
+        )}
         {renderSlot('conversation.input.attachments', {
           attachments,
           canAcceptDrop,

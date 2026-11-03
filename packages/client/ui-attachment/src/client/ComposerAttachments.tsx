@@ -50,6 +50,16 @@ export function ComposerAttachments({
     id: attachment.id,
     attachment,
   })), [attachments])
+  const imageOrdinals = useMemo(() => {
+    const ordinals = new Map<string, number>()
+    let ordinal = 0
+    for (const attachment of attachments) {
+      if (attachment.kind !== 'image') continue
+      ordinal += 1
+      ordinals.set(attachment.id, ordinal)
+    }
+    return ordinals
+  }, [attachments])
 
   return (
     <>
@@ -89,11 +99,15 @@ export function ComposerAttachments({
               // The refusal is the only explanation of its warning, so a tap or click also pins it.
               const upload = uploads[attachment.id]
               const name = attachment.file.name || t('image.pending')
+              const ordinal = imageOrdinals.get(attachment.id)
               const refusal = upload?.status === 'error' && upload.reason !== undefined
                 ? uploadFailureText(upload.reason)
                 : undefined
               return (
                 <div className={css.imageItem}>
+                  {ordinal !== undefined && (
+                    <span className={css.badge} aria-hidden>#{ordinal}</span>
+                  )}
                   {refusal !== undefined
                     ? (
                       <Tooltip label={refusal} side="top" delayMs={300} portal openOnClick>

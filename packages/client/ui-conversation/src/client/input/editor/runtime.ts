@@ -2,14 +2,16 @@
 import type { ObservableSnapshot } from '@deepseek-ai/dsh-client-store'
 import type { LexicalEditor, NodeKey } from 'lexical'
 import {
-  $addUpdateTag, $createParagraphNode, $createTextNode, $getAdjacentNode, $isTextNode,
+  $addUpdateTag, $createLineBreakNode, $createParagraphNode, $createTextNode, $getAdjacentNode, $isTextNode,
   $getRoot, $getSelection, $getNodeByKey, $isRangeSelection,
   BLUR_COMMAND, CLEAR_HISTORY_COMMAND, COMMAND_PRIORITY_BEFORE_CRITICAL, COMMAND_PRIORITY_CRITICAL, createEditor,
   HISTORY_MERGE_TAG, PASTE_TAG,
   RootNode, SELECTION_CHANGE_COMMAND, SKIP_DOM_SELECTION_TAG, KEY_BACKSPACE_COMMAND, KEY_DELETE_COMMAND, HISTORY_PUSH_TAG,
 } from 'lexical'
+import type { ParagraphNode } from 'lexical'
 import { registerPlainText } from '@lexical/plain-text'
 import { createEmptyHistoryState, registerHistory } from '@lexical/history'
+import { CodeNode, $createCodeNode } from '@lexical/code'
 import { mergeRegister } from '@lexical/utils'
 import type { DraftQuote, DraftReference, ReferenceInsert } from '../../contract/draft-editor.ts'
 import type { CommandClaim } from '../../contract/input.ts'
@@ -20,6 +22,7 @@ import { ReferenceChipNode, $createReferenceChipNode } from './chip-node.tsx'
 import { CommandChipNode, $createCommandChipNode, registerCommandChipSeat } from './command-chip-node.tsx'
 import { registerCommandChipSelection } from './command-chip-selection.ts'
 import { registerTextRefDecoration, rescanTextRefs, TextRefNode } from './text-ref.ts'
+import { parseInlineMarkdown } from './markdown.ts'
 import type { EditorProjection } from './projection.ts'
 import { $composerLayout, $projectComposer, detectOffsetOfClipboardOffset } from './projection.ts'
 import { $replaceDetectSpanWithNodes, $replaceDetectSpanWithText } from './span-map.ts'
@@ -45,18 +48,77 @@ interface DraftEditorRuntimeDeps {
 const REFERENCE_PLACEHOLDER_RE = /[\uE100-\uE11D\uFFFC]/gu
 
 /**
- * Append one paragraph per line of `text` to the editor root and move the caret
- * to the end. Must run inside an editor update.
- * @param text - sanitized plain text.
+ * Append one paragraph per line of `text` to the editor root, restoring the
+ * inline Markdown the composer emits and turning fenced runs into code nodes,
+ * and move the caret to the end. Must run inside an editor update.
+ * @param text - sanitized draft text.
  */
 function $appendParagraphs(text: string): void {
   const root = $getRoot()
-  for (const line of text.split('\n')) {
-    const paragraph = $createParagraphNode()
-    if (line !== '') paragraph.append($createTextNode(line))
-    root.append(paragraph)
+  for (const block of markdownBlocks(text)) {
+    if (block.kind === 'paragraph') {
+      const paragraph = $createParagraphNode()
+      $appendInlineMarkdown(paragraph, block.line)
+      root.append(paragraph)
+      continue
+    }
+    const code = $createCodeNode(block.language)
+    block.lines.forEach((line, index) => {
+      if (index > 0) code.append($createLineBreakNode())
+      if (line !== '') code.append($createTextNode(line))
+    })
+    root.append(code)
   }
   root.selectEnd()
+}
+
+/** One restored block: a plain line or a fenced code run. */
+type MarkdownBlock =
+  | { readonly kind: 'paragraph'; readonly line: string }
+  | { readonly kind: 'code'; readonly language: string | undefined; readonly lines: readonly string[] }
+
+/**
+ * Split draft text into paragraphs and fenced code runs. A fence left open
+ * keeps the remaining lines as code; its closing fence is restored on
+ * serialization, so the text stays recoverable either way.
+ * @param text - draft text with newlines.
+ * @returns blocks in document order; empty text yields one empty paragraph.
+ */
+function markdownBlocks(text: string): MarkdownBlock[] {
+  const blocks: MarkdownBlock[] = []
+  let code: { language: string | undefined; lines: string[] } | null = null
+  for (const line of text.split('\n')) {
+    if (code !== null) {
+      if (/^```\s*$/u.test(line)) {
+        blocks.push({ kind: 'code', language: code.language, lines: code.lines })
+        code = null
+        continue
+      }
+      code.lines.push(line)
+      continue
+    }
+    const open = /^```(.*)$/u.exec(line)
+    if (open !== null) {
+      code = { language: open[1]?.trim() === '' ? undefined : open[1]?.trim(), lines: [] }
+      continue
+    }
+    blocks.push({ kind: 'paragraph', line })
+  }
+  if (code !== null) blocks.push({ kind: 'code', language: code.language, lines: code.lines })
+  return blocks
+}
+
+/**
+ * Append the inline runs of one Markdown line to a paragraph.
+ * @param paragraph - the paragraph receiving the runs.
+ * @param line - one line of draft text.
+ */
+function $appendInlineMarkdown(paragraph: ParagraphNode, line: string): void {
+  for (const run of parseInlineMarkdown(line)) {
+    const node = $createTextNode(run.text)
+    if (run.format !== 0) node.setFormat(run.format)
+    paragraph.append(node)
+  }
 }
 
 /** Undo merge window for contiguous typing, in ms (the old machine's mergeWindowMs). */
@@ -83,7 +145,7 @@ export class DraftEditorRuntime {
   constructor(private readonly deps: DraftEditorRuntimeDeps) {
     this.editor = createEditor({
       namespace: 'dsh-composer',
-      nodes: [ReferenceChipNode, CommandChipNode, TextRefNode, QuoteNode],
+      nodes: [ReferenceChipNode, CommandChipNode, TextRefNode, QuoteNode, CodeNode],
       onError: (error) => { throw error },
     })
   }
@@ -435,7 +497,7 @@ export class DraftEditorRuntime {
         const lines = text.replace(REFERENCE_PLACEHOLDER_RE, '').split('\n')
         for (let i = 0; i < lines.length; i += 1) {
           const line = lines[i]
-          if (line !== '') paragraph.append($createTextNode(line))
+          if (line !== undefined && line !== '') $appendInlineMarkdown(paragraph, line)
           if (i < lines.length - 1) {
             paragraph = $createParagraphNode()
             root.append(paragraph)

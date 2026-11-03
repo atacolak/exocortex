@@ -11,20 +11,22 @@ import type { ElementNode, LexicalNode, NodeKey, Point } from 'lexical'
 import {
   $getRoot, $getSelection, $isElementNode, $isLineBreakNode, $isRangeSelection, $isTextNode,
 } from 'lexical'
+import { $isCodeNode } from '@lexical/code'
 import type { DraftQuote, Occurrence } from '../../contract/draft-editor.ts'
 import type { CommandClaim } from '../../contract/input.ts'
 import { $isQuoteNode } from './QuoteNode.tsx'
 import { $isReferenceChipNode } from './chip-node.tsx'
 import { $isCommandChipNode } from './command-chip-node.tsx'
+import { inlineMarkdown } from './markdown.ts'
 
 /** The detect-projection stand-in for one chip (object replacement character). */
 export const ATOMIC_CHAR = '￼'
 
 /** One leaf (or gap) of the composer document in projection coordinates. */
 export interface ComposerSegment {
-  /** text/linebreak carry a node; chip is atomic; gap is the newline between block elements. */
-  readonly kind: 'text' | 'chip' | 'linebreak' | 'gap'
-  /** The backing node; null only for gap. */
+  /** text/linebreak carry a node; chip is atomic; gap/newline markup belongs to no node. */
+  readonly kind: 'text' | 'chip' | 'linebreak' | 'gap' | 'markup'
+  /** The backing node; null for gap and markup. */
   readonly node: LexicalNode | null
   readonly detectStart: number
   readonly detectLength: number
@@ -77,7 +79,15 @@ export function $composerLayout(): ComposerLayout {
     clipboard += clipboardPiece
   }
 
-  const walkElement = (element: ElementNode): void => {
+  const pushMarkup = (clipboardPiece: string): void => {
+    segments.push({
+      kind: 'markup', node: null, detectStart: detect.length, detectLength: 0,
+      clipboardStart: clipboard.length, clipboardLength: clipboardPiece.length,
+    })
+    clipboard += clipboardPiece
+  }
+
+  const walkElement = (element: ElementNode, inCodeBlock = false): void => {
     const start = detect.length
     const kids = element.getChildren()
     children.set(element.getKey(), kids.map(kid => kid.getKey()))
@@ -86,17 +96,25 @@ export function $composerLayout(): ComposerLayout {
         pushLeaf('chip', kid, ATOMIC_CHAR, kid.getTextContent())
       } else if ($isTextNode(kid)) {
         const text = kid.getTextContent()
-        pushLeaf('text', kid, text, text)
+        pushLeaf('text', kid, text, inCodeBlock ? text : inlineMarkdown(text, kid.getFormat()))
       } else if ($isLineBreakNode(kid)) {
         pushLeaf('linebreak', kid, '\n', '\n')
       } else if ($isElementNode(kid)) {
         /* v8 ignore next 4 -- plain-text composition nests no block elements today; the walk stays total for imported states. */
-        walkElement(kid)
+        walkElement(kid, inCodeBlock)
       }
-      // Unknown inline decorators contribute nothing: this composer registers
-      // no other decorator type, so the arm is unreachable by construction.
     }
     bounds.set(element.getKey(), { start, end: detect.length })
+  }
+
+  const walkBlock = (block: ElementNode): void => {
+    if (!$isCodeNode(block)) {
+      walkElement(block)
+      return
+    }
+    pushMarkup(`\`\`\`${block.getLanguage() ?? ''}\n`)
+    walkElement(block, true)
+    pushMarkup('\n```')
   }
 
   const root = $getRoot()
@@ -118,7 +136,7 @@ export function $composerLayout(): ComposerLayout {
       detect += '\n'
       clipboard += '\n'
     }
-    if ($isElementNode(block)) walkElement(block)
+    if ($isElementNode(block)) walkBlock(block)
   })
   bounds.set(root.getKey(), { start: rootStart, end: detect.length })
 
@@ -146,6 +164,7 @@ export function detectOffsetOfClipboardOffset(layout: ComposerLayout, clipboardO
   for (const segment of layout.segments) {
     const end = segment.clipboardStart + segment.clipboardLength
     if (clipboardOffset > end) continue
+    if (segment.kind === 'markup') return segment.detectStart
     if (clipboardOffset === end) return segment.detectStart + segment.detectLength
     if (segment.kind === 'chip') return segment.detectStart + segment.detectLength
     return segment.detectStart + (clipboardOffset - segment.clipboardStart)

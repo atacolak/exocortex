@@ -24,6 +24,7 @@ import {
 import { mergeRegister } from '@lexical/utils'
 import type { ArbitrateKey, ArbitrateOutcome } from '../../contract/draft-editor.ts'
 import { $isQuoteNode } from './QuoteNode.tsx'
+import { $isSelectionInCodeBlock, $toggleCodeBlock, $toggleInlineFormat } from './formatting.ts'
 
 /** The bar-supplied behavior behind each intercepted gesture. */
 export interface ComposerKeymapHandlers {
@@ -222,6 +223,24 @@ export function registerComposerKeymap(editor: LexicalEditor, handlers: Composer
       if (key === 'a') return moveBeforeQuote(editor, event)
       return false
     }, COMMAND_PRIORITY_CRITICAL),
+    // Markdown formatting: Cmd/Ctrl+B, +I, and +E toggle inline runs at the
+    // selection, word, or next-typed-character level; Cmd/Ctrl+Shift+E toggles
+    // a fenced block. Every gesture is consumed so the browser's own
+    // contenteditable bold/italic never races the editor state.
+    editor.registerCommand(KEY_DOWN_COMMAND, (event) => {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey) return false
+      const key = event.key.toLowerCase()
+      if (key === 'e' && event.shiftKey) {
+        event.preventDefault()
+        $toggleCodeBlock()
+        return true
+      }
+      if (event.shiftKey) return false
+      if (key !== 'b' && key !== 'i' && key !== 'e') return false
+      event.preventDefault()
+      $toggleInlineFormat(key === 'b' ? 'bold' : key === 'i' ? 'italic' : 'code')
+      return true
+    }, COMMAND_PRIORITY_CRITICAL),
     editor.registerCommand(MOVE_TO_END, event => movePastQuote(editor, event), COMMAND_PRIORITY_CRITICAL),
     editor.registerUpdateListener(syncComposition),
     editor.registerCommand(KEY_ARROW_UP_COMMAND, arrow('up'), COMMAND_PRIORITY_CRITICAL),
@@ -272,6 +291,9 @@ export function registerComposerKeymap(editor: LexicalEditor, handlers: Composer
         event?.preventDefault()
         return true
       }
+      // Inside a fenced block Enter is content, not a send: fall through to
+      // the plain-text line break both here and in the browser fallback.
+      if ($isSelectionInCodeBlock()) return false
       event?.preventDefault()
       if (event?.repeat === true) return true // held-down Enter must not machine-gun sends
       if (!handlers.canSubmit()) return true

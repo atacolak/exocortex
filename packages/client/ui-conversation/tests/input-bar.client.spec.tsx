@@ -485,7 +485,7 @@ describe('image draft rail', () => {
       },
     })
     expect(addFiles).toHaveBeenCalledWith([image], undefined)
-    await vi.waitFor(() => { expect(shell.snapshot.draft).toBe('一起发送的文字') })
+    await vi.waitFor(() => { expect(shell.snapshot.draft).toBe('[Image #1]一起发送的文字') })
     expect(attachmentOwner(slotCalls).canAcceptDrop).toBe(true)
     act(() => { attachmentOwner(slotCalls).onAddFiles([image]) })
     expect(addFiles).toHaveBeenCalledTimes(2)
@@ -537,7 +537,7 @@ describe('image draft rail', () => {
     })
     expect(addFiles).toHaveBeenCalledWith([image], undefined)
     // The paste lands inside the PASTE_COMMAND update; its commit is a microtask away.
-    await vi.waitFor(() => { expect(shell.snapshot.draft).toBe('同时粘贴的文字') })
+    await vi.waitFor(() => { expect(shell.snapshot.draft).toBe('[Image #1]同时粘贴的文字') })
   })
 
   it('passes known clipboard directories and keeps files whose entry metadata is unavailable', () => {
