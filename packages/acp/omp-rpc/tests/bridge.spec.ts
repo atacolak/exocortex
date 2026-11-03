@@ -34,4 +34,10 @@ describe('omp commands', () => {
       'omp', '--mode', 'rpc', '--session-dir', '/tmp/omp',
     ])
   })
+
+  it('forks the attached transcript natively', () => {
+    expect(ompLaunchArgv({ executable: 'omp', mode: 'fork', sessionDir: '/tmp/omp', forkPath: '/tmp/s.jsonl' })).toEqual([
+      'omp', '--mode', 'rpc', '--session-dir', '/tmp/omp', '--fork', '/tmp/s.jsonl',
+    ])
+  })
 })

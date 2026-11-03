@@ -159,6 +159,7 @@ export function apply(ctx: Context, config: OmpRpcConfig): void {
     readonly preset?: string
     readonly sessionId?: string
     readonly resumePath?: string
+    readonly forkPath?: string
     readonly cwd?: string
   }): OmpAttachOptions => {
     const cwd = options.cwd ?? agent.session.header.cwd ?? config.cwd
@@ -367,15 +368,18 @@ export function apply(ctx: Context, config: OmpRpcConfig): void {
 
   ctx.effect(() => ctx.commands.register({
     name: 'omp-fork',
-    description: 'Start a fresh OMP RPC process and replay this session history into it.',
-    input: { hint: '<preset>' },
+    description: 'Fork the attached OMP transcript natively, or start a fresh OMP process replaying this session when nothing is attached.',
+    input: { hint: '[preset]' },
     async handler(invocation) {
       try {
         const input = parseOmpCommandInput(invocation.rawInput)
-        if (input.sessionId !== undefined) throw new Error('/omp-fork starts a fresh transcript and accepts only a preset')
+        if (input.sessionId !== undefined) throw new Error('/omp-fork accepts only a preset')
+        const binding = await readBinding(invocation.agent.id)
+        const forkPath = binding !== undefined && await existingFile(binding.path) ? binding.path : undefined
         const attachment = await bridge.attach(invocation.agent, attachOptions(invocation.agent, {
           mode: 'fork',
           ...input,
+          ...forkPath === undefined ? {} : { forkPath },
         }))
         await rememberBinding(invocation.agent, attachment, input.preset)
         return { kind: 'success', text: attachmentSummary('fork', attachment) }

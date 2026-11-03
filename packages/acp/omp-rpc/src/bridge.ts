@@ -1,17 +1,18 @@
 import { mkdir } from 'node:fs/promises'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentStepStream } from '@deepseek-ai/dsh-agent'
-import { createToolResultMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
+import type {} from '@deepseek-ai/dsh-commands'
+import { createToolResultMessage, createUserMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import { OmpModelCatalogSync, type CatalogSyncOutcome, type OmpModelSelection } from './catalog.ts'
 import { OmpRpcClient } from './client.ts'
 import { DEFAULT_OMP_HOST_TOOLS, ompCordisHostTools } from './cordis-tools.ts'
-import { OmpAgentDriver, type OmpToolEvent } from './driver.ts'
+import { OmpAgentDriver, type OmpImageInput, type OmpImageRef, type OmpToolEvent } from './driver.ts'
 import { OmpHostToolBridge } from './host-tools.ts'
 import { launchOmp, type LaunchedOmp } from './launch.ts'
 import { OmpUiBridge, type OmpUiAsker } from './ui.ts'
-import type { OmpExtensionUiRequest } from './types.ts'
+import type { OmpExtensionUiRequest, OmpRpcCommand } from './types.ts'
 
 /** How a harness agent joins an OMP process. */
 export type OmpAttachMode = 'attach' | 'fork'
@@ -25,6 +26,8 @@ export interface OmpAttachOptions {
   readonly sessionId?: string
   /** Exact transcript path to resume for `attach`; wins over {@link sessionId}. */
   readonly resumePath?: string
+  /** Existing transcript path to copy for `fork`; omitted replays harness history instead. */
+  readonly forkPath?: string
   /** Provider/model the OMP gateway should serve for this attachment. */
   readonly selection?: OmpModelSelection
   /** Directory holding OMP transcripts for this attachment. */
@@ -103,12 +106,15 @@ export function ompLaunchArgv(options: {
   readonly preset?: string
   readonly sessionId?: string
   readonly resumePath?: string
+  readonly forkPath?: string
 }): string[] {
   const argv = [options.executable, '--mode', 'rpc', '--session-dir', options.sessionDir]
   if (options.preset !== undefined) argv.push('--agent', options.preset)
   if (options.mode === 'attach') {
     if (options.resumePath !== undefined) argv.push('--resume', options.resumePath)
     else if (options.sessionId !== undefined) argv.push('--resume', options.sessionId)
+  } else if (options.forkPath !== undefined) {
+    argv.push('--fork', options.forkPath)
   }
   return argv
 }
@@ -119,6 +125,8 @@ interface LiveAttachment {
   readonly driver: OmpAgentDriver
   readonly hostTools: OmpHostToolBridge
   readonly ui: OmpUiBridge
+  readonly pendingTools: OmpToolEvent[]
+  readonly disposeCommands: () => void
   detachStream: () => void
   readonly cursor: LiveCursor
 }
@@ -156,6 +164,7 @@ export class OmpBridge {
     const launched = launchOmp(this.options.subprocess, {
       argv: ompLaunchArgv({ ...options, executable }),
       cwd: options.cwd,
+      env: { EXOCORTEX_ENV: '1' },
     })
     let client: OmpRpcClient | undefined
     try {
@@ -179,9 +188,12 @@ export class OmpBridge {
         ...this.options.onSurface === undefined ? {} : { onSurface: this.options.onSurface },
       })
       const cursor = { agent, turn: 0, step: 0 }
+      const pendingTools: OmpToolEvent[] = []
       const driver = new OmpAgentDriver(client, {
-        transcript: options.mode === 'fork' ? 'replay' : 'latest',
-        onTool: (event) => { this.projectTool(cursor, event) },
+        transcript: options.mode === 'fork' && options.forkPath === undefined ? 'replay' : 'latest',
+        resolveImages: refs => this.readImages(refs),
+        onTool: (events) => { pendingTools.push(...events) },
+        onContinue: () => { this.continueTurn(agent) },
       })
       const live: LiveAttachment = {
         agent,
@@ -189,6 +201,8 @@ export class OmpBridge {
         driver,
         hostTools,
         ui,
+        pendingTools,
+        disposeCommands: this.registerCommands(agent, client),
         detachStream: () => {},
         cursor,
       }
@@ -221,6 +235,7 @@ export class OmpBridge {
     if (live === undefined) return
     this.attachments.delete(id)
     live.detachStream()
+    live.disposeCommands()
     live.hostTools.close()
     live.ui.close()
     await live.launched.close()
@@ -232,13 +247,86 @@ export class OmpBridge {
   }
 
   private bindStream(live: LiveAttachment): () => void {
-    return live.agent.ctx.on('agent/step-stream', async (payload, next) => {
+    const stopStep = live.agent.ctx.on('agent/step-stream', async (payload, next) => {
       if (payload.agent !== live.agent) return next()
       live.cursor.turn = payload.turn
       live.cursor.step = payload.step
       const stream: AgentStepStream = (request, signal) => live.driver.stream(request, signal)
       return stream
     })
+    const stopAssistant = live.agent.ctx.on('agent/assistant-stream', (payload) => {
+      const frame = payload.frame
+      if (frame.type !== 'end') return
+      if (frame.outcome.kind !== 'committed' || frame.outcome.eventType !== 'assistant/message') {
+        live.pendingTools.length = 0
+        return
+      }
+      const tools = live.pendingTools.splice(0)
+      for (const event of tools) this.projectTool(live.cursor, event)
+    })
+    return () => {
+      stopStep()
+      stopAssistant()
+    }
+  }
+
+  private async readImages(refs: readonly OmpImageRef[]): Promise<OmpImageInput[]> {
+    const attachments = this.options.ctx.attachments
+    if (attachments === undefined) throw new Error('OMP prompt contains images but the attachment service is not mounted')
+    const images: OmpImageInput[] = []
+    for (const ref of refs) {
+      const stored = await attachments.readImage(ref)
+      images.push({ data: Buffer.from(stored.data).toString('base64'), mimeType: ref.mediaType })
+    }
+    return images
+  }
+
+  private continueTurn(agent: Agent): void {
+    agent.inbox.append('next-step', createUserMessage({
+      content: [{ type: 'text', text: 'omp:continue' }],
+      source: { kind: 'runtime-context' },
+    }))
+  }
+
+  private registerCommands(agent: Agent, client: OmpRpcClient): () => void {
+    const disposers = [
+      agent.ctx.commands.register({
+        name: 'compact',
+        description: 'Compact the attached OMP session natively, preserving its own summary and transcript.',
+        input: { hint: '[instructions]' },
+        async handler(invocation) {
+          const instructions = invocation.rawInput.trim()
+          try {
+            const result = await client.request({
+              type: 'compact',
+              ...instructions.length === 0 ? {} : { customInstructions: instructions },
+            } as unknown as OmpRpcCommand)
+            const tokens = objectOf(result)?.tokensBefore
+            const before = typeof tokens === 'number' ? ` (${String(tokens)} tokens before)` : ''
+            return { kind: 'success', text: `Compacted OMP context${before}.` }
+          } catch (error: unknown) {
+            return { kind: 'error', text: error instanceof Error ? error.message : String(error) }
+          }
+        },
+      }),
+      agent.ctx.commands.register({
+        name: 'omp',
+        description: 'Run a native OMP slash command (for example `/omp status`) in the attached session.',
+        input: { hint: '<command> [args]' },
+        async handler(invocation) {
+          const line = invocation.rawInput.trim()
+          if (line.length === 0) return { kind: 'error', text: 'expected an OMP slash command' }
+          try {
+            return { kind: 'success', text: await runOmpCommand(client, line, invocation.signal) }
+          } catch (error: unknown) {
+            return { kind: 'error', text: error instanceof Error ? error.message : String(error) }
+          }
+        },
+      }),
+    ]
+    return () => {
+      for (const dispose of disposers) dispose()
+    }
   }
 
   private projectTool(cursor: LiveCursor, event: OmpToolEvent): void {
@@ -261,6 +349,56 @@ export class OmpBridge {
       step: cursor.step,
       message: createToolResultMessage({ callId, content, isError: event.isError }),
     }, { surfaceOp: 'append' })
+  }
+}
+
+function objectOf(value: unknown): Record<string, unknown> | undefined {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
+  return value as Record<string, unknown>
+}
+
+/**
+ * Run one native OMP slash command through the RPC prompt queue and collect
+ * the command output it prints before settling.
+ * @param client - the attached OMP process.
+ * @param commandLine - the slash command text, without a leading harness slash.
+ * @param signal - cancellation for the command.
+ * @returns the command's printed output.
+ */
+export async function runOmpCommand(
+  client: Pick<OmpRpcClient, 'request' | 'onFrame'>,
+  commandLine: string,
+  signal: AbortSignal,
+): Promise<string> {
+  const outputs: string[] = []
+  const { promise, resolve } = Promise.withResolvers<{ status: string; message?: string }>()
+  let settled = false
+  const stop = client.onFrame((frame) => {
+    if (frame.type === 'command_output' && typeof frame.text === 'string') outputs.push(frame.text)
+    if (frame.type !== 'prompt_result') return
+    settled = true
+    resolve({
+      status: frame.status,
+      ...frame.error?.message === undefined ? {} : { message: frame.error.message },
+    })
+  })
+  const abort = (): void => {
+    void client.request({ type: 'abort' }).catch(() => {})
+    if (settled) return
+    settled = true
+    resolve({ status: 'aborted' })
+  }
+  signal.addEventListener('abort', abort, { once: true })
+  try {
+    const response = await client.request({ type: 'prompt', message: commandLine } as unknown as OmpRpcCommand)
+    if (objectOf(response)?.agentInvoked === false) return outputs.join('')
+    const result = await promise
+    if (result.status === 'error') throw new Error(result.message ?? 'OMP command failed')
+    if (result.status === 'aborted') throw new Error('OMP command was aborted')
+    return outputs.join('')
+  } finally {
+    stop()
+    signal.removeEventListener('abort', abort)
   }
 }
 

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { FinishReason, GenerateOptions, RequestMessage, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm'
 import type { OmpRpcClient } from './client.ts'
-import type { OmpAgentEvent, OmpPromptResultFrame, OmpRpcFrame } from './types.ts'
+import type { OmpAgentEvent, OmpPromptResultFrame, OmpRpcCommand, OmpRpcFrame } from './types.ts'
 
 /** The client surface a driver needs; narrowed for tests and composition. */
 export type OmpDriverClient = Pick<OmpRpcClient, 'request' | 'onFrame'>
@@ -38,15 +38,32 @@ interface OmpAssistantMessageEvent {
 
 interface OmpMessageUpdate {
   readonly type: 'message_update'
+  readonly messageId?: string
   readonly assistantMessageEvent?: OmpAssistantMessageEvent
   readonly message?: OmpAssistantMessage
 }
 
-/**
- * Frames one open assistant block accumulates until its end event.
- * `text` and `reasoning` blocks stream deltas; tool calls never reach the
- * harness because OMP executes bridged host tools inside its own run.
- */
+interface OmpMessageStart {
+  readonly type: 'message_start'
+  readonly messageId?: string
+  readonly message?: { readonly role?: string }
+}
+
+interface OmpMessageEnd {
+  readonly type: 'message_end'
+  readonly messageId?: string
+  readonly message?: { readonly role?: string } & OmpAssistantMessage
+}
+
+/** One image encoded for OMP's `images` prompt/steer field. */
+export interface OmpImageInput {
+  readonly data: string
+  readonly mimeType: string
+}
+
+/** An image block the harness assembled into a user request. */
+export type OmpImageRef = Extract<RequestMessage['content'][number], { type: 'image' }>['attachment']
+
 type OpenBlock = { readonly kind: 'text' | 'reasoning' }
 
 /** One content block OMP reports for an executed tool. */
@@ -79,15 +96,23 @@ export interface OmpPromptOutcome {
   readonly message?: string
 }
 
+/** One real user message, with images kept in their original order. */
+export interface OmpUserTurn {
+  readonly key: string
+  readonly text: string
+  readonly images: readonly OmpImageRef[]
+}
+
 /** Finish text for an OMP run whose terminal event carried no details. */
 const UNKNOWN_FAILURE = 'the OMP run ended without a terminal assistant message'
 
 /**
- * Map OMP RPC assistant events onto the harness chunk vocabulary.
+ * Map one OMP assistant message onto the harness chunk vocabulary.
  *
- * OMP owns its own agent loop and may execute several assistant messages in
- * one prompt, so a per-message `done` only closes that message's blocks. The
- * run settles once, driven by the prompt's terminal `prompt_result`.
+ * A cycle is one assistant message plus the tool executions it requested.
+ * `endCycle` closes the blocks and reports usage/finish for that cycle;
+ * `finish` additionally settles the whole prompt with its terminal status.
+ * Block indexes restart at zero for every assistant message.
  */
 export class OmpEventTranslator {
   private readonly open = new Map<number, OpenBlock>()
@@ -96,6 +121,16 @@ export class OmpEventTranslator {
   private message: OmpAssistantMessage | undefined
   private failure: OmpAssistantMessage | undefined
   private settled = false
+
+  /** Start a fresh assistant-message cycle. */
+  beginCycle(): void {
+    this.open.clear()
+    this.indexes.clear()
+    this.nextIndex = 0
+    this.message = undefined
+    this.failure = undefined
+    this.settled = false
+  }
 
   /**
    * Translate one inbound process event.
@@ -124,8 +159,27 @@ export class OmpEventTranslator {
   }
 
   /**
-   * Close anything still open and settle the run exactly once.
-   * Callers invoke this when the prompt's `prompt_result` arrives.
+   * Adopt the authoritative final message and close its open blocks.
+   * @param message - the message payload carried by `message_end`.
+   * @returns block-end chunks for every block still open.
+   */
+  endMessage(message: OmpAssistantMessage | undefined): StreamChunk[] {
+    if (this.settled) return []
+    if (message !== undefined) this.message = message
+    return this.closeOpen()
+  }
+
+  /**
+   * Close the current assistant message and settle its cycle without ending the prompt.
+   * @returns the remaining chunks, ending in usage and finish.
+   */
+  endCycle(): StreamChunk[] {
+    if (this.settled) return []
+    return this.settle()
+  }
+
+  /**
+   * Close anything still open and settle the prompt exactly once.
    * @param outcome - the prompt's terminal status, when the process reported one.
    * @returns the remaining chunks, ending in usage and finish.
    */
@@ -253,66 +307,90 @@ function toolContentOf(value: unknown): OmpToolContentBlock[] {
 }
 
 /**
- * Render the request messages a fresh OMP session has not seen yet.
+ * Select the real user messages a fresh or attached OMP session has not seen.
+ *
+ * Only user-authored prose and image attachments cross the boundary:
+ * assembled context rows, assistant text, tool calls, and tool results are
+ * never echoed back into OMP. The result preserves DSH's user content order,
+ * including `[Image #N]` markers and their matching `ImageContent[]` entries.
  * @param messages - the assembled request history, in conversation order.
- * @param from - first index to render; earlier messages are already in the session.
- * @returns text to send as one prompt, empty when nothing new is present.
+ * @returns one entry per user message, in order.
  */
-export function renderMessages(messages: readonly RequestMessage[], from: number): string {
-  const parts: string[] = []
-  for (const message of messages.slice(from)) {
-    const rendered = renderMessage(message)
-    if (rendered.length > 0) parts.push(rendered)
+export function pureUserTurns(messages: readonly RequestMessage[]): OmpUserTurn[] {
+  const turns: OmpUserTurn[] = []
+  for (const [index, message] of messages.entries()) {
+    if (message.role !== 'user') continue
+    if (message.source !== undefined && message.source.kind !== 'user') continue
+    const text: string[] = []
+    const images: OmpImageRef[] = []
+    for (const block of message.content) {
+      if (block.type === 'text') text.push(block.text)
+      else if (block.type === 'image' && block.offloaded !== true) images.push(block.attachment)
+    }
+    const prose = text.join('\n')
+    if (prose.trim().length === 0 && images.length === 0) continue
+    turns.push({
+      key: message.id === undefined ? `index:${String(index)}` : `id:${message.id}`,
+      text: prose,
+      images,
+    })
   }
-  return parts.join('\n\n')
+  return turns
 }
 
-function renderMessage(message: RequestMessage): string {
-  if (message.role === 'system') return `<system>\n${textOf(message.content)}\n</system>`
-  if (message.role === 'user') return textOf(message.content)
-  if (message.role === 'assistant') return `<assistant>\n${textOf(message.content)}\n</assistant>`
-  return ''
-}
-
-function textOf(content: RequestMessage['content']): string {
-  const parts: string[] = []
-  for (const block of content) {
-    if (block.type === 'text') parts.push(block.text)
-    else if (block.type === 'tool-call') parts.push(`[tool call ${block.name} ${block.arguments}]`)
-  }
-  return parts.join('\n')
+interface PromptState {
+  readonly id: string
+  readonly channel: FrameChannel
+  readonly detach: () => void
+  readonly accepted: Promise<void>
+  readonly commandOutputs: string[]
+  readonly stash: OmpAgentEvent[]
+  closed: boolean
+  localOnly: boolean
+  failure: unknown
+  outcome: OmpPromptOutcome | undefined
 }
 
 /**
- * Drive one harness agent step from a long-lived OMP RPC session.
+ * Drive harness agent steps from one long-lived OMP RPC session.
  *
- * The first step sends the assembled history as one transcript prompt. Later
- * steps send only the messages OMP has not seen, so its own session keeps the
- * conversation. A shorter history than the delivered prefix (compaction, a
- * cleared session) restarts the process session and replays the transcript.
- * Tool-call content is deliberately not forwarded: OMP executes bridged host
- * tools inside its own run, and the harness must not execute them again.
+ * The first prompt carries only real user messages (never assembled context
+ * or assistant/tool echoes), so `[Image #N]` markers in prose line up with the
+ * frame-1 image array. Later steps steer newly assembled user messages into
+ * the live run while OMP keeps its own conversation state. An assistant
+ * message plus its tool executions is one cycle; each cycle is one harness
+ * assistant message. Tool events are buffered and handed to `onTool` before
+ * the cycle settles so the harness trajectory can project them.
  */
 export interface OmpAgentDriverOptions {
   /**
    * How the first prompt introduces the conversation. `replay` starts a fresh
-   * OMP session and sends the assembled history, which is what a fork does.
-   * `latest` trusts the attached session's existing history and sends only the
-   * newest user message.
+   * OMP session and sends every real user message. `latest` trusts the attached
+   * session's existing history and sends only the newest user message.
    */
   readonly transcript?: 'replay' | 'latest'
-  /** Observe tools OMP executes so the harness trajectory can project them. */
-  readonly onTool?: (event: OmpToolEvent) => void
+  /** Resolve harness image attachments to OMP image inputs, in request order. */
+  readonly resolveImages?: (refs: readonly OmpImageRef[]) => Promise<readonly OmpImageInput[]>
+  /** Observe the tool executions of one completed cycle. */
+  readonly onTool?: (events: readonly OmpToolEvent[]) => void
+  /** Ask the harness to continue the turn after an intermediate cycle. */
+  readonly onContinue?: () => void
 }
 
 export class OmpAgentDriver {
-  private delivered: number | undefined
+  private sent: Set<string> | undefined
+  private highWaterMark = 0
+  private prompt: PromptState | undefined
   private readonly transcript: 'replay' | 'latest'
-  private readonly onTool: ((event: OmpToolEvent) => void) | undefined
+  private readonly resolveImages: ((refs: readonly OmpImageRef[]) => Promise<readonly OmpImageInput[]>) | undefined
+  private readonly onTool: ((events: readonly OmpToolEvent[]) => void) | undefined
+  private readonly onContinue: (() => void) | undefined
 
   constructor(private readonly client: OmpDriverClient, options: OmpAgentDriverOptions = {}) {
     this.transcript = options.transcript ?? 'replay'
+    this.resolveImages = options.resolveImages
     this.onTool = options.onTool
+    this.onContinue = options.onContinue
   }
 
   /**
@@ -323,103 +401,321 @@ export class OmpAgentDriver {
    */
   async *stream(request: GenerateOptions, signal: AbortSignal): AsyncIterable<StreamChunk> {
     signal.throwIfAborted()
-    if ((this.delivered === undefined && this.transcript === 'replay')
-      || (this.delivered !== undefined && request.messages.length < this.delivered)) await this.restart()
-    const from = this.startIndex(request.messages)
-    const message = renderMessages(request.messages, from)
-    const translator = new OmpEventTranslator()
-    const channel = new FrameChannel()
-    const promptId = randomUUID()
-    let outcome: OmpPromptOutcome | undefined
-    let failure: unknown
-    const detach = this.client.onFrame((frame) => {
-      if (frame.type === 'prompt_result') {
-        const result = frame as OmpPromptResultFrame
-        if (result.id !== promptId) return
-        outcome = { status: result.status, ...result.error?.message === undefined ? {} : { message: result.error.message } }
-        channel.close()
+    if (this.sent !== undefined && request.messages.length < this.highWaterMark) await this.restart()
+    const pending = this.pendingTurns(request.messages)
+    let state = this.prompt
+    if (state === undefined || state.closed) {
+      if (pending.length === 0) {
+        this.highWaterMark = Math.max(this.highWaterMark, request.messages.length)
+        yield { type: 'finish', reason: { kind: 'stop' } }
         return
       }
-      this.projectTool(frame)
-      channel.push(frame as OmpAgentEvent)
-    })
-    const accepted = this.client.request({ type: 'prompt', id: promptId, message: message.length > 0 ? message : '[continue]' })
-      .then((data: unknown) => {
-        if (objectOf(data)?.agentInvoked === false) channel.close()
-      })
-      .catch((error: unknown) => {
-        failure = error
-        channel.close()
-      })
+      state = await this.startPrompt(pending)
+      this.prompt = state
+      this.markSent(pending)
+    } else {
+      for (const turn of pending) {
+        signal.throwIfAborted()
+        await this.steer(state, turn)
+        this.markSent([turn])
+      }
+    }
+    const translator = new OmpEventTranslator()
+    translator.beginCycle()
+    const tools: OmpToolEvent[] = []
+    let openTools = 0
+    let sawAssistant = false
+    let cycleEnded = false
+    let awaitingDecision = false
+    let messageId: string | undefined
+    let finalOutcome: OmpPromptOutcome | undefined
+    let stepFinished = false
+
     const abort = (): void => {
       void this.client.request({ type: 'abort' }).catch(() => {})
-      channel.close()
+      state.closed = true
+      state.channel.close()
     }
     signal.addEventListener('abort', abort, { once: true })
     try {
-      for await (const frame of channel) {
-        for (const chunk of translator.push(frame)) {
-          signal.throwIfAborted()
-          yield chunk
+      while (!stepFinished) {
+        const frame = await this.nextFrame(state)
+        if (frame === undefined) {
+          finalOutcome ??= state.outcome
+          if (finalOutcome === undefined) {
+            if (cycleEnded || sawAssistant) {
+              finalOutcome = { status: signal.aborted ? 'aborted' : 'completed' }
+            } else if (signal.aborted) {
+              finalOutcome = { status: 'aborted' }
+            } else if (state.localOnly) {
+              finalOutcome = { status: 'completed' }
+            }
+          }
+          stepFinished = true
+          break
+        }
+        switch (frame.type) {
+          case 'message_start': {
+            const start = frame as unknown as OmpMessageStart
+            if (start.message?.role !== undefined && start.message.role !== 'assistant') break
+            if (awaitingDecision || cycleEnded) {
+              state.stash.push(frame)
+              stepFinished = true
+              break
+            }
+            if (!sawAssistant) {
+              sawAssistant = true
+              messageId = start.messageId
+            }
+            break
+          }
+          case 'message_update': {
+            const update = frame as unknown as OmpMessageUpdate
+            if (messageId !== undefined && update.messageId !== undefined && update.messageId !== messageId) break
+            for (const chunk of translator.push(frame)) {
+              signal.throwIfAborted()
+              yield chunk
+            }
+            if (update.assistantMessageEvent?.type === 'done') cycleEnded = true
+            if (update.assistantMessageEvent?.type === 'done' && openTools === 0) awaitingDecision = true
+            break
+          }
+          case 'message_end': {
+            const end = frame as unknown as OmpMessageEnd
+            if (end.message?.role !== undefined && end.message.role !== 'assistant') break
+            if (messageId !== undefined && end.messageId !== undefined && end.messageId !== messageId) break
+            sawAssistant = true
+            for (const chunk of translator.push({
+              type: 'message_update',
+              messageId: end.messageId,
+              message: end.message,
+            } as unknown as OmpRpcFrame)) {
+              signal.throwIfAborted()
+              yield chunk
+            }
+            translator.endMessage(end.message)
+            cycleEnded = true
+            if (openTools === 0) awaitingDecision = true
+            break
+          }
+          case 'tool_execution_start': {
+            awaitingDecision = false
+            openTools += 1
+            const event = this.toolStart(frame)
+            if (event !== undefined) tools.push(event)
+            break
+          }
+          case 'tool_execution_end': {
+            openTools = Math.max(0, openTools - 1)
+            const event = this.toolEnd(frame)
+            if (event !== undefined) tools.push(event)
+            if (awaitingDecision && openTools === 0) stepFinished = true
+            break
+          }
+          case 'command_output': {
+            const text = typeof (frame as { text?: unknown }).text === 'string'
+              ? (frame as { text: string }).text
+              : undefined
+            if (text !== undefined) state.commandOutputs.push(text)
+            break
+          }
+          case 'prompt_result': {
+            const result = frame as unknown as OmpPromptResultFrame
+            finalOutcome = {
+              status: result.status,
+              ...result.error?.message === undefined ? {} : { message: result.error.message },
+            }
+            cycleEnded = cycleEnded || sawAssistant
+            stepFinished = true
+            break
+          }
+          default:
+            break
+        }
+        if (awaitingDecision && openTools === 0 && !stepFinished) {
+          // Keep waiting: the next decisive frame is a tool start, a new
+          // assistant message, or the prompt's terminal result.
+          continue
         }
       }
-      signal.throwIfAborted()
-      let finished: FinishReason | undefined
-      for (const chunk of translator.finish(outcome)) {
-        if (chunk.type === 'finish') finished = chunk.reason
-        yield chunk
+
+      if (finalOutcome === undefined && state.localOnly) finalOutcome = { status: 'completed' }
+      if (state.commandOutputs.length > 0 && !sawAssistant) yield* this.commandOutputChunks(state.commandOutputs)
+      const final = finalOutcome !== undefined
+      const settling = final ? finalOutcome : undefined
+      if (final && (settling?.status === 'aborted' || settling?.status === 'error')) {
+        for (const chunk of translator.finish(settling)) {
+          yield chunk
+        }
+        state.closed = true
+        this.prompt = undefined
+        return
       }
-      await accepted
-      if (failure !== undefined) throw failure instanceof Error ? failure : new Error('OMP stream failed', { cause: failure })
-      // The loop appends the assistant message this stream produced right
-      // after the step, so the next request begins one entry later.
-      if (finished?.kind !== 'error' && finished?.kind !== 'aborted') this.delivered = request.messages.length + 1
+      if (awaitingDecision && openTools === 0 && !final && !stepFinished) {
+        // The decision frame never arrived; leave the prompt for the next step.
+      }
+      if (tools.length > 0 && (finalOutcome === undefined || finalOutcome.status === 'completed')) this.onTool?.(tools)
+      const chunks = final ? translator.finish(settling) : translator.endCycle()
+      for (const chunk of chunks) yield chunk
+      this.highWaterMark = Math.max(this.highWaterMark, request.messages.length)
+      if (final) {
+        state.closed = true
+        this.prompt = undefined
+        await state.accepted
+        if (state.failure !== undefined) throw state.failure instanceof Error ? state.failure : new Error('OMP stream failed', { cause: state.failure })
+        return
+      }
+      this.onContinue?.()
+      await state.accepted
+      if (state.failure !== undefined) throw state.failure instanceof Error ? state.failure : new Error('OMP stream failed', { cause: state.failure })
     } finally {
       signal.removeEventListener('abort', abort)
-      detach()
+      if (state.closed) {
+        state.detach()
+        state.channel.close()
+      }
     }
   }
 
-  private projectTool(frame: OmpRpcFrame): void {
-    if (this.onTool === undefined) return
-    if (frame.type === 'tool_execution_start') {
-      const toolCallId = typeof frame.toolCallId === 'string' ? frame.toolCallId : ''
-      const toolName = typeof frame.toolName === 'string' ? frame.toolName : ''
-      if (toolCallId.length === 0 || toolName.length === 0) return
-      this.onTool({
-        kind: 'start',
-        toolCallId,
-        toolName,
-        arguments: objectOf(frame.args) ?? {},
-      })
-      return
+  private pendingTurns(messages: readonly RequestMessage[]): OmpUserTurn[] {
+    const all = pureUserTurns(messages)
+    if (this.sent === undefined) {
+      if (this.transcript === 'latest' && all.length > 1) {
+        const latest = all.at(-1) as OmpUserTurn
+        this.sent = new Set(all.slice(0, -1).map(turn => turn.key))
+        return [latest]
+      }
+      return all
     }
-    if (frame.type !== 'tool_execution_end') return
+    return all.filter(turn => !this.sent?.has(turn.key))
+  }
+
+  private markSent(turns: readonly OmpUserTurn[]): void {
+    this.sent ??= new Set()
+    for (const turn of turns) this.sent.add(turn.key)
+  }
+
+  private async startPrompt(turns: readonly OmpUserTurn[]): Promise<PromptState> {
+    const text = turns.map(turn => turn.text).filter(part => part.length > 0).join('\n\n')
+    const images = await this.imagesOf(turns.flatMap(turn => [...turn.images]))
+    const channel = new FrameChannel()
+    const id = randomUUID()
+    const state: PromptState = {
+      id,
+      channel,
+      detach: () => {},
+      accepted: Promise.resolve(),
+      commandOutputs: [],
+      stash: [],
+      closed: false,
+      localOnly: false,
+      failure: undefined,
+      outcome: undefined,
+    }
+    state.detach = this.client.onFrame((frame: OmpRpcFrame) => {
+      if (frame.type === 'prompt_result') {
+        const result = frame as OmpPromptResultFrame
+        if (result.id !== id) return
+        state.outcome = {
+          status: result.status,
+          ...result.error?.message === undefined ? {} : { message: result.error.message },
+        }
+        state.closed = true
+        channel.close()
+        return
+      }
+      if (!isCycleFrame(frame)) return
+      channel.push(frame as OmpAgentEvent)
+    })
+    const prompt = {
+      type: 'prompt',
+      id,
+      message: text,
+      ...images.length === 0 ? {} : { images },
+    } as unknown as OmpRpcCommand
+    state.accepted = this.client.request(prompt)
+      .then((data: unknown) => {
+        if (objectOf(data)?.agentInvoked === false) {
+          state.localOnly = true
+          state.closed = true
+          channel.close()
+        }
+      })
+      .catch((error: unknown) => {
+        state.failure = error
+        state.closed = true
+        channel.close()
+      })
+    return state
+  }
+
+  private async steer(state: PromptState, turn: OmpUserTurn): Promise<void> {
+    const images = await this.imagesOf([...turn.images])
+    await this.client.request({
+      type: 'steer',
+      message: turn.text,
+      ...images.length === 0 ? {} : { images },
+    } as unknown as OmpRpcCommand)
+  }
+
+  private async imagesOf(refs: readonly OmpImageRef[]): Promise<OmpImageInput[]> {
+    if (refs.length === 0) return []
+    if (this.resolveImages === undefined) throw new Error('OMP prompt contains images but no image resolver is configured')
+    return [...await this.resolveImages(refs)]
+  }
+
+  private async *commandOutputChunks(outputs: readonly string[]): AsyncGenerator<StreamChunk> {
+    yield { type: 'block-start', index: 0, blockType: 'text' }
+    yield { type: 'block-end', index: 0, block: { type: 'text', text: outputs.join('') } }
+  }
+
+  private async nextFrame(state: PromptState): Promise<OmpAgentEvent | undefined> {
+    if (state.stash.length > 0) return state.stash.shift()
+    return await state.channel.next()
+  }
+
+  private toolStart(frame: OmpRpcFrame): OmpToolEvent | undefined {
     const toolCallId = typeof frame.toolCallId === 'string' ? frame.toolCallId : ''
     const toolName = typeof frame.toolName === 'string' ? frame.toolName : ''
-    if (toolCallId.length === 0 || toolName.length === 0) return
-    this.onTool({
+    if (toolCallId.length === 0 || toolName.length === 0) return undefined
+    return {
+      kind: 'start',
+      toolCallId,
+      toolName,
+      arguments: objectOf(frame.args) ?? {},
+    }
+  }
+
+  private toolEnd(frame: OmpRpcFrame): OmpToolEvent | undefined {
+    const toolCallId = typeof frame.toolCallId === 'string' ? frame.toolCallId : ''
+    const toolName = typeof frame.toolName === 'string' ? frame.toolName : ''
+    if (toolCallId.length === 0 || toolName.length === 0) return undefined
+    return {
       kind: 'end',
       toolCallId,
       toolName,
       content: toolContentOf(frame.result),
       isError: frame.isError === true,
-    })
-  }
-
-  private startIndex(messages: readonly RequestMessage[]): number {
-    if (this.delivered !== undefined) return this.delivered
-    if (this.transcript === 'latest') {
-      const lastUser = messages.findLastIndex(message => message.role === 'user')
-      return lastUser === -1 ? messages.length : lastUser
     }
-    return 0
   }
 
   private async restart(): Promise<void> {
     await this.client.request({ type: 'new_session' })
-    this.delivered = 0
+    this.sent = undefined
+    this.highWaterMark = 0
+    this.prompt?.channel.close()
+    this.prompt?.detach()
+    this.prompt = undefined
   }
+}
+
+function isCycleFrame(frame: OmpRpcFrame): boolean {
+  return frame.type === 'message_start'
+    || frame.type === 'message_update'
+    || frame.type === 'message_end'
+    || frame.type === 'tool_execution_start'
+    || frame.type === 'tool_execution_end'
+    || frame.type === 'command_output'
 }
 
 /** Ordered, closeable frame feed shared between the client listener and the generator. */
@@ -439,13 +735,10 @@ class FrameChannel {
     this.wake()
   }
 
-  async *[Symbol.asyncIterator](): AsyncGenerator<OmpAgentEvent> {
+  async next(): Promise<OmpAgentEvent | undefined> {
     while (true) {
-      if (this.buffered.length > 0) {
-        yield this.buffered.shift() as OmpAgentEvent
-        continue
-      }
-      if (this.closed) return
+      if (this.buffered.length > 0) return this.buffered.shift()
+      if (this.closed) return undefined
       await new Promise<void>((resolve) => { this.waiter = resolve })
     }
   }

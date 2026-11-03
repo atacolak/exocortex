@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
-import { OmpAgentDriver, OmpEventTranslator, renderMessages } from '../src/driver.ts'
+import { OmpAgentDriver, OmpEventTranslator, pureUserTurns } from '../src/driver.ts'
 import type { OmpAgentEvent, OmpRpcCommand, OmpRpcFrame } from '../src/types.ts'
 
 class FakeClient {
@@ -185,10 +185,22 @@ describe('OmpEventTranslator', () => {
   })
 })
 
-describe('renderMessages', () => {
-  it('renders user text plainly and labels the replayed non-user roles', () => {
-    const text = renderMessages([user('u1', 'first'), assistant('a1', 'reply'), user('u2', 'second')], 1)
-    expect(text).toBe('<assistant>\nreply\n</assistant>\n\nsecond')
+describe('pureUserTurns', () => {
+  it('keeps real user prose and images and drops assembled context and echoes', () => {
+    const image = {
+      type: 'image' as const,
+      attachment: { attachmentId: 'img-1', mediaType: 'image/png' },
+    }
+    const messages: GenerateOptions['messages'] = [
+      user('u1', 'first'),
+      { role: 'user', id: 'ctx' as never, content: [{ type: 'text', text: '<current_runtime_context>no</current_runtime_context>' }], source: { kind: 'runtime-context' } },
+      assistant('a1', 'reply'),
+      { role: 'user', id: 'u2' as never, content: [{ type: 'text', text: 'look [Image #1]' }, image], source: { kind: 'user' } },
+    ]
+    expect(pureUserTurns(messages)).toEqual([
+      { key: 'id:u1', text: 'first', images: [] },
+      { key: 'id:u2', text: 'look [Image #1]', images: [image.attachment] },
+    ])
   })
 })
 
@@ -209,12 +221,11 @@ describe('OmpAgentDriver', () => {
     client.emit(messageUpdate('m1', { type: 'text_start', contentIndex: 0 }, assistantMessage('', 'stop', { input: 1, output: 1 })))
     client.emit(messageUpdate('m1', { type: 'text_delta', contentIndex: 0, delta: 'hi' }, assistantMessage('hi', 'stop', { input: 1, output: 1 })))
     client.emit(messageUpdate('m1', { type: 'text_end', contentIndex: 0, content: 'hi' }, assistantMessage('hi', 'stop', { input: 1, output: 1 })))
-    client.settle()
     settlePrompt(client)
     const chunks = await consume
 
     expect(chunks.at(-1)).toEqual({ type: 'finish', reason: { kind: 'stop' } })
-    expect(client.commands.map(command => command.type)).toEqual(['new_session', 'prompt'])
+    expect(client.commands.map(command => command.type)).toEqual(['prompt'])
     expect(client.promptText(0)).toBe('hello')
 
     const second = request([...first.messages, assistant('a1', 'hi'), user('u2', 'again')])
@@ -227,7 +238,7 @@ describe('OmpAgentDriver', () => {
     client.settle()
     settlePrompt(client)
     await consumeAgain
-    expect(client.commands.filter(command => command.type === 'new_session')).toHaveLength(1)
+    expect(client.commands.filter(command => command.type === 'new_session')).toHaveLength(0)
     expect(client.promptText(1)).toBe('again')
   })
 
@@ -243,7 +254,6 @@ describe('OmpAgentDriver', () => {
     await tick()
     client.emit(messageUpdate('m1', { type: 'text_start', contentIndex: 0 }, assistantMessage('', 'stop', { input: 1, output: 1 })))
     client.emit(messageUpdate('m1', { type: 'text_end', contentIndex: 0, content: 'ok' }, assistantMessage('ok', 'stop', { input: 1, output: 1 })))
-    client.settle()
     settlePrompt(client)
     await consume
 
@@ -259,7 +269,7 @@ describe('OmpAgentDriver', () => {
     client.settle()
     settlePrompt(client)
     await consumeCompacted
-    expect(client.commands.filter(command => command.type === 'new_session')).toHaveLength(2)
+    expect(client.commands.filter(command => command.type === 'new_session')).toHaveLength(1)
     expect(client.promptText(1)).toBe('fresh start')
   })
 
@@ -271,9 +281,9 @@ describe('OmpAgentDriver', () => {
       for await (const _chunk of driver.stream(attached, new AbortController().signal)) { /* drain */ }
     })()
     await tick()
+    client.settle()
     client.emit(messageUpdate('m1', { type: 'text_start', contentIndex: 0 }, assistantMessage('', 'stop', { input: 1, output: 1 })))
     client.emit(messageUpdate('m1', { type: 'text_end', contentIndex: 0, content: 'ok' }, assistantMessage('ok', 'stop', { input: 1, output: 1 })))
-    client.settle()
     settlePrompt(client)
     await consume
     expect(client.commands.map(command => command.type)).toEqual(['prompt'])
@@ -288,8 +298,6 @@ describe('OmpAgentDriver', () => {
       for await (const chunk of driver.stream(request([user('u1', 'hello')]), new AbortController().signal)) chunks.push(chunk)
       return chunks
     })()
-    await tick()
-    client.settle()
     await tick()
     client.settle()
     settlePrompt(client, 'error', 'gateway overloaded')
@@ -309,8 +317,6 @@ describe('OmpAgentDriver', () => {
       return chunks
     })()
     await tick()
-    client.settle()
-    await tick()
     client.settle({ agentInvoked: false })
     const chunks = await consume
     expect(chunks).toEqual([{ type: 'finish', reason: { kind: 'stop' } }])
@@ -319,12 +325,10 @@ describe('OmpAgentDriver', () => {
   it('projects OMP tool executions in order', async () => {
     const client = new FakeClient()
     const events: unknown[] = []
-    const driver = new OmpAgentDriver(client, { onTool: (event) => { events.push(event) } })
+    const driver = new OmpAgentDriver(client, { onTool: (batch) => { events.push(...batch) } })
     const consume = (async () => {
       for await (const _chunk of driver.stream(request([user('u1', 'use a tool')]), new AbortController().signal)) { /* drain */ }
     })()
-    await tick()
-    client.settle()
     await tick()
     client.settle()
     client.emit({ type: 'tool_execution_start', toolCallId: 't-1', toolName: 'cordis_inspect_list', args: { platform: 'host' } })
