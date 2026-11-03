@@ -323,7 +323,11 @@ export class ReactLoopAgent implements Agent {
     return !headerEquals(baseline, canonicalHeader({ ...baseline, tools: [...tools] }))
   }
 
-  /** Open one turn before claiming its first proposed step. */
+  /**
+   * Open one turn before claiming its first proposed step. The durable turn
+   * boundary wins over the phase counter when a plugin appended transcript
+   * turns after this loop was created, as structured hydration does.
+   */
   private async turn(): Promise<boolean> {
     if (this.phase.kind !== 'running') {
       this.throwError(new Error(`agent "${this.id}": turn without driver reservation`))
@@ -331,7 +335,7 @@ export class ReactLoopAgent implements Agent {
     const phase = this.phase
     const { signal } = phase.abort
     signal.throwIfAborted()
-    const turn = phase.turn + 1
+    const turn = Math.max(phase.turn, this.loopCtx.agents.turnBoundaryOf(this.session).lastTurn) + 1
     try {
       this.session.append('turn/start', { turn })
     } catch (error: unknown) {
@@ -477,6 +481,11 @@ export class ReactLoopAgent implements Agent {
       }
       firstAttempt = false
       const request = this.buildRequest(config, preparedCall, assembly.tools, { turn, step }, startsRequestSeries, signal)
+      const stepStream = await this.dispatch.waterfall(
+        'agent/step-stream',
+        { turn, step, selection: decision.selection, request, signal },
+        () => Promise.resolve(undefined),
+      )
       const live = new AssistantStreamAttempt(
         this.session.id,
         ++this.assistantAttemptCounter,
@@ -487,7 +496,7 @@ export class ReactLoopAgent implements Agent {
       )
       let started = false
       try {
-        const stream = preparedCall?.stream(request) ?? this.loopCtx.llm.stream(request)
+        const stream = stepStream?.(request, signal) ?? preparedCall?.stream(request) ?? this.loopCtx.llm.stream(request)
         signal.throwIfAborted()
         live.start()
         started = true

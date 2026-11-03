@@ -663,6 +663,15 @@ export type SessionProjectionFrame =
 declare module '@deepseek-ai/cordis' {
   interface Events {
     /**
+     * One Session was forked from another; the child is durable while this
+     * source relationship is operation-local and never recorded in the child
+     * header. Consumers snapshot what they need from the source immediately.
+     * @mode emit
+     * @param sourceSessionId - Session the child prefix was cut from.
+     * @param childSessionId - newly created fork Session identity.
+     */
+    'session/forked'(sourceSessionId: SessionId, childSessionId: SessionId): void
+    /**
      * A Session became visible or its Agent was created or disposed.
      * Consumers upsert the summary and replace its current running and availability state.
      * @mode emit

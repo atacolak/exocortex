@@ -328,6 +328,19 @@ describe('sessions.fork', () => {
     },
   )
 
+  it('announces the fork source without recording it in the child header', async () => {
+    const ctx = await composed()
+    const forked: Array<[SessionId, SessionId]> = []
+    ctx.on('session/forked', (source, child) => { forked.push([source, child]) })
+    const source = await liveAgent(ctx, 'session-announce', 2)
+    const response = await (await remote(ctx)).fork(request({ sessionId: source.id, atSeq: 2 }))
+    expect(response.ok ? undefined : response.error).toBeUndefined()
+    if (!response.ok) return
+    expect(forked).toEqual([[source.id, response.value.sessionId]])
+    expect(ctx.sessions.get(response.value.sessionId)?.header.parentSession).toBeUndefined()
+    await ctx.fiber.dispose()
+  })
+
   it('cuts exactly at a completed turn and retains cwd without source lineage', async () => {
     const ctx = await composed()
     const source = await liveAgent(ctx, 'session-source', 2)
