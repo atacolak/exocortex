@@ -155,7 +155,7 @@ describe('omp transcript planning', () => {
 })
 
 describe('omp todo projection', () => {
-  it('maps active phases and drops passive ones', () => {
+  it('maps every phase and prefixes task content by phase name', () => {
     expect(ompTodoItems({
       todoPhases: [
         {
@@ -172,12 +172,21 @@ describe('omp todo projection', () => {
         { name: 'Notes', kind: 'passive', tasks: [{ content: 'not a task', status: 'pending' }] },
       ],
     })).toEqual([
-      { content: 'read the code', status: 'completed' },
-      { content: 'write the fix', status: 'in_progress' },
-      { content: 'run tests', status: 'pending' },
-      { content: 'dropped work', status: 'pending' },
-      { content: 'waiting on peer', status: 'pending' },
+      { content: '[Plan] read the code', status: 'completed' },
+      { content: '[Plan] write the fix', status: 'in_progress' },
+      { content: '[Plan] run tests', status: 'pending' },
+      { content: '[Plan] dropped work', status: 'pending' },
+      { content: '[Plan] [blocked] waiting on peer', status: 'pending' },
+      { content: '[Notes] not a task', status: 'pending' },
     ])
+  })
+
+  it('keeps a single passive phase visible with its phase label', () => {
+    expect(ompTodoItems({
+      todoPhases: [
+        { name: 'For operator', kind: 'passive', tasks: [{ content: 'review the diff', status: 'blocked' }] },
+      ],
+    })).toEqual([{ content: '[For operator] [blocked] review the diff', status: 'pending' }])
   })
 
   it('reports no todos for a state without phases', () => {
@@ -276,6 +285,15 @@ describe('OmpBridge command registration', () => {
     const { ctx, bridge } = await mountedBridge((frame, send) => {
       if (frame.type === 'get_state') return { sessionId: 'omp-session-1' }
       if (frame.type === 'get_available_models') return { models: [] }
+      if (frame.type === 'get_available_commands') {
+        return {
+          commands: [
+            { name: 'status', description: 'Show OMP status', input: { hint: '[args]' }, source: 'builtin' },
+            { name: 'compact', description: 'Native compact', source: 'builtin' },
+            { name: 'model', description: 'Native model picker', source: 'builtin' },
+          ],
+        }
+      }
       if (frame.type === 'compact') return { tokensBefore: 42 }
       if (frame.type === 'prompt') {
         send({ type: 'command_output', text: 'OMP status ok' })
@@ -291,7 +309,7 @@ describe('OmpBridge command registration', () => {
     await tick()
 
     expect(attachment.session.id).toBe('omp-session-1')
-    expect(ctx.commands.list(agent).map(descriptor => descriptor.name)).toEqual(['compact', 'omp'])
+    expect(ctx.commands.list(agent).map(descriptor => descriptor.name)).toEqual(['compact', 'model', 'omp', 'status'])
 
     const signal = new AbortController().signal
     const compact = await ctx.commands.execute(agent, '/compact', [], signal)
@@ -299,6 +317,9 @@ describe('OmpBridge command registration', () => {
 
     const omp = await ctx.commands.execute(agent, '/omp status', [], signal)
     expect(omp?.result).toEqual({ kind: 'success', text: 'OMP status ok' })
+
+    const native = await ctx.commands.execute(agent, '/status now', [], signal)
+    expect(native?.result).toEqual({ kind: 'success', text: 'OMP status ok' })
 
     await bridge.detach(agent.id)
   })

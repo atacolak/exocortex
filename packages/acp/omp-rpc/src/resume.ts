@@ -264,6 +264,7 @@ interface TranscriptContentPart {
   readonly id?: unknown
   readonly name?: unknown
   readonly arguments?: unknown
+  readonly intent?: unknown
 }
 
 interface TranscriptMessage {
@@ -278,6 +279,25 @@ interface TranscriptMessage {
 interface TranscriptMessageEntry {
   readonly type?: unknown
   readonly message?: TranscriptMessage
+}
+
+function toolArgumentsWithIntent(raw: unknown, intent: unknown): string {
+  const args = recordOf(raw)
+  if (typeof intent !== 'string' || intent.length === 0) return JSON.stringify(args)
+  return JSON.stringify({ i: intent, ...args })
+}
+
+function recordOf(raw: unknown): Record<string, unknown> {
+  if (typeof raw === 'string') {
+    try {
+      const parsed: unknown = JSON.parse(raw)
+      return recordOf(parsed)
+    } catch {
+      return {}
+    }
+  }
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return {}
+  return raw as Record<string, unknown>
 }
 
 function partsOf(content: unknown): TranscriptContentPart[] {
@@ -318,12 +338,11 @@ function assistantBlocks(content: unknown): ContentBlock[] {
       continue
     }
     if (part.type === 'toolCall' && typeof part.id === 'string' && typeof part.name === 'string') {
-      const raw = part.arguments
       blocks.push({
         type: 'tool-call',
         id: ToolCallId(part.id),
         name: part.name,
-        arguments: typeof raw === 'string' ? raw : JSON.stringify(raw ?? {}),
+        arguments: toolArgumentsWithIntent(part.arguments, part.intent),
       })
     }
   }

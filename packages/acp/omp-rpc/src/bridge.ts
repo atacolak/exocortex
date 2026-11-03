@@ -7,7 +7,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import type { TodoItem } from '@deepseek-ai/dsh-tool-todo'
 import type { OmpBindings } from './bindings.ts'
-import { OmpModelCatalogSync, type CatalogSyncOutcome, type OmpModelSelection } from './catalog.ts'
+import { OMP_THINKING_LEVELS, OmpModelCatalogSync, type CatalogSyncOutcome, type OmpModelSelection } from './catalog.ts'
 import { OmpRpcClient } from './client.ts'
 import { DEFAULT_OMP_HOST_TOOLS, ompCordisHostTools } from './cordis-tools.ts'
 import { OmpAgentDriver, type OmpImageInput, type OmpImageRef, type OmpToolEvent } from './driver.ts'
@@ -163,14 +163,20 @@ export interface OmpAttachPlan {
 export function ompTodoItems(state: unknown): TodoItem[] {
   const phases = objectOf(state)?.todoPhases
   if (!Array.isArray(phases)) return []
+  const records = phases
+    .map(objectOf)
+    .filter((phase): phase is Record<string, unknown> => phase !== undefined)
+  const multiple = records.length > 1
   const todos: TodoItem[] = []
-  for (const phase of phases) {
-    const record = objectOf(phase)
-    if (record === undefined || record.kind === 'passive' || !Array.isArray(record.tasks)) continue
+  for (const record of records) {
+    if (!Array.isArray(record.tasks)) continue
+    const title = typeof record.name === 'string' && record.name.length > 0 ? record.name : undefined
+    const phase = title !== undefined && (multiple || record.kind === 'passive') ? `[${title}] ` : ''
     for (const task of record.tasks) {
       const row = objectOf(task)
       if (row === undefined || typeof row.content !== 'string' || row.content.length === 0) continue
-      todos.push({ content: row.content, status: ompTodoStatus(row.status) })
+      const blocked = row.status === 'blocked' ? '[blocked] ' : ''
+      todos.push({ content: `${phase}${blocked}${row.content}`, status: ompTodoStatus(row.status) })
     }
   }
   return todos
@@ -180,6 +186,30 @@ function ompTodoStatus(value: unknown): TodoItem['status'] {
   if (value === 'completed') return 'completed'
   if (value === 'in_progress') return 'in_progress'
   return 'pending'
+}
+
+interface OmpAvailableCommand {
+  readonly name: string
+  readonly description?: string
+  readonly input?: { readonly hint?: string }
+}
+
+function ompAvailableCommands(value: unknown): OmpAvailableCommand[] {
+  if (!Array.isArray(value)) return []
+  const commands: OmpAvailableCommand[] = []
+  for (const entry of value) {
+    const record = objectOf(entry)
+    const name = record?.name
+    if (typeof name !== 'string' || !/^[a-z][a-z0-9_-]{0,63}$/.test(name)) continue
+    const description = typeof record?.description === 'string' ? record.description : undefined
+    const hint = objectOf(record?.input)?.hint
+    commands.push({
+      name,
+      ...description === undefined ? {} : { description },
+      ...typeof hint === 'string' ? { input: { hint } } : {},
+    })
+  }
+  return commands
 }
 
 async function existingFile(path: string): Promise<boolean> {
@@ -273,7 +303,15 @@ export class OmpBridge {
       client = launched.client
       await client.negotiateProtocol()
       const session = await activeSessionOf(client)
-      const selection = options.selection ?? agent.model.current()
+      const currentSelection = agent.model.current()
+      const selection = options.selection === undefined
+        ? currentSelection
+        : {
+          ...options.selection,
+          ...options.selection.reasoningEffort !== undefined || currentSelection?.reasoningEffort === undefined
+            ? {}
+            : { reasoningEffort: currentSelection.reasoningEffort },
+        }
       const catalog = await new OmpModelCatalogSync(client, selection).sync()
       const hostTools = new OmpHostToolBridge({
         client,
@@ -299,6 +337,7 @@ export class OmpBridge {
           agent.followup(createUserMessage({ content: [{ type: 'text', text }], source }))
         },
       })
+      const disposeCommands = await this.registerCommands(agent, client)
       const live: LiveAttachment = {
         agent,
         client,
@@ -307,7 +346,7 @@ export class OmpBridge {
         hostTools,
         ui,
         pendingTools,
-        disposeCommands: this.registerCommands(agent, client),
+        disposeCommands,
         detachStream: () => {},
         cursor,
         todos: [],
@@ -374,9 +413,16 @@ export class OmpBridge {
       const tools = live.pendingTools.splice(0)
       for (const event of tools) this.projectTool(live, event)
     })
+    const stopSelection = live.agent.ctx.on('session/event', (session, event) => {
+      if (session !== live.agent.session || event.type !== 'model/selection') return
+      const level = event.data.reasoningEffort
+      if (level === undefined || OMP_THINKING_LEVELS[level] !== true) return
+      void live.client.request({ type: 'set_thinking_level', level }).catch(() => {})
+    })
     return () => {
       stopStep()
       stopAssistant()
+      stopSelection()
     }
   }
 
@@ -398,7 +444,7 @@ export class OmpBridge {
     }))
   }
 
-  private registerCommands(agent: Agent, client: OmpRpcClient): () => void {
+  private async registerCommands(agent: Agent, client: OmpRpcClient): Promise<() => void> {
     const definitions: Parameters<Context['commands']['register']>[0][] = [
       {
         name: 'compact',
@@ -434,17 +480,60 @@ export class OmpBridge {
         },
       },
     ]
-    const inject = (agent.ctx as { inject?: Context['inject'] }).inject
-    if (inject === undefined) {
-      const disposers = definitions.map(definition => agent.ctx.commands.register(definition))
-      return () => {
-        for (const dispose of disposers) dispose()
-      }
+    const disposers: (() => void)[] = []
+    const seen = new Set<string>()
+    try {
+      for (const definition of agent.ctx.commands.list(agent)) seen.add(definition.name)
+    } catch {
+      // A scope without the commands service only offers the definitions registered here.
     }
+    for (const definition of definitions) {
+      if (seen.has(definition.name)) continue
+      seen.add(definition.name)
+      disposers.push(this.registerCommand(agent, definition))
+    }
+    const register = (command: OmpAvailableCommand): void => {
+      if (seen.has(command.name)) return
+      seen.add(command.name)
+      disposers.push(this.registerCommand(agent, {
+        name: command.name,
+        description: command.description ?? `Run OMP's native /${command.name} command in the attached session.`,
+        ...command.input?.hint === undefined ? {} : { input: { hint: command.input.hint } },
+        async handler(invocation) {
+          const args = invocation.rawInput.trimStart()
+          const line = `/${command.name}${args.length === 0 ? '' : ` ${args}`}`
+          try {
+            return { kind: 'success', text: await runOmpCommand(client, line, invocation.signal) }
+          } catch (error: unknown) {
+            return { kind: 'error', text: error instanceof Error ? error.message : String(error) }
+          }
+        },
+      }))
+    }
+    const stopFrames = client.onFrame((frame) => {
+      if (frame.type !== 'available_commands_update') return
+      for (const command of ompAvailableCommands(objectOf(frame)?.commands)) register(command)
+    })
+    const response = await client.request({ type: 'get_available_commands' })
+      .catch((error: unknown) => {
+        this.options.ctx.logger.warn(`omp-rpc: native command discovery failed: ${String(error)}`)
+        return undefined
+      })
+    for (const command of ompAvailableCommands(objectOf(response)?.commands)) register(command)
+    return () => {
+      stopFrames()
+      for (const dispose of disposers) dispose()
+    }
+  }
+
+  private registerCommand(
+    agent: Agent,
+    definition: Parameters<Context['commands']['register']>[0],
+  ): () => void {
+    const inject = typeof agent.ctx.inject === 'function' ? agent.ctx.inject.bind(agent.ctx) : undefined
+    if (inject === undefined) return agent.ctx.commands.register(definition)
     const fiber = agent.ctx.inject(['commands'], (commandCtx) => {
-      for (const definition of definitions) {
-        commandCtx.effect(() => commandCtx.commands.register(definition))
-      }
+      commandCtx.effect(() => commandCtx.commands.register(definition))
     })
     return () => {
       void fiber.dispose()

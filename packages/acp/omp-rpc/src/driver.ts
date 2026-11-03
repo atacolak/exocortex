@@ -831,11 +831,15 @@ export class OmpAgentDriver {
     const toolCallId = typeof frame.toolCallId === 'string' ? frame.toolCallId : ''
     const toolName = typeof frame.toolName === 'string' ? frame.toolName : ''
     if (toolCallId.length === 0 || toolName.length === 0) return undefined
+    const intent = typeof frame.intent === 'string' && frame.intent.length > 0 ? frame.intent : undefined
     return {
       kind: 'start',
       toolCallId,
       toolName,
-      arguments: objectOf(frame.args) ?? {},
+      arguments: {
+        ...intent === undefined ? {} : { i: intent },
+        ...(objectOf(frame.args) ?? {}),
+      },
     }
   }
 

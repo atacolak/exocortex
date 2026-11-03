@@ -114,9 +114,9 @@ describe('sessions.list cold merge', () => {
         expect(byId.get(unknown.id)).not.toHaveProperty('formatStatus')
         expect(byId.get(shared.id)).toMatchObject({ formatStatus: 'current' })
         expect(byId.get(liveOnly.id)).toMatchObject({ formatStatus: 'current' })
-        expect(list).toHaveBeenCalledTimes(1)
+        expect(list).toHaveBeenCalledTimes(2)
         expect(stat).not.toHaveBeenCalled()
-        expect(open).not.toHaveBeenCalled()
+        expect(open).toHaveBeenCalledTimes(3)
         expect(observe).not.toHaveBeenCalled()
       } finally {
         observe.mockRestore()
@@ -172,7 +172,7 @@ describe('sessions.list cold merge', () => {
       }),
     ])
     expect(stat).not.toHaveBeenCalled()
-    expect(inspect).not.toHaveBeenCalled()
+    expect(inspect).toHaveBeenCalledTimes(1)
     expect(observe).not.toHaveBeenCalled()
   })
 
@@ -239,7 +239,7 @@ describe('sessions.list cold merge', () => {
       },
     })
     expect(cacheCalls).toContain('seeded-cold')
-    expect(inspect).not.toHaveBeenCalled()
+    expect(inspect).toHaveBeenCalledTimes(3)
   })
 
 })

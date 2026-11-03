@@ -67,6 +67,8 @@ type PreparedStep =
   | {
     kind: 'enter'
     messages: UserMessage[]
+    /** Inbox-claimed messages this step proposed, preserved if admission never completes. */
+    claimed: UserMessage[]
     startsRequestSeries?: true
     assembly: PromptAssembly
     selection: Readonly<ModelSelection>
@@ -290,9 +292,11 @@ export class ReactLoopAgent implements Agent {
       throw new Error(`agent "${this.id}" has no provider/model: set AgentOptions.provider and AgentOptions.model or record a model selection`)
     }
     const toolSet = await this.loopCtx.tools.resolve({ agent: this, modelSelection: selection, signal })
+    let proposing = false
     try {
       const assembly = await this.loopCtx.systemPrompt.assemble({ ...assembleContextFor(this, signal), modelSelection: selection, toolSet })
       signal.throwIfAborted()
+      proposing = true
       const decision = await this.dispatch.waterfall(
         'agent/pre-step', { messages: claimed, ...position, signal, modelSelection: selection },
         (): Promise<PreStepDecision> => {
@@ -309,10 +313,23 @@ export class ReactLoopAgent implements Agent {
         toolSet.dispose()
         return decision
       }
-      return { ...decision, assembly, selection, toolSet }
+      return { ...decision, claimed, assembly, selection, toolSet }
     } catch (error: unknown) {
+      if (proposing && !signal.aborted) this.preserveClaimed(claimed)
       toolSet.dispose()
       throw error
+    }
+  }
+
+  /** Append inbox-claimed messages the failed step never admitted, so the user's own text stays visible. */
+  private preserveClaimed(messages: readonly UserMessage[]): void {
+    for (const message of messages) {
+      if (message.source.kind === 'runtime-context') continue
+      try {
+        this.session.append('user/message', message, { surfaceOp: 'append' })
+      } catch (error: unknown) {
+        this.ctx.logger.warn(`agent "${this.id}": could not preserve a claimed message after a failed step: ${String(error)}`)
+      }
     }
   }
 

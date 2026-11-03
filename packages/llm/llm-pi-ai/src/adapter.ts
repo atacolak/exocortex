@@ -212,16 +212,18 @@ function resolveReasoningLevel(
 function reasoningInfo(
   model: Model<Api>,
   defaultLevel: ModelThinkingLevel | undefined,
+  configuredLevel: ModelThinkingLevel | undefined,
 ): Pick<LlmResolvedModelInfo, 'reasoning'> | Record<string, never> {
   if (!model.reasoning) return {}
   const levels = getSupportedThinkingLevels(model)
+  const effectiveDefault = defaultLevel ?? (configuredLevel === undefined ? levels.at(-1) : undefined)
   return {
     reasoning: {
       efforts: levels.map(level => ({
         id: ReasoningEffortId(level),
         name: `${level.charAt(0).toUpperCase()}${level.slice(1)}`,
       })),
-      ...defaultLevel === undefined ? {} : { defaultEffort: ReasoningEffortId(defaultLevel) },
+      ...effectiveDefault === undefined ? {} : { defaultEffort: ReasoningEffortId(effectiveDefault) },
     },
   }
 }
@@ -378,7 +380,7 @@ export class PiAiAdapter extends LlmAdapter {
       inputModalities: [...resolvedModel.input],
       context: { contextWindow: resolvedModel.contextWindow },
       ...configuredMaxTokens === undefined ? {} : { defaultMaxTokens: configuredMaxTokens },
-      ...reasoningInfo(resolvedModel, defaultLevel),
+      ...reasoningInfo(resolvedModel, defaultLevel, profile.reasoning),
       ...conversationUpdates(resolvedModel),
     }
   }

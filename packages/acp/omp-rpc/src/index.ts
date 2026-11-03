@@ -325,42 +325,64 @@ export function apply(ctx: Context, config: OmpRpcConfig): void {
     })
   }
 
+  const attaching = new Map<string, Promise<void>>()
+  const attachOmpSession = async (agent: Agent, profile: string): Promise<void> => {
+    if (bridge.attached(agent.id)) return
+    let plan: OmpAttachPlan
+    try {
+      plan = await planOmpAttach({ sessionId: agent.id, bindings })
+    } catch (error: unknown) {
+      warn(`cannot read OMP bindings for session "${agent.id}"; starting a fresh OMP session`, error)
+      plan = { mode: 'attach' }
+    }
+    let attachment: OmpAttachment
+    try {
+      attachment = await bridge.attach(agent, attachOptions(agent, {
+        preset: profile,
+        ...plan,
+      }))
+    } catch (error: unknown) {
+      if (plan.resumePath === undefined) throw error
+      warn(`cannot resume transcript ${plan.resumePath}; starting a fresh OMP session`, error)
+      await forgetBinding(agent.id)
+      attachment = await bridge.attach(agent, attachOptions(agent, {
+        mode: 'attach',
+        preset: profile,
+      }))
+    }
+    await rememberBinding(agent, attachment, profile)
+    if (plan.forkPath !== undefined) {
+      try {
+        await bindings.deleteFork(agent.id)
+      } catch (error: unknown) {
+        warn(`cannot drop consumed branch fork for session "${agent.id}"`, error)
+      }
+    }
+  }
+  const ensureOmpSession = (agent: Agent, profile: string): Promise<void> => {
+    const pending = attaching.get(agent.id)
+    if (pending !== undefined) return pending
+    const started = attachOmpSession(agent, profile).finally(() => {
+      attaching.delete(agent.id)
+    })
+    attaching.set(agent.id, started)
+    return started
+  }
+
   ctx.inject(['agentPresets'], (presetCtx) => {
     if (config.autoAttach !== false) {
+      ctx.on('agent/created', (payload) => {
+        const profile = profileOf(payload.agent)
+        if (profile === undefined) return
+        void ensureOmpSession(payload.agent, profile).catch((error: unknown) => {
+          warn(`eager OMP attach for session "${payload.agent.id}" failed`, error)
+        })
+      })
       ctx.on('agent/pre-step', async (payload, next) => {
         if (bridge.attached(payload.agent.id)) return next()
         const profile = profileOf(payload.agent)
         if (profile === undefined) return next()
-        let plan: OmpAttachPlan
-        try {
-          plan = await planOmpAttach({ sessionId: payload.agent.id, bindings })
-        } catch (error: unknown) {
-          warn(`cannot read OMP bindings for session "${payload.agent.id}"; starting a fresh OMP session`, error)
-          plan = { mode: 'attach' }
-        }
-        let attachment: OmpAttachment
-        try {
-          attachment = await bridge.attach(payload.agent, attachOptions(payload.agent, {
-            preset: profile,
-            ...plan,
-          }))
-        } catch (error: unknown) {
-          if (plan.resumePath === undefined) throw error
-          warn(`cannot resume transcript ${plan.resumePath}; starting a fresh OMP session`, error)
-          await forgetBinding(payload.agent.id)
-          attachment = await bridge.attach(payload.agent, attachOptions(payload.agent, {
-            mode: 'attach',
-            preset: profile,
-          }))
-        }
-        await rememberBinding(payload.agent, attachment, profile)
-        if (plan.forkPath !== undefined) {
-          try {
-            await bindings.deleteFork(payload.agent.id)
-          } catch (error: unknown) {
-            warn(`cannot drop consumed branch fork for session "${payload.agent.id}"`, error)
-          }
-        }
+        await ensureOmpSession(payload.agent, profile)
         return next()
       })
     }
