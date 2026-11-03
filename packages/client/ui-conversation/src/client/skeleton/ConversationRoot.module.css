@@ -219,21 +219,29 @@
 
 .crumbTitleInput {
   box-sizing: border-box;
+  flex: 1 1 auto;
+  width: 100%;
   min-width: 0;
-  max-width: 64ch;
-  padding: 3px 7px;
-  border: 1px solid var(--dsw-alias-border-l4);
+  max-width: 100%;
+  margin: -3px -8px;
+  padding: 2px 8px;
+  border: 1px solid var(--dsw-alias-border-l2);
   border-radius: var(--dsw-radius-md);
   outline: none;
-  background: var(--dsw-alias-bg-base);
+  background: var(--dsw-specific-input-major);
   font-size: 14px;
   font-weight: 500;
   line-height: 20px;
   color: var(--dsw-alias-label-primary);
 }
 
+.crumbTitleInput.crumbSubagent {
+  font-size: 12px;
+  line-height: 18px;
+}
+
 .crumbTitleInput:focus {
-  border-color: var(--dsw-alias-label-secondary);
+  border-color: var(--dsw-alias-state-business-primary);
 }
 
 .crumbTitleInput:disabled {

@@ -101,13 +101,6 @@ function equalBreadcrumbs(left: readonly Breadcrumb[], right: readonly Breadcrum
     })
 }
 
-/** Approximate caret width of one editable title in `ch` units, clamped to the row. */
-function titleWidthUnits(text: string): number {
-  let units = 0
-  for (const glyph of text) units += WIDE_GLYPH.test(glyph) ? 2 : 1
-  return Math.min(64, Math.max(6, units + 1))
-}
-
 interface SessionTitleProps {
   readonly sessionId: SessionId
   readonly title: string
@@ -133,6 +126,7 @@ function SessionTitle({ sessionId, title, subagent, renameSession, t }: SessionT
     if (!editing) return
     input.current?.focus()
     input.current?.select()
+    if (input.current !== null) input.current.scrollLeft = 0
   }, [editing])
   const begin = (): void => {
     setDraft(title)
@@ -170,7 +164,6 @@ function SessionTitle({ sessionId, title, subagent, renameSession, t }: SessionT
         <input
           ref={input}
           className={clsx(css.crumbTitleInput, subagent && css.crumbSubagent)}
-          style={{ width: `${titleWidthUnits(draft)}ch` }}
           value={draft}
           aria-label={t('session.rename')}
           aria-invalid={error !== null}
