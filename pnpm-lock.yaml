@@ -1355,6 +1355,9 @@ importers:
       '@deepseek-ai/dsh-subprocess':
         specifier: workspace:*
         version: link:../../subprocess/subprocess
+      '@deepseek-ai/dsh-tool-todo':
+        specifier: workspace:*
+        version: link:../../todo/tool-todo
       '@deepseek-ai/dsh-tools':
         specifier: workspace:*
         version: link:../../core/tools

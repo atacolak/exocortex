@@ -1,7 +1,14 @@
 import { randomUUID } from 'node:crypto'
+import { boundContextSummary } from '@deepseek-ai/dsh-llm'
 import type { FinishReason, GenerateOptions, RequestMessage, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm'
 import type { OmpRpcClient } from './client.ts'
-import type { OmpAgentEvent, OmpPromptResultFrame, OmpRpcCommand, OmpRpcFrame } from './types.ts'
+import type {
+  OmpAgentEvent,
+  OmpPromptResultFrame,
+  OmpRpcCommand,
+  OmpRpcFrame,
+  OmpTriggerSource,
+} from './types.ts'
 
 /** The client surface a driver needs; narrowed for tests and composition. */
 export type OmpDriverClient = Pick<OmpRpcClient, 'request' | 'onFrame'>
@@ -96,6 +103,43 @@ export interface OmpPromptOutcome {
   readonly message?: string
 }
 
+/** One OMP-initiated run the harness did not ask for. */
+export interface OmpUnsolicitedWake {
+  /** The exact waking input text OMP received. */
+  readonly text: string
+  /** Trigger-card attribution for that input. */
+  readonly source: OmpTriggerSource
+}
+
+/** The trigger-card source a waking message maps onto, or undefined for real user prose. */
+export function ompTriggerSource(text: string): OmpTriggerSource | undefined {
+  const head = text.trimStart()
+  if (head.startsWith('<system-notice') || text.includes('<task-result')) {
+    return { kind: 'subagent-settled', form: 'notice', summary: boundContextSummary(firstMeaningfulLine(text)) }
+  }
+  if (head.startsWith('<hcom') || head.startsWith('[hcom')) {
+    return { kind: 'agent-message', form: 'relay' }
+  }
+  return undefined
+}
+
+/** Attribute an OMP-initiated run, defaulting to a generic background wake. */
+export function ompWakeSource(text: string): OmpTriggerSource {
+  return ompTriggerSource(text) ?? {
+    kind: 'omp-wake',
+    form: 'notice',
+    summary: boundContextSummary(firstMeaningfulLine(text)),
+  }
+}
+
+function firstMeaningfulLine(text: string): string {
+  for (const line of text.split('\n')) {
+    const stripped = line.trim().replace(/^<\/?(?:system-notice|task-result|hcom)[^>]*>/u, '').trim()
+    if (stripped.length > 0) return stripped
+  }
+  return text.trim()
+}
+
 /** One real user message, with images kept in their original order. */
 export interface OmpUserTurn {
   readonly key: string
@@ -105,6 +149,25 @@ export interface OmpUserTurn {
 
 /** Finish text for an OMP run whose terminal event carried no details. */
 const UNKNOWN_FAILURE = 'the OMP run ended without a terminal assistant message'
+
+/** Wake attribution used when OMP replies without ever showing its own input. */
+const BACKGROUND_WAKE: OmpUnsolicitedWake = {
+  text: 'Background agent wake',
+  source: { kind: 'omp-wake', form: 'notice', summary: 'Background agent wake' },
+}
+
+function messageText(message: Record<string, unknown> | undefined): string | undefined {
+  const content = message?.content
+  if (typeof content === 'string') return content.trim().length === 0 ? undefined : content
+  if (!Array.isArray(content)) return undefined
+  const text: string[] = []
+  for (const block of content) {
+    const part = objectOf(block)
+    if (part?.type === 'text' && typeof part.text === 'string') text.push(part.text)
+  }
+  const joined = text.join('\n')
+  return joined.trim().length === 0 ? undefined : joined
+}
 
 /**
  * Map one OMP assistant message onto the harness chunk vocabulary.
@@ -341,7 +404,7 @@ export function pureUserTurns(messages: readonly RequestMessage[]): OmpUserTurn[
 interface PromptState {
   readonly id: string
   readonly channel: FrameChannel
-  detach: () => void
+  readonly unsolicited: boolean
   accepted: Promise<void>
   readonly commandOutputs: string[]
   readonly stash: OmpAgentEvent[]
@@ -349,6 +412,7 @@ interface PromptState {
   localOnly: boolean
   failure: unknown
   outcome: OmpPromptOutcome | undefined
+  wake: { fired: boolean } | undefined
 }
 
 /**
@@ -375,22 +439,121 @@ export interface OmpAgentDriverOptions {
   readonly onTool?: (events: readonly OmpToolEvent[]) => void
   /** Ask the harness to continue the turn after an intermediate cycle. */
   readonly onContinue?: () => void
+  /**
+   * Admit one OMP-initiated run into the harness as a visible turn. Called at
+   * most once per run, with the waking input and its trigger-card source.
+   */
+  readonly onUnsolicitedWake?: (wake: OmpUnsolicitedWake) => void
 }
 
 export class OmpAgentDriver {
   private sent: Set<string> | undefined
   private highWaterMark = 0
   private prompt: PromptState | undefined
+  private startingPrompt = false
+  private readonly stopFrames: () => void
   private readonly transcript: 'replay' | 'latest'
   private readonly resolveImages: ((refs: readonly OmpImageRef[]) => Promise<readonly OmpImageInput[]>) | undefined
   private readonly onTool: ((events: readonly OmpToolEvent[]) => void) | undefined
   private readonly onContinue: (() => void) | undefined
+  private readonly onUnsolicitedWake: ((wake: OmpUnsolicitedWake) => void) | undefined
 
   constructor(private readonly client: OmpDriverClient, options: OmpAgentDriverOptions = {}) {
     this.transcript = options.transcript ?? 'replay'
     this.resolveImages = options.resolveImages
     this.onTool = options.onTool
     this.onContinue = options.onContinue
+    this.onUnsolicitedWake = options.onUnsolicitedWake
+    this.stopFrames = client.onFrame((frame) => { this.observe(frame) })
+  }
+
+  /** Stop observing the OMP process; the attachment owner calls this once. */
+  close(): void {
+    this.stopFrames()
+    this.prompt?.channel.close()
+    this.prompt = undefined
+  }
+
+  private observe(frame: OmpRpcFrame): void {
+    if (frame.type === 'agent_start') {
+      this.abandonDrainedPrompt()
+      if (this.prompt === undefined && !this.startingPrompt) this.openUnsolicitedPrompt()
+      return
+    }
+    if (frame.type === 'agent_end') {
+      const state = this.prompt
+      if (state === undefined || !state.unsolicited || state.closed) return
+      if ((frame as Record<string, unknown>).isTerminal === false) return
+      state.outcome = { status: 'completed' }
+      state.closed = true
+      state.channel.close()
+      return
+    }
+    if (frame.type === 'prompt_result') {
+      const state = this.prompt
+      if (state === undefined || state.unsolicited) return
+      const result = frame as OmpPromptResultFrame
+      if (result.id !== state.id) return
+      state.outcome = {
+        status: result.status,
+        ...result.error?.message === undefined ? {} : { message: result.error.message },
+      }
+      state.closed = true
+      state.channel.close()
+      return
+    }
+    const state = this.prompt
+    if (state === undefined || state.closed) return
+    if (state.unsolicited) this.noteWakingInput(state, frame)
+    if (isCycleFrame(frame)) state.channel.push(frame as OmpAgentEvent)
+  }
+
+  private abandonDrainedPrompt(): void {
+    const state = this.prompt
+    if (state === undefined || !state.closed || !state.channel.finished()) return
+    this.prompt = undefined
+  }
+
+  private openUnsolicitedPrompt(): void {
+    this.prompt = {
+      id: randomUUID(),
+      channel: new FrameChannel(),
+      unsolicited: true,
+      accepted: Promise.resolve(),
+      commandOutputs: [],
+      stash: [],
+      closed: false,
+      localOnly: false,
+      failure: undefined,
+      outcome: undefined,
+      wake: { fired: false },
+    }
+  }
+
+  private noteWakingInput(state: PromptState, frame: OmpRpcFrame): void {
+    if (state.wake === undefined || state.wake.fired) return
+    if (frame.type === 'tool_execution_start') {
+      this.fireWake(state, BACKGROUND_WAKE)
+      return
+    }
+    if (frame.type !== 'message_start' && frame.type !== 'message_end') return
+    const record = frame as Record<string, unknown>
+    const message = objectOf(record.message)
+    const role = message?.role
+    if (role === 'assistant') {
+      this.fireWake(state, BACKGROUND_WAKE)
+      return
+    }
+    if (role !== 'user' && role !== 'custom') return
+    const text = messageText(message)
+    if (text === undefined) return
+    this.fireWake(state, { text, source: ompWakeSource(text) })
+  }
+
+  private fireWake(state: PromptState, wake: OmpUnsolicitedWake): void {
+    if (state.wake === undefined || state.wake.fired) return
+    state.wake.fired = true
+    this.onUnsolicitedWake?.(wake)
   }
 
   /**
@@ -402,9 +565,11 @@ export class OmpAgentDriver {
   async *stream(request: GenerateOptions, signal: AbortSignal): AsyncIterable<StreamChunk> {
     signal.throwIfAborted()
     if (this.sent !== undefined && request.messages.length < this.highWaterMark) await this.restart()
+    this.abandonDrainedPrompt()
     const pending = this.pendingTurns(request.messages)
     let state = this.prompt
-    if (state === undefined || state.closed) {
+    const drainable = state !== undefined && state.unsolicited && !state.channel.finished()
+    if (state === undefined || (state.closed && !drainable)) {
       if (pending.length === 0) {
         this.highWaterMark = Math.max(this.highWaterMark, request.messages.length)
         yield { type: 'finish', reason: { kind: 'stop' } }
@@ -568,10 +733,7 @@ export class OmpAgentDriver {
       if (state.failure !== undefined) throw state.failure instanceof Error ? state.failure : new Error('OMP stream failed', { cause: state.failure })
     } finally {
       signal.removeEventListener('abort', abort)
-      if (state.closed) {
-        state.detach()
-        state.channel.close()
-      }
+      if (state.closed) state.channel.close()
     }
   }
 
@@ -594,58 +756,50 @@ export class OmpAgentDriver {
   }
 
   private async startPrompt(turns: readonly OmpUserTurn[]): Promise<PromptState> {
-    const text = turns.map(turn => turn.text).filter(part => part.length > 0).join('\n\n')
-    const images = await this.imagesOf(turns.flatMap(turn => [...turn.images]))
-    const channel = new FrameChannel()
-    const id = randomUUID()
-    const state: PromptState = {
-      id,
-      channel,
-      detach: () => {},
-      accepted: Promise.resolve(),
-      commandOutputs: [],
-      stash: [],
-      closed: false,
-      localOnly: false,
-      failure: undefined,
-      outcome: undefined,
-    }
-    state.detach = this.client.onFrame((frame: OmpRpcFrame) => {
-      if (frame.type === 'prompt_result') {
-        const result = frame as OmpPromptResultFrame
-        if (result.id !== id) return
-        state.outcome = {
-          status: result.status,
-          ...result.error?.message === undefined ? {} : { message: result.error.message },
-        }
-        state.closed = true
-        channel.close()
-        return
+    this.startingPrompt = true
+    try {
+      const text = turns.map(turn => turn.text).filter(part => part.length > 0).join('\n\n')
+      const images = await this.imagesOf(turns.flatMap(turn => [...turn.images]))
+      const channel = new FrameChannel()
+      const id = randomUUID()
+      const state: PromptState = {
+        id,
+        channel,
+        unsolicited: false,
+        accepted: Promise.resolve(),
+        commandOutputs: [],
+        stash: [],
+        closed: false,
+        localOnly: false,
+        failure: undefined,
+        outcome: undefined,
+        wake: undefined,
       }
-      if (!isCycleFrame(frame)) return
-      channel.push(frame as OmpAgentEvent)
-    })
-    const prompt = {
-      type: 'prompt',
-      id,
-      message: text,
-      streamingBehavior: 'steer',
-      ...images.length === 0 ? {} : { images },
-    } as unknown as OmpRpcCommand
-    state.accepted = this.client.request(prompt)
-      .then((data: unknown) => {
-        if (objectOf(data)?.agentInvoked === false) {
-          state.localOnly = true
+      this.prompt = state
+      const prompt = {
+        type: 'prompt',
+        id,
+        message: text,
+        streamingBehavior: 'steer',
+        ...images.length === 0 ? {} : { images },
+      } as unknown as OmpRpcCommand
+      state.accepted = this.client.request(prompt)
+        .then((data: unknown) => {
+          if (objectOf(data)?.agentInvoked === false) {
+            state.localOnly = true
+            state.closed = true
+            channel.close()
+          }
+        })
+        .catch((error: unknown) => {
+          state.failure = error
           state.closed = true
           channel.close()
-        }
-      })
-      .catch((error: unknown) => {
-        state.failure = error
-        state.closed = true
-        channel.close()
-      })
-    return state
+        })
+      return state
+    } finally {
+      this.startingPrompt = false
+    }
   }
 
   private async steer(turn: OmpUserTurn): Promise<void> {
@@ -703,7 +857,6 @@ export class OmpAgentDriver {
     this.sent = undefined
     this.highWaterMark = 0
     this.prompt?.channel.close()
-    this.prompt?.detach()
     this.prompt = undefined
   }
 }
@@ -740,6 +893,10 @@ class FrameChannel {
       if (this.closed) return undefined
       await new Promise<void>((resolve) => { this.waiter = resolve })
     }
+  }
+
+  finished(): boolean {
+    return this.closed && this.buffered.length === 0
   }
 
   private wake(): void {

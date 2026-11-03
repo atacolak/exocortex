@@ -221,3 +221,39 @@ export type OmpInteractiveUiRequest = Extract<
   OmpExtensionUiRequest,
   { method: 'select' | 'confirm' | 'input' | 'editor' }
 >
+
+/** Durable attribution for one background wake OMP started by itself. */
+export interface OmpWakeSource {
+  readonly kind: 'omp-wake'
+  /** A one-line account shown without expanding the trigger row (`notice` context form). */
+  readonly form: 'notice'
+  /** One-line account of what woke the run. */
+  readonly summary: string
+}
+
+/** Durable attribution for a settled OMP background task delivered as a notice. */
+export interface OmpSubagentSettledSource {
+  readonly kind: 'subagent-settled'
+  /** A one-line account shown without expanding the trigger row (`notice` context form). */
+  readonly form: 'notice'
+  /** One-line account of how the background task ended. */
+  readonly summary: string
+}
+
+/** Durable attribution for one OMP peer message relayed into the run. */
+export interface OmpAgentMessageSource {
+  readonly kind: 'agent-message'
+  /** Content another Agent addressed to this one (`relay` context form). */
+  readonly form: 'relay'
+}
+
+/** Trigger-card source an OMP-initiated run is presented under. */
+export type OmpTriggerSource = OmpSubagentSettledSource | OmpAgentMessageSource | OmpWakeSource
+
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'omp-wake': OmpWakeSource
+    'subagent-settled': OmpSubagentSettledSource
+    'agent-message': OmpAgentMessageSource
+  }
+}
