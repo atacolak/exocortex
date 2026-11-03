@@ -23,6 +23,9 @@ import { CommandChipNode, $createCommandChipNode, registerCommandChipSeat } from
 import { registerCommandChipSelection } from './command-chip-selection.ts'
 import { registerTextRefDecoration, rescanTextRefs, TextRefNode } from './text-ref.ts'
 import { parseInlineMarkdown } from './markdown.ts'
+import {
+  CODE_BLOCK_THEME_CLASS, INLINE_CODE_THEME_CLASS, InlineCodeNode, registerComposerMarkdown,
+} from './inline-code.ts'
 import type { EditorProjection } from './projection.ts'
 import { $composerLayout, $projectComposer, detectOffsetOfClipboardOffset } from './projection.ts'
 import { $replaceDetectSpanWithNodes, $replaceDetectSpanWithText } from './span-map.ts'
@@ -145,7 +148,11 @@ export class DraftEditorRuntime {
   constructor(private readonly deps: DraftEditorRuntimeDeps) {
     this.editor = createEditor({
       namespace: 'dsh-composer',
-      nodes: [ReferenceChipNode, CommandChipNode, TextRefNode, QuoteNode, CodeNode],
+      nodes: [ReferenceChipNode, CommandChipNode, TextRefNode, QuoteNode, CodeNode, InlineCodeNode],
+      theme: {
+        code: CODE_BLOCK_THEME_CLASS,
+        text: { code: INLINE_CODE_THEME_CLASS },
+      },
       onError: (error) => { throw error },
     })
   }
@@ -183,6 +190,7 @@ export class DraftEditorRuntime {
       registerCommandChipSeat(this.editor),
       registerCommandChipSelection(this.editor),
       registerTextRefDecoration(this.editor, () => this.deps.lexicon()),
+      registerComposerMarkdown(this.editor),
       () => {
         this.lexiconOff?.()
         this.lexiconOff = undefined

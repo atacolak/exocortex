@@ -360,6 +360,27 @@ export class ConversationController extends Service implements IConversation {
   }
 
   /**
+   * Replace one staged image's bytes without changing its draft identity, so
+   * the rail ordinal and any `[Image #N]` reference stay bound to the edit.
+   * @param sessionId - target Agent-scope identity owning the upload.
+   * @param id - existing image draft id to replace.
+   * @param file - rewritten image bytes produced by an editor.
+   * @param uploadImages - whether the Session stages image uploads.
+   * @returns whether an image draft existed for `id`.
+   */
+  replaceDraftImage(sessionId: SessionId, id: DraftAttachmentId, file: File, uploadImages: boolean): boolean {
+    const current = this.draftAttachments.get(id)
+    if (current === undefined || current.kind !== 'image') return false
+    revokePreview(current.previewUrl)
+    const replacement: ComposerImageAttachment = { ...browserDraftAttachment(file), id }
+    this.draftAttachments.set(id, replacement)
+    probeDimensions(replacement)
+    if (uploadImages) this.beginFileUpload(sessionId, replacement)
+    else this.dropUpload(id)
+    return true
+  }
+
+  /**
    * Stage carried file and image drafts again for a new Session.
    * @param sessionId - target Agent-scope identity after a Workspace switch.
    * @param ids - carried draft attachment ids.

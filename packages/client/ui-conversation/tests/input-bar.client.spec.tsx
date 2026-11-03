@@ -110,6 +110,7 @@ interface BenchOptions {
   /** Endpoints the Session's access snapshot excludes (absent = every endpoint is allowed). */
   deniedEndpoints?: readonly string[]
   addFiles?: (files: readonly File[], directories?: ReadonlySet<File>) => string | null
+  replaceAttachment?: (id: DraftAttachmentId, file: File) => void
   commandMenuOpen?: boolean
   busyEnter?: 'queue' | 'steer'
   toggleCommandMenu?: (selection: { start: number; end: number }) => void
@@ -211,6 +212,7 @@ function bench(over?: BenchOptions) {
     useFileUploads: bindSnapshotSelector(createSnapshotStore<DraftFileUploads>(over?.fileUploads ?? {})),
     retryFileUpload: undefined,
     removeAttachment,
+    replaceAttachment: over?.replaceAttachment,
     resolveDraftAttachments: ids => ids.flatMap((id) => {
       const attachment = over?.attachments?.find(candidate => candidate.id === id)
       return attachment === undefined ? [] : [attachment]
@@ -474,6 +476,18 @@ describe('composer placeholder visibility', () => {
 })
 
 describe('image draft rail', () => {
+  it('forwards an in-place annotator rewrite for a staged image id', () => {
+    const replaceAttachment = vi.fn()
+    const { view } = bench({ replaceAttachment })
+    const card = view.container.querySelector<HTMLElement>('[data-composer-card]')!
+    const image = new File([Uint8Array.of(1, 2)], 'edited.png', { type: 'image/png' })
+    act(() => {
+      card.dispatchEvent(new CustomEvent('exocortex:replace-draft-image', {
+        detail: { id: 'draft-1', file: image },
+      }))
+    })
+    expect(replaceAttachment).toHaveBeenCalledWith('draft-1', image)
+  })
   it.each([false, true])('accepts pasted and dropped images for a continuable child (running=%s)', async (running) => {
     const addFiles = vi.fn(() => null)
     const { textarea, shell, slotCalls } = bench({ subagent: CONTINUABLE_CHILD, running, addFiles })

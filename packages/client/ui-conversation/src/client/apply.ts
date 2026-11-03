@@ -479,6 +479,7 @@ export function apply(ctx: Context, config: Config = Config({})): void {
           keyboard: undefined,
           addFiles: undefined,
           removeAttachment: undefined,
+          replaceAttachment: undefined,
           resolveDraftAttachments: undefined,
           retryFileUpload: undefined,
           toggleCommandMenu: undefined,
@@ -543,6 +544,10 @@ export function apply(ctx: Context, config: Config = Config({})): void {
         },
         removeAttachment: (id) => {
           if (shell.removeAttachment(id)) conversation.releaseDraftAttachment(id)
+        },
+        replaceAttachment: (id, file) => {
+          const ordinary = sessions.binding(sessionId)?.session.getSnapshot().subagent === null
+          conversation.replaceDraftImage(sessionId, id, file, ordinary)
         },
         resolveDraftAttachments: ids => conversation.resolveDraftAttachments(ids),
         retryFileUpload: (id) => {
