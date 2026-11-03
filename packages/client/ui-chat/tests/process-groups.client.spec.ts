@@ -88,6 +88,26 @@ describe('Definition-owned Chat process groups', () => {
     expect(processActivity([{ ...node, data: { root } }]).runningDetail).toBe(expected)
   })
 
+  it('prefers the model intent over raw command text for the running detail', () => {
+    const argsRaw = JSON.stringify({ i: 'Run focused tests', command: 'npm test' })
+    const node = tool('call', 2)
+    const root = { ...node.data.root, argsRaw, args: PartialArguments.fromText(argsRaw) }
+    expect(processActivity([{ ...node, data: { root } }]).runningDetail).toBe('Run focused tests')
+    const streamed = new PartialArguments()
+    streamed.append('{"i":"Find ')
+    const live: ChatNode<'tool-call'> = {
+      ...tool('call', 2),
+      data: { root: { phase: 'preparing', args: streamed, callId: 'call', name: 'bash', turn: 1, step: 1, time: 2, subCalls: [] } },
+    }
+    expect(processActivity([live]).runningDetail).toBe('Find')
+    streamed.append('test files","command":"find ."}')
+    streamed.refresh()
+    expect(processActivity([live]).runningDetail).toBe('Find test files')
+    const blank = JSON.stringify({ i: '  \n ', command: 'pwd' })
+    const fallback = { ...node.data.root, argsRaw: blank, args: PartialArguments.fromText(blank) }
+    expect(processActivity([{ ...node, data: { root: fallback } }]).runningDetail).toBe('pwd')
+  })
+
   it('keeps 160 graphemes when the bounded prefix splits a surrogate pair', () => {
     const command = '👩‍💻'.repeat(87) + '☀️' + 'a'.repeat(71) + '👩‍💻'
     expect(command).toHaveLength(513)

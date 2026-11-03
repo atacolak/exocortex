@@ -150,6 +150,12 @@ export interface ToolRowModel {
   /** Generic rows retain the wire tool name; available arguments append their summary. */
   summary: string
   /**
+   * The model's own one-line task intent from `arguments.i`, whitespace
+   * collapsed. Present at every stage, including a streaming prefix; undefined
+   * when the field is absent, blank, or not a string.
+   */
+  intent: string | undefined
+  /**
    * Operation-time absolute result path for file rows. Old results without
    * location metadata retain their argument fallback; running relative paths
    * stay unavailable until their result identifies the target.
@@ -253,16 +259,22 @@ const FILE_PATH_VARIANTS: ReadonlySet<ToolRowVariant> = new Set(['read', 'write'
 /**
  * Summary material read the same way at every stage from the argument view: a
  * complete `file_path` for file tools, otherwise the `description` text so far.
- * Empty when the view carries neither, so the caller falls back to the raw text.
+ * A shell row carrying an intent shows its command instead, because the intent
+ * now occupies the heading the description would otherwise duplicate. Empty
+ * when the view carries neither, so the caller falls back to the raw text.
  */
 function argumentSummary(
-  variant: ToolRowVariant, args: ToolArgs, cwd?: string, home?: string,
+  variant: ToolRowVariant, args: ToolArgs, intent: string | undefined, cwd?: string, home?: string,
 ): { summary: string; filePath: string | undefined } {
   if (FILE_PATH_VARIANTS.has(variant)) {
     const path = args.complete('file_path') ? args.text('file_path') : undefined
     // Decoding text can discover an invalid escape and make complete() false.
     const filePath = path !== undefined && path !== '' && args.complete('file_path') ? firstLine(path) : undefined
     return { summary: filePath === undefined ? '' : abbreviateHomePath(relativizeToCwd(filePath, cwd), home), filePath }
+  }
+  if (variant === 'bash' && intent !== undefined) {
+    const command = args.text('command')
+    return { summary: command === undefined ? '' : firstLine(command), filePath: undefined }
   }
   const description = args.text('description')
   return { summary: description === undefined ? '' : firstLine(description), filePath: undefined }
@@ -296,6 +308,19 @@ export function formatToolBody(variant: ToolRowVariant, argsRaw: string): string
 }
 
 /**
+ * Derive the model-authored `arguments.i` intent, normalized to the single
+ * visual line a row heading occupies.
+ * @param args - argument view for any call stage.
+ * @returns the normalized intent, or undefined when absent, blank, or not a string.
+ */
+function deriveIntent(args: ToolArgs): string | undefined {
+  const intent = args.text('i')
+  if (intent === undefined) return undefined
+  const normalized = intent.replace(/\s+/g, ' ').trim()
+  return normalized === '' ? undefined : normalized
+}
+
+/**
  * Derive the full row model from a frozen call slice.
  * @param toolName - wire tool name (dispatch-supplied; survives windowless results).
  * @param block - preparing call, dispatched call, or result from the snapshot.
@@ -311,7 +336,8 @@ export function toolRowModel(toolName: string, block: ToolCallBlock, cwd?: strin
   // Result metadata marks a settled call that did not finish every requested effect.
   const stopped = done && typeof block.meta === 'object' && block.meta !== null
     && !Array.isArray(block.meta) && (block.meta as Record<string, unknown>).stopped === true
-  const primary = argumentSummary(variant, block.args, cwd, home)
+  const intent = deriveIntent(block.args)
+  const primary = argumentSummary(variant, block.args, intent, cwd, home)
   const argumentPath = primary.filePath ?? (argsRaw === null ? undefined : deriveFilePath(variant, argsRaw))
   const recordedPath = done ? recordedAbsolutePath(block.meta, 'path') : undefined
   const canUseArgumentPath = argumentPath !== undefined
@@ -336,6 +362,7 @@ export function toolRowModel(toolName: string, block: ToolCallBlock, cwd?: strin
     variant,
     titleKey,
     summary,
+    intent,
     filePath,
     bodyRaw,
     output,

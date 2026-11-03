@@ -59,6 +59,7 @@ export function DetailsRow({ toolName, block, cwd, home, openFile, inspect, useD
       toolName={toolName}
       icon={detailIcon(toolName)}
       title={t(titleKey)}
+      intent={model.intent}
       summary={details?.summary ?? details?.items[0]?.title ?? details?.empty ?? model.summary}
       details={details}
       bodyRaw={model.bodyRaw}

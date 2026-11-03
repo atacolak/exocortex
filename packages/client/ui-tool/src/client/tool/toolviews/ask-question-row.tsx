@@ -344,7 +344,7 @@ export function AskQuestionRow({
     }
   }
   if (rowAction !== undefined) return (
-    <QuestionToolRow useDisclosure={useDisclosure} t={t} summary={summary}
+    <QuestionToolRow useDisclosure={useDisclosure} t={t} summary={summary} intent={model.intent}
       bodyRaw={transcript === null ? model.bodyRaw : null} output={transcript === null ? model.output : null}
       askQuestion={transcript} state={state} inspect={inspect}
       openPanel={rowAction} panelLabel={rowActionLabel} />
@@ -357,6 +357,7 @@ export function AskQuestionRow({
       toolName={toolName}
       icon={<IconQuestionOutlineRegular />}
       title={t(model.titleKey)}
+      intent={model.intent}
       summary={summary}
       bodyRaw={transcript === null ? model.bodyRaw : null}
       output={transcript === null ? model.output : null}

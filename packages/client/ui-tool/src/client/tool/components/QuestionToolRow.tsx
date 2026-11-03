@@ -7,7 +7,7 @@ import css from './ToolRow.module.css'
 import questionCss from './QuestionToolRow.module.css'
 
 type QuestionToolRowProps = Pick<ToolRowProps,
-  'useDisclosure' | 't' | 'summary' | 'bodyRaw' | 'output' | 'askQuestion' | 'state' | 'inspect'> & {
+  'useDisclosure' | 't' | 'summary' | 'intent' | 'bodyRaw' | 'output' | 'askQuestion' | 'state' | 'inspect'> & {
     readonly openPanel: () => boolean
     readonly panelLabel: string
   }
@@ -18,7 +18,7 @@ type QuestionToolRowProps = Pick<ToolRowProps,
  * @returns The question's summary and optional expanded record.
  */
 export function QuestionToolRow({
-  useDisclosure, t, summary, bodyRaw, output, askQuestion, state, inspect, openPanel, panelLabel,
+  useDisclosure, t, summary, intent, bodyRaw, output, askQuestion, state, inspect, openPanel, panelLabel,
 }: QuestionToolRowProps) {
   const { expanded, toggle } = useDisclosure()
   const expandable = bodyRaw != null || output != null || askQuestion != null
@@ -28,7 +28,7 @@ export function QuestionToolRow({
       {state === 'running' && <span className={css.visuallyHidden}>{t('row.running')}</span>}
       <DisclosureRow
         rowClassName={css.row} leadingClassName={css.leading} titleClassName={css.title}
-        chevronClassName={css.chevron} icon={<IconQuestionOutlineRegular />} title={t('ask.rowTitle')}
+        chevronClassName={css.chevron} icon={<IconQuestionOutlineRegular />} title={intent ?? t('ask.rowTitle')}
         running={state === 'running'} open={open} expandable={expandable}
         keepContentWhenOpen onToggle={toggle}
         collapsedContent={<>

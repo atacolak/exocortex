@@ -558,6 +558,20 @@ describe('BashRow terminal card', () => {
     expect(view.getByText('boom', RAW)).toBeTruthy()
   })
 
+  it('heads the collapsed row with only the intent and reveals the command on expand', () => {
+    const argsRaw = JSON.stringify({ i: 'Run the suite', command: 'npm test', description: 'Run suite' })
+    const view = render(<BashRow {...rowProps(settled({
+      call: { name: 'bash', argsRaw },
+      content: [{ type: 'text', text: 'ok\n[exit code: 0]' }],
+    }))} />)
+    expect(view.getByText('Run the suite')).toBeTruthy()
+    expect(view.queryByText('npm test')).toBeNull()
+    expect(view.queryByText('Run suite')).toBeNull()
+    fireEvent.click(view.getByRole('button', { name: /Run the suite/ }))
+    expect(view.getAllByText('npm test').length).toBeGreaterThan(0)
+    expect(view.container.querySelector('[data-terminal]')).not.toBeNull()
+  })
+
   it('shows the call description as the terminal summary', () => {
     const view = render(<BashRow {...rowProps(settled({
       call: { name: 'bash', argsRaw: shellArgs({ description: 'Terminal 3' }) },
@@ -707,14 +721,48 @@ describe('BashRow terminal card', () => {
     }
   })
 
-  it('keeps malformed shell arguments collapsed even when background execution is requested', () => {
+  it('expands a recorded shell result that lost its paired call', () => {
+    const view = render(<BashRow {...rowProps(settled({
+      call: null,
+      content: [{ type: 'text', text: 'plain output' }],
+    }))} />)
+    const row = view.container.querySelector('[data-sample="bash"]')!
+    expect(row.getAttribute('role')).toBe('button')
+    expect(view.queryByText('plain output')).toBeNull()
+    fireEvent.click(row)
+    expect(view.getByText('plain output')).toBeTruthy()
+  })
+
+  it('expands malformed shell arguments to their raw input and plain-text output', () => {
     const view = render(<BashRow {...rowProps(settled({
       call: { name: 'bash', argsRaw: JSON.stringify({ description: 'Wait', run_in_background: true }) },
       content: [{ type: 'text', text: 'started background job job-1' }],
     }))} />)
+    const row = view.container.querySelector('[data-sample="bash"]')!
     expect(view.getByText('Wait')).toBeTruthy()
-    expect(view.container.querySelector('[data-sample="bash"]')?.getAttribute('role')).toBeNull()
+    expect(row.getAttribute('role')).toBe('button')
     expect(view.queryByText('started background job job-1')).toBeNull()
+    fireEvent.click(row)
+    expect(view.getByText(/"description": "Wait"/)).toBeTruthy()
+    expect(view.getByText('started background job job-1')).toBeTruthy()
+  })
+
+  it.each([
+    ['persistent OMP arguments', '{"command":"ls -la"}'],
+    ['description-bearing arguments', ARGS],
+    ['empty arguments', '{}'],
+  ])('expands a plain-text shell result with %s even without a terminal card', (_label, argsRaw) => {
+    const view = render(<BashRow {...rowProps(settled({
+      call: { name: 'bash', argsRaw },
+      content: [{ type: 'text', text: 'first line' }, { type: 'text', text: 'second line' }],
+    }))} />)
+    const row = view.container.querySelector('[data-sample="bash"]')!
+    expect(row.getAttribute('role')).toBe('button')
+    expect(row.getAttribute('aria-expanded')).toBe('false')
+    fireEvent.click(row)
+    expect(row.getAttribute('aria-expanded')).toBe('true')
+    expect(view.getByText('first line\nsecond line', RAW)).toBeTruthy()
+    expect(view.container.querySelector('[data-terminal]')).toBeNull()
   })
 
   it('expands a generic execution error to its original args and full output', () => {

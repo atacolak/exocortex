@@ -112,6 +112,20 @@ describe('tool-call-model', () => {
     expect(toolRowModel('bash', running({ argsRaw: '{"command":"pwd"}' })).summary).toBe('pwd')
   })
 
+  it('derives a one-line intent from arguments.i without displacing the summary', () => {
+    const argsRaw = JSON.stringify({ i: 'Run\n  focused  tests', command: 'npm test', description: 'Run the suite' })
+    for (const block of [running({ argsRaw }), result({ call: { name: 'bash', argsRaw } })]) {
+      expect(toolRowModel('bash', block)).toMatchObject({ intent: 'Run focused tests', summary: 'npm test' })
+    }
+    const streamed = new PartialArguments()
+    streamed.append('{"i":"Find the ')
+    expect(toolRowModel('bash', running({ argsRaw: '{"i":"Find the ', args: streamed })).intent).toBe('Find the')
+    // Absent, blank, and non-string intents leave the localized tool title in charge.
+    expect(toolRowModel('bash', running({ argsRaw: '{"i":" \\n "}' })).intent).toBeUndefined()
+    expect(toolRowModel('bash', running({ argsRaw: '{"i":7}' })).intent).toBeUndefined()
+    expect(toolRowModel('bash', running({ argsRaw: '{"command":"pwd"}' })).intent).toBeUndefined()
+  })
+
   it.each([
     { name: 'web_search', variant: 'search', prefix: '' },
     { name: 'custom-tool', variant: 'others', prefix: 'custom-tool · ' },
@@ -363,6 +377,16 @@ describe('ToolRow', () => {
     expect(view.container.querySelector('[aria-expanded]')?.getAttribute('aria-expanded')).toBe('false')
   })
 
+  it('renders the intent in place of the tool title and holds the raw summary until expanded', () => {
+    const view = render(<ToolRow {...rowProps} intent="Run focused tests" />)
+    expect(view.getByText('Run focused tests')).toBeTruthy()
+    expect(view.queryByText('Bash')).toBeNull()
+    expect(view.queryByText('List files')).toBeNull()
+    fireEvent.click(view.getByRole('button', { name: /Run focused tests/ }))
+    expect(view.getByText('List files')).toBeTruthy()
+    expect(view.container.querySelector('[class*="ioCard"]')).not.toBeNull()
+  })
+
   it('row click expands: chevron leading, summary kept inline, body in the scrolling card', () => {
     const view = render(<ToolRow {...rowProps} />)
     fireEvent.click(view.getByRole('button'))
@@ -594,6 +618,58 @@ describe('GenericToolCard', () => {
     expect(view.getByText('运行命令')).toBeTruthy()
     expect(view.getByText('List files')).toBeTruthy()
     expect(view.container.querySelector('[data-variant="bash"]')).not.toBeNull()
+  })
+
+  it('titles an intent row with the intent alone, revealing its exit badge and terminal card on expand', () => {
+    const argsRaw = JSON.stringify({ i: 'Run focused tests', command: 'npm test', description: 'Run the suite' })
+    const settled = result({
+      call: { name: 'bash', argsRaw },
+      content: [{ type: 'text', text: 'failed\n[exit code: 2]' }],
+    })
+    const view = render(<GenericToolCard {...props('bash', settled)} getFileTriggerProps={() => ({})} />)
+    expect(view.getByText('Run focused tests')).toBeTruthy()
+    expect(view.queryByText('运行命令')).toBeNull()
+    expect(view.queryByText('npm test')).toBeNull()
+    expect(view.getByText('退出码 2')).toBeTruthy()
+    expect(view.container.querySelector('[data-terminal]')).toBeNull()
+    fireEvent.click(view.getByRole('button', { name: /Run focused tests/ }))
+    expect(view.getAllByText('npm test').length).toBeGreaterThan(0)
+    expect(view.container.querySelector('[data-terminal]')).not.toBeNull()
+  })
+
+  it('keeps a read row file link and Read card under the intent heading once expanded', () => {
+    const argsRaw = JSON.stringify({ i: 'Inspect config', file_path: 'src/a.ts' })
+    const settled = result({
+      call: { name: 'read', argsRaw },
+      meta: { path: '/w/src/a.ts', offset: 1, lines: [{ number: 1, text: 'export const a = 1' }], totalLines: 1 },
+      content: [{ type: 'text', text: '<path>/w/src/a.ts</path>\n<type>file</type>\n<content>\nexport const a = 1\n</content>' }],
+    })
+    const openFile = vi.fn()
+    const view = render(<GenericToolCard {...props('read', settled)} cwd="/w" openFile={openFile} getFileTriggerProps={() => ({})} />)
+    expect(view.getByText('Inspect config')).toBeTruthy()
+    expect(view.queryByText('读取')).toBeNull()
+    // The path is raw call material: it waits for the disclosure with the card.
+    expect(view.queryByText('src/a.ts')).toBeNull()
+    expect(view.container.querySelector('[data-read]')).toBeNull()
+    fireEvent.click(view.getByRole('button', { name: /Inspect config/ }))
+    expect(view.container.querySelector('[data-read]')).not.toBeNull()
+    fireEvent.click(view.getByRole('button', { name: 'src/a.ts' }))
+    expect(openFile).toHaveBeenCalledWith('/w/src/a.ts')
+  })
+
+  it('holds intent-row diff totals with the path until the card expands', () => {
+    const argsRaw = JSON.stringify({ i: 'Fix totals', file_path: 'src/a.ts', old_string: 'old', new_string: 'new' })
+    const view = render(<GenericToolCard {...props('edit', running({ name: 'edit', argsRaw }))}
+      getFileTriggerProps={() => ({})} />)
+    const heading = view.container.querySelector('[data-disclosure-row]')
+    expect(heading?.textContent).toContain('Fix totals')
+    expect(heading?.textContent).not.toContain('编辑')
+    expect(heading?.textContent).not.toContain('src/a.ts')
+    expect(heading?.textContent).not.toContain('+1')
+    expect(view.container.querySelector('[data-diff]')).toBeNull()
+    fireEvent.click(view.getByRole('button', { name: /Fix totals/ }))
+    expect(heading?.textContent).toMatch(/src\/a\.ts.*\+1 -1/)
+    expect(view.container.querySelector('[data-diff]')).not.toBeNull()
   })
 
   it.each([
