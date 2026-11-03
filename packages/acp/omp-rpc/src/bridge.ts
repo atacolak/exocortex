@@ -381,7 +381,7 @@ export class OmpBridge {
   }
 
   private async readImages(refs: readonly OmpImageRef[]): Promise<OmpImageInput[]> {
-    const attachments = this.options.ctx.attachments
+    const attachments = this.options.ctx.get('attachments')
     if (attachments === undefined) throw new Error('OMP prompt contains images but the attachment service is not mounted')
     const images: OmpImageInput[] = []
     for (const ref of refs) {
@@ -399,8 +399,8 @@ export class OmpBridge {
   }
 
   private registerCommands(agent: Agent, client: OmpRpcClient): () => void {
-    const disposers = [
-      agent.ctx.commands.register({
+    const definitions: Parameters<Context['commands']['register']>[0][] = [
+      {
         name: 'compact',
         description: 'Compact the attached OMP session natively, preserving its own summary and transcript.',
         input: { hint: '[instructions]' },
@@ -418,8 +418,8 @@ export class OmpBridge {
             return { kind: 'error', text: error instanceof Error ? error.message : String(error) }
           }
         },
-      }),
-      agent.ctx.commands.register({
+      },
+      {
         name: 'omp',
         description: 'Run a native OMP slash command (for example `/omp status`) in the attached session.',
         input: { hint: '<command> [args]' },
@@ -432,10 +432,22 @@ export class OmpBridge {
             return { kind: 'error', text: error instanceof Error ? error.message : String(error) }
           }
         },
-      }),
+      },
     ]
+    const inject = (agent.ctx as { inject?: Context['inject'] }).inject
+    if (inject === undefined) {
+      const disposers = definitions.map(definition => agent.ctx.commands.register(definition))
+      return () => {
+        for (const dispose of disposers) dispose()
+      }
+    }
+    const fiber = agent.ctx.inject(['commands'], (commandCtx) => {
+      for (const definition of definitions) {
+        commandCtx.effect(() => commandCtx.commands.register(definition))
+      }
+    })
     return () => {
-      for (const dispose of disposers) dispose()
+      void fiber.dispose()
     }
   }
 

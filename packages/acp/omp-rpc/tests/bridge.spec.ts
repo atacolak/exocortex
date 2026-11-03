@@ -1,16 +1,24 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { SessionId } from '@deepseek-ai/dsh-session'
-import { afterEach, describe, expect, it } from 'vitest'
+import { PassThrough } from 'node:stream'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import CommandRuntime from '@deepseek-ai/dsh-commands'
+import { Context } from '@deepseek-ai/cordis'
+import { createScope } from '@deepseek-ai/dsh-scope'
+import SessionStore, { Session, SessionId } from '@deepseek-ai/dsh-session'
+import type { SubprocessHandle, SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
+import { afterEach, describe, expect, it, onTestFinished } from 'vitest'
 import { OmpBindings } from '../src/bindings.ts'
 import {
+  OmpBridge,
   ompLaunchArgv,
   ompLaunchEnvironment,
   ompTodoItems,
   parseOmpCommandInput,
   planOmpAttach,
 } from '../src/bridge.ts'
+import { tick } from './harness.ts'
 
 describe('omp commands', () => {
   it('parses a preset and a transcript identity', () => {
@@ -175,5 +183,152 @@ describe('omp todo projection', () => {
   it('reports no todos for a state without phases', () => {
     expect(ompTodoItems({ sessionId: 's1' })).toEqual([])
     expect(ompTodoItems(undefined)).toEqual([])
+  })
+})
+
+interface FakeOmp {
+  readonly subprocess: SubprocessRuntime
+  readonly requests: Record<string, unknown>[]
+}
+
+function fakeOmp(reply: (frame: Record<string, unknown>, send: (frame: unknown) => void) => unknown): FakeOmp {
+  const requests: Record<string, unknown>[] = []
+  const subprocess = {
+    resolveExecutable: async (command: string) => command,
+    spawn: (): SubprocessHandle => {
+      const stdin = new PassThrough()
+      const stdout = new PassThrough()
+      stdout.write(`${JSON.stringify({
+        type: 'ready',
+        protocolVersion: 1,
+        supportedProtocolVersions: [1],
+        maxFrameBytes: 1024 * 1024,
+      })}\n`)
+      let buffered = ''
+      stdin.setEncoding('utf8')
+      stdin.on('data', (chunk: string) => {
+        buffered += chunk
+        let newline = buffered.indexOf('\n')
+        while (newline !== -1) {
+          const line = buffered.slice(0, newline)
+          buffered = buffered.slice(newline + 1)
+          const frame = JSON.parse(line) as Record<string, unknown>
+          requests.push(frame)
+          const data = reply(frame, (extra) => { stdout.write(`${JSON.stringify(extra)}\n`) })
+          stdout.write(`${JSON.stringify({
+            type: 'response',
+            id: frame.id,
+            command: frame.type,
+            success: true,
+            ...data === undefined ? {} : { data },
+          })}\n`)
+          newline = buffered.indexOf('\n')
+        }
+      })
+      const exited = Promise.withResolvers<{ exitCode: number | null; signal: NodeJS.Signals | null }>()
+      return {
+        stdin,
+        stdout,
+        stderr: undefined,
+        control: undefined,
+        collected: {},
+        done: exited.promise,
+        terminate: () => { exited.resolve({ exitCode: 0, signal: null }) },
+        waitForExit: async () => true,
+      } as unknown as SubprocessHandle
+    },
+  } as unknown as SubprocessRuntime
+  return { subprocess, requests }
+}
+
+async function mountedBridge(reply: Parameters<typeof fakeOmp>[0]): Promise<{
+  ctx: Context
+  bridge: OmpBridge
+  bridgeCtx: Context
+  subprocess: SubprocessRuntime
+}> {
+  const ctx = new Context()
+  onTestFinished(() => ctx.fiber.dispose())
+  await ctx.plugin(SessionStore)
+  await ctx.plugin(CommandRuntime)
+  ctx.provide('tools', { definitions: () => [] } as never)
+  const { subprocess } = fakeOmp(reply)
+  ctx.provide('subprocess', subprocess as never)
+  let bridgeCtx!: Context
+  await ctx.plugin(Object.assign((inner: Context) => { bridgeCtx = inner }, {
+    inject: ['commands', 'subprocess', 'tools'],
+  }))
+  const bridge = new OmpBridge({ ctx: bridgeCtx, subprocess, executable: 'omp' })
+  onTestFinished(() => bridge.dispose())
+  return { ctx, bridge, bridgeCtx, subprocess }
+}
+
+async function scopedAgent(ctx: Context, id: string): Promise<Agent> {
+  const session = Session.create(SessionId(id))
+  const agent = { id: session.id, session, model: { current: () => undefined } } as unknown as Agent
+  const scope = createScope(ctx, agent)
+  ;(agent as unknown as { ctx: Context }).ctx = scope.ctx
+  return agent
+}
+
+describe('OmpBridge command registration', () => {
+  it('registers /compact and /omp on an agent scope that never injected commands', async () => {
+    const { ctx, bridge } = await mountedBridge((frame, send) => {
+      if (frame.type === 'get_state') return { sessionId: 'omp-session-1' }
+      if (frame.type === 'get_available_models') return { models: [] }
+      if (frame.type === 'compact') return { tokensBefore: 42 }
+      if (frame.type === 'prompt') {
+        send({ type: 'command_output', text: 'OMP status ok' })
+        return { agentInvoked: false }
+      }
+      return {}
+    })
+    const agent = await scopedAgent(ctx, 'bridge-commands')
+    const sessionDir = await mkdtemp(join(tmpdir(), 'omp-attach-'))
+    onTestFinished(() => rm(sessionDir, { recursive: true, force: true }))
+
+    const attachment = await bridge.attach(agent, { mode: 'attach', sessionDir, cwd: '/work' })
+    await tick()
+
+    expect(attachment.session.id).toBe('omp-session-1')
+    expect(ctx.commands.list(agent).map(descriptor => descriptor.name)).toEqual(['compact', 'omp'])
+
+    const signal = new AbortController().signal
+    const compact = await ctx.commands.execute(agent, '/compact', [], signal)
+    expect(compact?.result).toEqual({ kind: 'success', text: 'Compacted OMP context (42 tokens before).' })
+
+    const omp = await ctx.commands.execute(agent, '/omp status', [], signal)
+    expect(omp?.result).toEqual({ kind: 'success', text: 'OMP status ok' })
+
+    await bridge.detach(agent.id)
+  })
+})
+
+describe('OmpBridge image resolution', () => {
+  it('reads pasted images through the attachment lookup without injecting the service', async () => {
+    const ctx = new Context()
+    onTestFinished(() => ctx.fiber.dispose())
+    const readImage = async (): Promise<{ data: Uint8Array }> => ({ data: new Uint8Array([1, 2, 3]) })
+    await ctx.plugin({
+      name: 'test-attachments',
+      apply: (inner: Context) => { inner.provide('attachments', { readImage } as never) },
+    })
+    ctx.provide('tools', { definitions: () => [] } as never)
+    ctx.provide('commands', { register: () => () => {} } as never)
+    const { subprocess } = fakeOmp(() => ({}))
+    ctx.provide('subprocess', subprocess as never)
+    let bridgeCtx!: Context
+    await ctx.plugin(Object.assign((inner: Context) => { bridgeCtx = inner }, {
+      inject: ['commands', 'subprocess', 'tools'],
+    }))
+    expect(() => bridgeCtx.attachments).toThrow(/without inject/)
+    const bridge = new OmpBridge({ ctx: bridgeCtx, subprocess, executable: 'omp' })
+
+    const readImages = (bridge as unknown as {
+      readImages(refs: readonly unknown[]): Promise<readonly { data: string; mimeType: string }[]>
+    }).readImages.bind(bridge)
+    const images = await readImages([{ mediaType: 'image/png' }])
+
+    expect(images).toEqual([{ data: Buffer.from([1, 2, 3]).toString('base64'), mimeType: 'image/png' }])
   })
 })
