@@ -5,7 +5,7 @@ import { createElement } from 'react'
 import { cleanup, render } from '@testing-library/react'
 import { Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import { Context } from '@deepseek-ai/cordis'
-import { activeDockPaneId, findTabPane, getPane } from '@deepseek-ai/dsh-client-ui-dockkit'
+import { activeDockPaneId, dockPaneIds, findTabPane, getPane, MAX_DOCK_PANES } from '@deepseek-ai/dsh-client-ui-dockkit'
 import type { TabId } from '@deepseek-ai/dsh-client-ui-dockkit'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { createSidebarRightController } from '../src/client/service.ts'
@@ -214,6 +214,12 @@ describe('sidebar focus targets', () => {
     h.controller.toggleFullscreen(target)
     expect(h.layout().mode).toBe('push')
     h.controller.split(target.paneId)
+    while (dockPaneIds(h.layout()).length < MAX_DOCK_PANES) {
+      const before = dockPaneIds(h.layout()).length
+      h.controller.split(dockPaneIds(h.layout())[before - 1]!)
+      if (dockPaneIds(h.layout()).length === before) break
+    }
+    expect(dockPaneIds(h.layout())).toHaveLength(MAX_DOCK_PANES)
     expect(h.controller.splitBlock(target)).toBe('budget')
     h.controller.openTab('files')
     const files = h.controller.active()!.id
@@ -506,6 +512,12 @@ describe('sidebar keyboard commands', () => {
     releases.push(h.show())
     const splitNow = split.resolve(context)
     if (splitNow.status === 'handled') splitNow.run()
+    while (dockPaneIds(h.layout()).length < MAX_DOCK_PANES) {
+      const before = dockPaneIds(h.layout()).length
+      h.controller.split(dockPaneIds(h.layout())[before - 1]!)
+      if (dockPaneIds(h.layout()).length === before) break
+    }
+    expect(dockPaneIds(h.layout())).toHaveLength(MAX_DOCK_PANES)
     expect(h.controller.splitBlock(h.controller.commandTarget(null)!)).toBe('budget')
     h.controller.openTab('files')
     const files = h.controller.active()!.id

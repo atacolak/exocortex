@@ -13,7 +13,7 @@ const pane = { id: 'pane1', kind: 'pane', host: 'dock', tabs: ['tab2'], activeTa
 const layout = { ...empty.layout, nodes: { pane1: pane }, tabs: { tab2: tab } }
 const valid = { layout, minted: 2 }
 const split = { id: 'split3', kind: 'split', axis: 'row', children: ['pane1', 'pane4'], sizes: [0.5, 0.5] }
-const otherPane = { ...pane, id: 'pane4', tabs: [], activeTabId: undefined }
+const otherPane = { id: 'pane4', kind: 'pane', host: 'dock', tabs: [] } as const
 const splitLayout = { ...layout, rootId: 'split3', nodes: { pane1: pane, split3: split, pane4: otherPane } }
 
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); localStorage.clear() })
@@ -37,16 +37,6 @@ it.each([
   ['split cycle', { minted: 4, layout: { ...splitLayout, nodes: { ...splitLayout.nodes, split3: { ...split, children: ['split3', 'pane1'] } } } }],
   ['invalid split sum', { minted: 4, layout: { ...splitLayout, nodes: { ...splitLayout.nodes, split3: { ...split, sizes: [0.4, 0.4] } } } }],
   ['mismatched split sizes', { minted: 4, layout: { ...splitLayout, nodes: { ...splitLayout.nodes, split3: { ...split, sizes: [0.2, 0.3, 0.5] } } } }],
-  ['vertical split', { minted: 4, layout: { ...splitLayout, nodes: { ...splitLayout.nodes, split3: { ...split, axis: 'column' } } } }],
-  ['three docked panes', { minted: 5, layout: { ...splitLayout, nodes: {
-    ...splitLayout.nodes, pane5: { ...otherPane, id: 'pane5' },
-    split3: { ...split, children: ['pane1', 'pane4', 'pane5'], sizes: [0.3, 0.3, 0.4] },
-  } } }],
-  ['nested split', { minted: 6, layout: { ...splitLayout, nodes: {
-    ...splitLayout.nodes, pane6: { ...otherPane, id: 'pane6' },
-    split3: { ...split, children: ['pane1', 'split5'] },
-    split5: { ...split, id: 'split5', children: ['pane4', 'pane6'] },
-  } } }],
   ['split as active pane', { minted: 4, layout: { ...splitLayout, activePaneId: 'split3' } }],
   ['floating split', { minted: 4, layout: { ...splitLayout, floats: ['split3'] } }],
   ['float without rectangle', { minted: 3, layout: { ...empty.layout, tabs: { tab2: tab }, floats: ['float3'], nodes: { ...empty.layout.nodes, float3: { ...pane, id: 'float3', host: 'float' } } } }],
@@ -58,6 +48,27 @@ it.each([
   expect(localStorage.getItem(key)).toBeNull()
   expect(readSidebarLayout('other')).toEqual(empty)
   expect(new SidebarTabInventory().source.getSnapshot()).toEqual([])
+})
+
+it('restores two-dimensional, three-pane, and nested dock layouts', () => {
+  const columnSplit = { ...splitLayout, nodes: { ...splitLayout.nodes, split3: { ...split, axis: 'column' } } }
+  localStorage.setItem(key, JSON.stringify({ bySession: { [session]: { layout: columnSplit, minted: 4 } } }))
+  expect(readSidebarLayout(session)).toMatchObject({ layout: columnSplit, minted: 4 })
+
+  const threePanes = { ...splitLayout, nodes: {
+    ...splitLayout.nodes, pane5: { ...otherPane, id: 'pane5' },
+    split3: { ...split, children: ['pane1', 'pane4', 'pane5'], sizes: [0.3, 0.3, 0.4] },
+  } }
+  localStorage.setItem(key, JSON.stringify({ bySession: { [session]: { layout: threePanes, minted: 5 } } }))
+  expect(readSidebarLayout(session)).toMatchObject({ layout: threePanes, minted: 5 })
+
+  const nested = { ...splitLayout, nodes: {
+    ...splitLayout.nodes, pane6: { ...otherPane, id: 'pane6' },
+    split3: { ...split, children: ['pane1', 'split5'], sizes: [0.5, 0.5] },
+    split5: { ...split, id: 'split5', axis: 'column', children: ['pane4', 'pane6'], sizes: [0.5, 0.5] },
+  } }
+  localStorage.setItem(key, JSON.stringify({ bySession: { [session]: { layout: nested, minted: 6 } } }))
+  expect(readSidebarLayout(session)).toMatchObject({ layout: nested, minted: 6 })
 })
 
 it('discards structurally invalid JSON envelopes and keeps an empty saved Session usable', () => {

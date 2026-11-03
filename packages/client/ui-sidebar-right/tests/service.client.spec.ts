@@ -11,7 +11,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { PaneId, TabId } from '@deepseek-ai/dsh-client-ui-dockkit'
-import { dockPaneIds, findTabPane, getPane } from '@deepseek-ai/dsh-client-ui-dockkit'
+import { dockPaneIds, findTabPane, getPane, MAX_DOCK_PANES } from '@deepseek-ai/dsh-client-ui-dockkit'
 import type { SidebarRightCloseHandler } from '../src/client/service.ts'
 import { createSidebarRightStore } from '../src/client/stores.ts'
 import { controllerHarness as harness, SESSION } from './controller-harness.client.ts'
@@ -138,8 +138,21 @@ describe('SidebarRightController — opening', () => {
 
     publish()
     controller.openResource('dsh-resource://file/session/s-test/b.txt', { preferNewPane: true })
-    expect(dockPaneIds(layout())).toHaveLength(2)
-    expect(findTabPane(layout(), tabOf('b.txt')).id).toBe(pane.id)
+    const b = tabOf('b.txt')
+    expect(dockPaneIds(layout())).toHaveLength(3)
+    expect(findTabPane(layout(), b).id).not.toBe(pane.id)
+    expect(findTabPane(layout(), b).tabs).toEqual([b])
+
+    publish()
+    controller.openResource('dsh-resource://file/session/s-test/c.txt', { preferNewPane: true })
+    expect(dockPaneIds(layout())).toHaveLength(MAX_DOCK_PANES)
+
+    publish()
+    const atLimit = entries()
+    controller.openResource('dsh-resource://file/session/s-test/d.txt', { preferNewPane: true })
+    expect(dockPaneIds(layout())).toHaveLength(MAX_DOCK_PANES)
+    expect(findTabPane(layout(), tabOf('d.txt')).id).toBe(findTabPane(layout(), tabOf('c.txt')).id)
+    expect(entries()).toBe(atLimit + 1)
   })
 
   it('falls back when the pane is too narrow and reveals existing content without splitting', () => {
@@ -498,8 +511,8 @@ describe('SidebarRightController — layout operations', () => {
     publish()
     const [float] = layout().floats
     expect(controller.split(float)).toBeUndefined()
-    // The budget: split to two panes, then no more.
-    while (dockPaneIds(layout()).length < 2) {
+    // The budget: split up to the kit's four-pane cap, then no more.
+    while (dockPaneIds(layout()).length < MAX_DOCK_PANES) {
       expect(controller.split(dockPaneIds(layout()).at(-1))).toBeDefined()
       publish()
     }

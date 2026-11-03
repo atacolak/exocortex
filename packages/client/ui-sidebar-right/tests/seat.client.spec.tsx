@@ -11,7 +11,7 @@ import type { ShortcutCatalogEntry, ShortcutCommandId } from '@deepseek-ai/dsh-c
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { MainPanelId } from '@deepseek-ai/dsh-client-ui-layout/client'
 import type { PaneId, SplitId, TabId } from '@deepseek-ai/dsh-client-ui-dockkit'
-import { dockPaneIds, getPane } from '@deepseek-ai/dsh-client-ui-dockkit'
+import { dockPaneIds, getPane, MAX_DOCK_PANES } from '@deepseek-ai/dsh-client-ui-dockkit'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { apply, inject } from '../src/client/index.ts'
 import { intentsFor } from '../src/client/shell/SidebarRight.tsx'
@@ -997,16 +997,17 @@ describe('slot-owned useTabInfo', () => {
       h.catalog.set([split])
       h.controller.toggleExpanded()
       h.controller.split()
+      while (dockPaneIds(h.layout()).length < MAX_DOCK_PANES) h.controller.split(dockPaneIds(h.layout()).at(-1))
     })
     const anchor = element(h.view.container, '[data-dockkit-split-button]').parentElement!
     fireEvent.keyDown(anchor, { key: 'Tab' })
     fireEvent.focus(anchor)
-    expect(document.querySelector('[role="tooltip"]')?.getAttribute('aria-label')).toBe('Two panes is the limit ⌘ \\')
+    expect(document.querySelector('[role="tooltip"]')?.getAttribute('aria-label')).toBe('Four panes is the limit ⌘ \\')
     act(() => { h.catalog.set([{ ...split, binding: { code: 'KeyG', modifiers: ['control'] },
       keys: ['Ctrl', '+', 'G'], aria: 'Control+G' }]) })
-    expect(document.querySelector('[role="tooltip"]')?.getAttribute('aria-label')).toBe('Two panes is the limit Ctrl + G')
+    expect(document.querySelector('[role="tooltip"]')?.getAttribute('aria-label')).toBe('Four panes is the limit Ctrl + G')
     act(() => { h.catalog.set([{ ...split, binding: null, keys: [], aria: undefined }]) })
-    expect(document.querySelector('[role="tooltip"]')?.textContent).toBe('Two panes is the limit')
+    expect(document.querySelector('[role="tooltip"]')?.textContent).toBe('Four panes is the limit')
   })
 
   it('advertises configured pane and page-close controls', async () => {
@@ -1023,21 +1024,25 @@ describe('slot-owned useTabInfo', () => {
     }
   })
 
-  it('explains the two-pane limit and adds a guide only to a pane without one', async () => {
+  it('explains the four-pane budget, accepts 2D drops, and adds a guide only to a pane without one', async () => {
     const h = await mountSeat()
     // Expanding first seeds the left pane's guide; only the right pane will lack one.
     act(() => { h.controller.toggleExpanded() })
     h.open()
+    expect(h.view.container.querySelector('[data-dockkit-surface]')?.getAttribute('data-dockkit-drop-zones')).toBe('edges')
     const splitButtons = () => h.view.container.querySelectorAll<HTMLButtonElement>('[data-dockkit-split-button]')
     expect(splitButtons()).toHaveLength(1)
     act(() => { h.controller.split() })
     expect(dockPaneIds(h.layout())).toHaveLength(2)
+    while (dockPaneIds(h.layout()).length < MAX_DOCK_PANES) {
+      act(() => { expect(h.controller.split()).toBeDefined() })
+    }
     const stored = h.instance.getSnapshot()
     act(() => { expect(h.controller.split()).toBeUndefined() })
     expect(h.instance.getSnapshot()).toBe(stored)
-    expect(splitButtons()).toHaveLength(2)
+    expect(splitButtons()).toHaveLength(MAX_DOCK_PANES)
     expect([...splitButtons()].every(button => button.hasAttribute('disabled'))).toBe(true)
-    const right = dockPaneIds(h.layout())[1]!
+    const right = dockPaneIds(h.layout()).at(-1)!
     h.open('right.txt', { paneId: right })
     const guide = getPane(h.layout(), right).tabs.find(id => h.layout().tabs[id]?.kind === 'guide')!
     act(() => { h.actions.closeTab(SESSION, guide) })
@@ -1045,9 +1050,11 @@ describe('slot-owned useTabInfo', () => {
     expect(add.closest('[data-dockkit-pane]')?.getAttribute('data-dockkit-pane')).toBe(right)
     fireEvent.click(add)
     expect(getPane(h.layout(), right).tabs.filter(id => h.layout().tabs[id]?.kind === 'guide')).toHaveLength(1)
-    const closing = [...getPane(h.layout(), right).tabs]
-    act(() => { for (const tabId of closing) h.actions.closeTab(SESSION, tabId) })
-    expect(dockPaneIds(h.layout())).toHaveLength(1)
+    while (dockPaneIds(h.layout()).length > 1) {
+      const last = dockPaneIds(h.layout()).at(-1)!
+      const closing = [...getPane(h.layout(), last).tabs]
+      act(() => { for (const tabId of closing) h.actions.closeTab(SESSION, tabId) })
+    }
     expect(splitButtons()).toHaveLength(1)
     expect(splitButtons()[0]?.disabled).toBe(false)
   })
