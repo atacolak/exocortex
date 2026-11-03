@@ -53,6 +53,10 @@ export type { RiskConfirmationProps } from './RiskConfirmation.tsx'
 export { ConnectionIndicator } from './ConnectionIndicator.tsx'
 export type { ConnectionIndicatorState } from './ConnectionIndicator.tsx'
 export { FishLogo, FISH_LOGO_PATH, FISH_LOGO_VIEWBOX } from './FishLogo.tsx'
+export {
+  PenroseMark, PENROSE_BREATH_MS, PENROSE_FACES, PENROSE_MARK_VIEWBOX, PENROSE_SILHOUETTE_PATH,
+} from './PenroseMark.tsx'
+export type { PenroseFace, PenroseFaceTone, PenroseMarkProps } from './PenroseMark.tsx'
 export { BrandWordmark } from './BrandWordmark.tsx'
 export type { BrandWordmarkProps } from './BrandWordmark.tsx'
 export {

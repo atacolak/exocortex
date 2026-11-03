@@ -1,0 +1,105 @@
+.mark {
+  display: block;
+  flex: none;
+  overflow: visible;
+}
+
+.light {
+  fill: var(--dsw-alias-penrose-light);
+}
+
+.mid {
+  fill: var(--dsw-alias-penrose-mid);
+}
+
+.deep {
+  fill: var(--dsw-alias-penrose-deep);
+}
+
+.backing {
+  fill: var(--dsw-alias-penrose-deep);
+}
+
+.breathing {
+  transform-origin: 50% 50%;
+  animation: penrose-breathe-scale 1.4s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+
+.breathing .light {
+  animation: penrose-breathe-light 1.4s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+
+.breathing .mid {
+  animation: penrose-breathe-mid 1.4s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+
+.breathing .deep {
+  animation: penrose-breathe-deep 1.4s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+
+@keyframes penrose-breathe-scale {
+  0%,
+  100% {
+    transform: scale(0.97);
+  }
+
+  50% {
+    transform: scale(1.03);
+  }
+}
+
+@keyframes penrose-breathe-light {
+  0%,
+  100% {
+    opacity: 0.42;
+    transform: translate(0, 0);
+  }
+
+  50% {
+    opacity: 1;
+    transform: translate(1.9px, -1.1px);
+  }
+}
+
+@keyframes penrose-breathe-mid {
+  0%,
+  100% {
+    opacity: 0.42;
+    transform: translate(0, 0);
+  }
+
+  50% {
+    opacity: 1;
+    transform: translate(-1.9px, -1.1px);
+  }
+}
+
+@keyframes penrose-breathe-deep {
+  0%,
+  100% {
+    opacity: 0.42;
+    transform: translate(0, 0);
+  }
+
+  50% {
+    opacity: 1;
+    transform: translate(0, 2.2px);
+  }
+}
+
+.breathing .mid {
+  animation-delay: -0.45s;
+}
+
+.breathing .deep {
+  animation-delay: -0.9s;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .breathing,
+  .breathing .light,
+  .breathing .mid,
+  .breathing .deep {
+    animation: none;
+  }
+}
