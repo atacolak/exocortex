@@ -254,6 +254,7 @@ export type OmpHydrationEvent =
   | { readonly type: 'step/end'; readonly data: SessionEvent<'step/end'>['data'] }
   | { readonly type: 'user/message'; readonly data: SessionEvent<'user/message'>['data'] }
   | { readonly type: 'assistant/message'; readonly data: SessionEvent<'assistant/message'>['data'] }
+  | { readonly type: 'tool/call'; readonly data: SessionEvent<'tool/call'>['data'] }
   | { readonly type: 'tool/result'; readonly data: SessionEvent<'tool/result'>['data'] }
 
 interface TranscriptContentPart {
@@ -414,6 +415,7 @@ export async function ompHydrationEvents(path: string, limit = 200): Promise<Omp
     events.push({ type: 'step/start', data: { turn, step } })
   }
 
+  const messages: TranscriptMessage[] = []
   for (const line of text.split('\n')) {
     if (line.trim().length === 0) continue
     let entry: TranscriptMessageEntry
@@ -422,9 +424,24 @@ export async function ompHydrationEvents(path: string, limit = 200): Promise<Omp
     } catch {
       continue
     }
-    if (entry.type !== 'message') continue
-    const message = entry.message
-    if (message === undefined) continue
+    if (entry.type !== 'message' || entry.message === undefined) continue
+    messages.push(entry.message)
+  }
+
+  const resultsBeforeNextMessage = (index: number): ReadonlySet<string> => {
+    const ids = new Set<string>()
+    for (let cursor = index + 1; cursor < messages.length; cursor += 1) {
+      const next = messages[cursor] as TranscriptMessage
+      if (next.role === 'user' || next.role === 'assistant') break
+      if (next.role === 'toolResult' && typeof next.toolCallId === 'string' && next.toolCallId.length > 0) {
+        ids.add(next.toolCallId)
+      }
+    }
+    return ids
+  }
+
+  const openCalls = new Set<string>()
+  for (const [index, message] of messages.entries()) {
     if (message.role === 'user') {
       const content = textBlocks(message.content)
       if (content.length === 0) continue
@@ -436,7 +453,9 @@ export async function ompHydrationEvents(path: string, limit = 200): Promise<Omp
       continue
     }
     if (message.role === 'assistant') {
+      const results = resultsBeforeNextMessage(index)
       const content = assistantBlocks(message.content)
+        .filter(block => block.type !== 'tool-call' || results.has(block.id))
       if (content.length === 0) continue
       const events = current ?? openTurn()
       if (stepHasAssistant) openStep(events)
@@ -452,18 +471,27 @@ export async function ompHydrationEvents(path: string, limit = 200): Promise<Omp
         },
       })
       stepHasAssistant = true
+      for (const block of content) {
+        if (block.type !== 'tool-call') continue
+        events.push({
+          type: 'tool/call',
+          data: { turn, step, callId: block.id, name: block.name, arguments: block.arguments },
+        })
+        openCalls.add(block.id)
+      }
       continue
     }
     if (message.role === 'toolResult' && typeof message.toolCallId === 'string' && message.toolCallId.length > 0) {
+      const callId = ToolCallId(message.toolCallId)
+      if (current === undefined || !openCalls.delete(callId)) continue
       const content = textBlocks(message.content)
-      const events = current ?? openTurn()
-      events.push({
+      current.push({
         type: 'tool/result',
         data: {
           turn,
           step,
           message: createToolResultMessage({
-            callId: ToolCallId(message.toolCallId),
+            callId,
             content,
             isError: message.isError === true,
           }),
@@ -495,6 +523,8 @@ export async function ompHydrationEvents(path: string, limit = 200): Promise<Omp
           return { type: 'step/end', data: { ...event.data, turn } }
         case 'assistant/message':
           return { type: 'assistant/message', data: { ...event.data, turn } }
+        case 'tool/call':
+          return { type: 'tool/call', data: { ...event.data, turn } }
         case 'tool/result':
           return { type: 'tool/result', data: { ...event.data, turn } }
         case 'user/message':
@@ -536,6 +566,9 @@ export async function hydrateOmpSession(session: Session, path: string, limit = 
         break
       case 'assistant/message':
         session.append('assistant/message', event.data, { surfaceOp: 'append' })
+        break
+      case 'tool/call':
+        session.append('tool/call', event.data)
         break
       case 'tool/result':
         session.append('tool/result', event.data, { surfaceOp: 'append' })
