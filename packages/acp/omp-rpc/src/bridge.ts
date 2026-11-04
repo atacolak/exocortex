@@ -992,7 +992,8 @@ function abortedByUser(signal: AbortSignal): boolean {
  * @param agent - exact receiving agent.
  * @param definition - command descriptor and handler.
  * @param onReject - receives the validation failure of a definition that was not registered.
- * @returns disposer that removes this exact registration, or `undefined` when it was rejected.
+ * @returns disposer that removes this exact registration; `undefined` only when a
+ *   commands service reachable without injection rejected the definition.
  */
 export function registerAgentCommand(
   agent: Agent,
@@ -1010,7 +1011,7 @@ export function registerAgentCommand(
   const inject = typeof agent.ctx.inject === 'function' ? agent.ctx.inject.bind(agent.ctx) : undefined
   if (inject === undefined) return register(agent.ctx.commands)
   const fiber = agent.ctx.inject(['commands'], (commandCtx) => {
-    commandCtx.effect(() => register(commandCtx.commands))
+    commandCtx.effect(() => register(commandCtx.commands) ?? (() => {}))
   })
   return () => {
     void fiber.dispose()
