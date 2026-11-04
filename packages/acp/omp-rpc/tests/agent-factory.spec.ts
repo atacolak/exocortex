@@ -191,7 +191,7 @@ function types(events: readonly SessionEvent[]): string[] {
   return events.map(event => event.type)
 }
 
-function userTurns(events: readonly SessionEvent[]): SessionEvent[] {
+function userTurns(events: readonly SessionEvent[]): Extract<SessionEvent, { type: 'user/message' }>[] {
   return events.filter((event): event is Extract<SessionEvent, { type: 'user/message' }> => event.type === 'user/message')
 }
 

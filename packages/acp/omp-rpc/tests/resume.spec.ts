@@ -11,6 +11,8 @@ import {
   ompHydrationEvents,
   ompTranscriptTurns,
   readOmpTranscriptTitle,
+  type OmpHydrationCursor,
+  type OmpHydrationOutcome,
   type OmpTranscriptTurn,
 } from '../src/resume.ts'
 
@@ -30,15 +32,15 @@ function entryId(n: number): string {
   return n.toString(16).padStart(8, '0')
 }
 
-function sessionLine(): unknown {
+function sessionLine(): Record<string, unknown> {
   return { type: 'session', version: 3, id: SESSION_UUID, cwd: '/work' }
 }
 
-function userEntry(id: string, parent: string, text: string): unknown {
+function userEntry(id: string, parent: string, text: string): Record<string, unknown> {
   return { type: 'message', id, parentId: parent, message: { role: 'user', content: [{ type: 'text', text }] } }
 }
 
-function assistantEntry(id: string, parent: string, text: string): unknown {
+function assistantEntry(id: string, parent: string, text: string): Record<string, unknown> {
   return { type: 'message', id, parentId: parent, message: { role: 'assistant', content: [{ type: 'text', text }] } }
 }
 
@@ -75,6 +77,14 @@ function sessionTurnNumbers(session: Session): number[] {
   return session.snapshotEvents()
     .filter(event => event.type === 'turn/start')
     .map(event => event.data.turn)
+}
+
+function cursorOf(outcome: OmpHydrationOutcome): OmpHydrationCursor {
+  return {
+    hydratedTurns: outcome.hydratedTurns,
+    ...outcome.hydratedLeafEntryId === undefined ? {} : { hydratedLeafEntryId: outcome.hydratedLeafEntryId },
+    ...outcome.hydratedByteOffset === undefined ? {} : { hydratedByteOffset: outcome.hydratedByteOffset },
+  }
 }
 
 async function transcript(lines: readonly unknown[]): Promise<string> {
@@ -768,11 +778,7 @@ describe('hydrateOmpSession canonical cursor', () => {
       assistantEntry(entryId(8), entryId(7), 'reply 4'),
     ].map(line => JSON.stringify(line)).join('\n') + '\n')
 
-    const second = await hydrateOmpSession(session, path, Number.POSITIVE_INFINITY, {
-      hydratedTurns: first.turns,
-      hydratedLeafEntryId: first.hydratedLeafEntryId,
-      hydratedByteOffset: first.hydratedByteOffset,
-    })
+    const second = await hydrateOmpSession(session, path, Number.POSITIVE_INFINITY, cursorOf(first))
 
     expect(second.appended).toBeGreaterThan(0)
     expect(second.turns).toBe(4)
@@ -790,11 +796,7 @@ describe('hydrateOmpSession canonical cursor', () => {
     const before = session.snapshotEvents().length
     await writeFile(path, 'x'.repeat(size))
 
-    const again = await hydrateOmpSession(session, path, Number.POSITIVE_INFINITY, {
-      hydratedTurns: first.turns,
-      hydratedLeafEntryId: first.hydratedLeafEntryId,
-      hydratedByteOffset: first.hydratedByteOffset,
-    })
+    const again = await hydrateOmpSession(session, path, Number.POSITIVE_INFINITY, cursorOf(first))
 
     expect(again.appended).toBe(0)
     expect(again.turns).toBe(2)
@@ -814,11 +816,7 @@ describe('hydrateOmpSession canonical cursor', () => {
       assistantEntry(entryId(10), entryId(9), 'reply 4'),
     ].map(line => JSON.stringify(line)).join('\n') + '\n')
 
-    const second = await hydrateOmpSession(session, path, Number.POSITIVE_INFINITY, {
-      hydratedTurns: first.turns,
-      hydratedLeafEntryId: first.hydratedLeafEntryId,
-      hydratedByteOffset: first.hydratedByteOffset,
-    })
+    const second = await hydrateOmpSession(session, path, Number.POSITIVE_INFINITY, cursorOf(first))
 
     expect(second.turns).toBe(4)
     expect(second.hydratedLeafEntryId).toBe(entryId(10))
