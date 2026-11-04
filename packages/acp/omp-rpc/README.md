@@ -11,8 +11,37 @@ tools are published to OMP as discoverable host tools.
 directories from the working directory upward, then `~/.omp/agent/agents`.
 Only the human profiles listed in `HUMAN_OMP_PROFILES` (`argon`, `lead`,
 `squad-actor`) enter the Harness roster, as `omp:<profile>`; `argon` sorts
-first. A harness preset built this way composes no plugins of its own — OMP
-serves the whole step.
+first. A harness preset built this way composes only the Harness discovery
+plugins (`cordis_inspect_*`, `plugin_manager`) so OMP's host-tool surface can
+see them; OMP serves the whole step.
+
+## Native commands before attach
+
+Every `omp:*` Session receives OMP's real command surface (`/compact`,
+`/handoff`, `/security`, `skill:<name>`, …) as soon as it is created, before
+any OMP process attaches: the builtin catalog is seeded from OMP's own command
+list and `omp skill list --json` is resolved once per working directory
+(60 s cache). Invoking one attaches the Session first, then sends the exact
+slash line over RPC. `model` stays client-owned and is never shadowed, and a
+command OMP actually advertises overrides the pre-populated definition.
+
+## Live session sockets
+
+Every OMP process publishes `~/.omp/run/<sessionId>.sock` plus a `{ pid,
+sessionId, sessionFile, cwd, agent, startedAt }` sidecar. The bridge attaches
+to that socket directly when a transcript is held by a live TUI/HCOM process,
+so `/omp-resume` works against an active OMP session instead of returning
+`409`. A socket connection detaches only this client; the owning process, its
+transcript, and every other terminal stay alive.
+
+The bridge also polls the run directory (default 1500 ms, immediate startup
+scan) and adopts every live publication: it resolves the Harness Session
+already bound to that OMP session (never minting a duplicate), otherwise
+creates one under the OMP `cwd` workspace with the transcript's `rootAgent`
+preset, hydrates the recorded bubbles when the Session is blank, sets the
+recorded title, and attaches the socket. Any OMP agent running anywhere on
+the machine therefore appears in the sidebar with live status and opens into
+its running conversation without typing a command.
 
 ## Commands
 
@@ -55,6 +84,9 @@ request, transcript, lease, and body-size failures.
 | `cwd` | unset | Fallback working directory when the Session header has none. |
 | `home` | process home | Home owning `~/.omp/agent/agents`. |
 | `autoAttach` | true | Attach OMP-preset Sessions on turn 1. |
+| `watchRunDir` | `<home>/.omp/run` | Live session publications to adopt; `false` disables adoption. |
+| `watchIntervalMs` | `1500` | Adoption poll period. |
+| `bindingsFile` | `$DSH_HOME/omp/bindings.json` | Durable Session-to-transcript bindings. |
 
 Both transcript roots intentionally default to the one OMP sessions directory:
 an interactive OMP run and a Harness-opened run share transcripts, ids, and

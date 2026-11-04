@@ -148,10 +148,24 @@ export function ompPresetOrder(name: string): number {
   return name === 'argon' ? 1 : 5
 }
 
+/** Harness tools every OMP session projects onto its host-tool surface. */
+export const OMP_PRESET_PLUGINS: PresetDefinition['plugins'] = [
+  {
+    id: 'tool-cordis',
+    name: '@deepseek-ai/dsh-tool-cordis',
+    disabled: { __jsExpr: "!ctx.get('cordisInspect')" },
+  },
+  {
+    id: 'tool-plugin-manager',
+    name: '@deepseek-ai/dsh-plugin-manager/tools',
+    disabled: { __jsExpr: "!ctx.get('profileContext')" },
+  },
+]
+
 /**
- * Declare one discovered profile as an agent preset whose composition is
- * empty: every step of an OMP session is served by the OMP process itself, so
- * the harness adds no second set of tools or prompt sections over it.
+ * Declare one discovered profile as an agent preset. OMP serves every step of
+ * the session itself; only the harness-side discovery tools mount here so
+ * OMP's host-tool surface can see `cordis_inspect_*` and `plugin_manager`.
  * @param preset - discovered OMP profile.
  * @param order - roster position from {@link ompPresetOrder}.
  * @returns the preset declaration the registry accepts.
@@ -162,6 +176,6 @@ export function ompPresetDefinition(preset: OmpAgentPreset, order: number): Pres
     name: preset.name,
     ...preset.description === undefined ? {} : { description: preset.description },
     order,
-    plugins: [],
+    plugins: OMP_PRESET_PLUGINS,
   }
 }

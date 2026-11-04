@@ -7,7 +7,7 @@
 import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
-import type { SessionId } from '@deepseek-ai/dsh-session'
+import { SessionId } from '@deepseek-ai/dsh-session'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 
 /** One persisted Harness-session binding to an OMP transcript. */
@@ -159,6 +159,20 @@ export class OmpBindings {
   async get(id: SessionId): Promise<OmpBinding | undefined> {
     await this.tail
     return (await this.load()).sessions[id]
+  }
+
+  /**
+   * Find the Harness session already bound to one OMP session identity.
+   * @param ompSessionId - session id recorded by the OMP transcript header.
+   * @returns the Harness session identity and its binding, or undefined when unbound.
+   */
+  async findByOmpSession(ompSessionId: string): Promise<{ readonly dshSessionId: SessionId; readonly binding: OmpBinding } | undefined> {
+    await this.tail
+    const sessions = (await this.load()).sessions
+    for (const [dshSessionId, binding] of Object.entries(sessions)) {
+      if (binding.ompSessionId === ompSessionId) return { dshSessionId: SessionId(dshSessionId), binding }
+    }
+    return undefined
   }
 
   /**

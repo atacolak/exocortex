@@ -340,6 +340,36 @@ describe('OmpAgentDriver', () => {
     expect(chunks).toEqual([{ type: 'finish', reason: { kind: 'stop' } }])
   })
 
+  it('steers an active run before its open tool finishes and sends once', async () => {
+    const client = new FakeClient()
+    const driver = new OmpAgentDriver(client)
+    const first = (async () => {
+      for await (const _chunk of driver.stream(request([user('u1', 'start a long tool')]), new AbortController().signal)) { /* drain */ }
+    })()
+    await tick()
+    client.settle()
+    client.emit({ type: 'tool_execution_start', toolCallId: 't-1', toolName: 'bash', args: { command: 'sleep 60' } })
+
+    const steering = driver.steerImmediate([user('u2', 'stop and summarize')])
+    await tick()
+    expect(client.commands.filter(command => command.type === 'steer')).toEqual([
+      { type: 'steer', message: 'stop and summarize' },
+    ])
+
+    client.settle()
+    await steering
+    client.emit({ type: 'tool_execution_end', toolCallId: 't-1', toolName: 'bash', result: { content: [] }, isError: false })
+    settlePrompt(client)
+    await first
+
+    const second = (async () => {
+      for await (const _chunk of driver.stream(request([user('u1', 'start a long tool'), user('u2', 'stop and summarize')]), new AbortController().signal)) { /* drain */ }
+    })()
+    await tick()
+    await second
+    expect(client.commands.filter(command => command.type === 'steer')).toHaveLength(1)
+  })
+
   it('projects OMP tool executions in order', async () => {
     const client = new FakeClient()
     const events: unknown[] = []
@@ -349,12 +379,12 @@ describe('OmpAgentDriver', () => {
     })()
     await tick()
     client.settle()
-    client.emit({ type: 'tool_execution_start', toolCallId: 't-1', toolName: 'cordis_inspect_list', args: { platform: 'host' } })
+    client.emit({ type: 'tool_execution_start', toolCallId: 't-1', toolName: 'cordis_inspect_list', args: { platform: 'host' }, intent: 'Inspecting host surface' })
     client.emit({ type: 'tool_execution_end', toolCallId: 't-1', toolName: 'cordis_inspect_list', result: { content: [{ type: 'text', text: '[]' }] }, isError: false })
     settlePrompt(client)
     await consume
     expect(events).toEqual([
-      { kind: 'start', toolCallId: 't-1', toolName: 'cordis_inspect_list', arguments: { platform: 'host' } },
+      { kind: 'start', toolCallId: 't-1', toolName: 'cordis_inspect_list', arguments: { i: 'Inspecting host surface', platform: 'host' } },
       { kind: 'end', toolCallId: 't-1', toolName: 'cordis_inspect_list', content: [{ type: 'text', text: '[]' }], isError: false },
     ])
   })

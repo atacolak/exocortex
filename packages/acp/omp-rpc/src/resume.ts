@@ -278,7 +278,9 @@ interface TranscriptMessage {
 
 interface TranscriptMessageEntry {
   readonly type?: unknown
+  readonly customType?: unknown
   readonly message?: TranscriptMessage
+  readonly data?: unknown
 }
 
 function toolArgumentsWithIntent(raw: unknown, intent: unknown): string {
@@ -322,7 +324,10 @@ function textBlocks(content: unknown): ContentBlock[] {
   return blocks
 }
 
-function assistantBlocks(content: unknown): ContentBlock[] {
+function assistantBlocks(
+  content: unknown,
+  toolStarts: ReadonlyMap<string, { readonly args: unknown; readonly intent: unknown }>,
+): ContentBlock[] {
   const blocks: ContentBlock[] = []
   for (const part of partsOf(content)) {
     if (part.type === 'thinking' && typeof part.thinking === 'string') {
@@ -338,11 +343,15 @@ function assistantBlocks(content: unknown): ContentBlock[] {
       continue
     }
     if (part.type === 'toolCall' && typeof part.id === 'string' && typeof part.name === 'string') {
+      const recorded = toolStarts.get(part.id)
       blocks.push({
         type: 'tool-call',
         id: ToolCallId(part.id),
         name: part.name,
-        arguments: toolArgumentsWithIntent(part.arguments, part.intent),
+        arguments: toolArgumentsWithIntent(
+          part.arguments ?? recorded?.args,
+          part.intent ?? recorded?.intent,
+        ),
       })
     }
   }
@@ -435,12 +444,20 @@ export async function ompHydrationEvents(path: string, limit = 200): Promise<Omp
   }
 
   const messages: TranscriptMessage[] = []
+  const toolStarts = new Map<string, { readonly args: unknown; readonly intent: unknown }>()
   for (const line of text.split('\n')) {
     if (line.trim().length === 0) continue
     let entry: TranscriptMessageEntry
     try {
       entry = JSON.parse(line) as TranscriptMessageEntry
     } catch {
+      continue
+    }
+    if (entry.type === 'custom' && entry.customType === 'tool_execution_start') {
+      const data = recordOf(entry.data)
+      if (typeof data.toolCallId === 'string' && data.toolCallId.length > 0) {
+        toolStarts.set(data.toolCallId, { args: data.args, intent: data.intent })
+      }
       continue
     }
     if (entry.type !== 'message' || entry.message === undefined) continue
@@ -473,7 +490,7 @@ export async function ompHydrationEvents(path: string, limit = 200): Promise<Omp
     }
     if (message.role === 'assistant') {
       const results = resultsBeforeNextMessage(index)
-      const content = assistantBlocks(message.content)
+      const content = assistantBlocks(message.content, toolStarts)
         .filter(block => block.type !== 'tool-call' || results.has(block.id))
       if (content.length === 0) continue
       const events = current ?? openTurn()

@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { discoverOmpPresets, ompPresetOrder } from '../src/presets.ts'
+import { discoverOmpPresets, ompPresetDefinition, ompPresetOrder } from '../src/presets.ts'
 
 const roots: string[] = []
 
@@ -61,5 +61,33 @@ describe('ompPresetOrder', () => {
     expect(ompPresetOrder('argon')).toBe(1)
     expect(ompPresetOrder('builder')).toBe(5)
     expect(ompPresetOrder('squad-actor')).toBe(5)
+  })
+})
+
+describe('ompPresetDefinition', () => {
+  it('mounts the harness discovery tools behind their host services', () => {
+    const definition = ompPresetDefinition({
+      name: 'argon',
+      path: '/root/.omp/agent/agents/argon.md',
+      scope: 'user',
+    }, ompPresetOrder('argon'))
+
+    expect(definition).toMatchObject({
+      id: 'omp:argon',
+      name: 'argon',
+      order: 1,
+      plugins: [
+        {
+          id: 'tool-cordis',
+          name: '@deepseek-ai/dsh-tool-cordis',
+          disabled: { __jsExpr: "!ctx.get('cordisInspect')" },
+        },
+        {
+          id: 'tool-plugin-manager',
+          name: '@deepseek-ai/dsh-plugin-manager/tools',
+          disabled: { __jsExpr: "!ctx.get('profileContext')" },
+        },
+      ],
+    })
   })
 })

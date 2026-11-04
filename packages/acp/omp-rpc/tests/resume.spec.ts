@@ -76,7 +76,7 @@ describe('ompHydrationEvents', () => {
           content: [
             { type: 'thinking', thinking: 'read first' },
             { type: 'text', text: 'reading now' },
-            { type: 'toolCall', id: 'call-1', name: 'read', arguments: { path: '/tmp/a' } },
+            { type: 'toolCall', id: 'call-1', name: 'read', arguments: { path: '/tmp/a' }, intent: 'Reading the file' },
           ],
         },
       },
@@ -128,7 +128,7 @@ describe('ompHydrationEvents', () => {
         content: [
           { type: 'reasoning', text: 'read first' },
           { type: 'text', text: 'reading now' },
-          { type: 'tool-call', name: 'read', arguments: '{"path":"/tmp/a"}' },
+          { type: 'tool-call', name: 'read', arguments: '{"i":"Reading the file","path":"/tmp/a"}' },
         ],
       },
     })
@@ -137,7 +137,7 @@ describe('ompHydrationEvents', () => {
       step: 1,
       callId: 'call-1',
       name: 'read',
-      arguments: '{"path":"/tmp/a"}',
+      arguments: '{"i":"Reading the file","path":"/tmp/a"}',
     })
     expect(events[5]?.data).toMatchObject({
       turn: 1,
@@ -151,6 +151,34 @@ describe('ompHydrationEvents', () => {
     })
     expect(events[8]?.data).toMatchObject({ turn: 1, step: 2 })
     expect(events[10]?.data).toEqual({ turn: 1, reason: { kind: 'completed' } })
+  })
+
+  it('takes intent and arguments from recorded tool execution starts', async () => {
+    const path = await transcript([
+      { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'inspect' }] } },
+      {
+        type: 'message',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'toolCall', id: 'call-9', name: 'read' }],
+        },
+      },
+      {
+        type: 'custom',
+        customType: 'tool_execution_start',
+        data: { toolCallId: 'call-9', toolName: 'read', args: { path: '/tmp/z' }, intent: 'Reading zed' },
+      },
+      { type: 'message', message: { role: 'toolResult', toolCallId: 'call-9', content: [{ type: 'text', text: 'zed' }] } },
+    ])
+
+    const events = await ompHydrationEvents(path)
+    const call = events.find(event => event.type === 'tool/call')
+
+    expect(call?.data).toMatchObject({
+      callId: 'call-9',
+      name: 'read',
+      arguments: '{"i":"Reading zed","path":"/tmp/z"}',
+    })
   })
 
   it('starts a new turn at each user message and drops empty messages', async () => {
