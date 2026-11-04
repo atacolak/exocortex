@@ -5,9 +5,12 @@ import { createToolResultMessage, createUserMessage, ToolCallId } from '@deepsee
 import SessionStore, { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import { scopeOf } from '@deepseek-ai/dsh-scope'
+import { existsSync, readFileSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   OmpAgentFactory,
@@ -411,6 +414,25 @@ describe('OmpAgentFactory keeps the harness request shape intact', () => {
     expect(inboxSplices(events).filter(splice => splice.data.outcome === 'canceled')).toEqual([])
     expect(userTurns(events)).toHaveLength(2)
     await created.dispose()
+  })
+})
+
+const builtLib = fileURLToPath(new URL('../lib/index.js', import.meta.url))
+
+describe('OmpAgentFactory publishes the shared scope module', () => {
+  it('tags the agent context with the agent as the shared scope key', async () => {
+    const h = await harness()
+    const created = await createAgent(h, 'session-factory-scope')
+    expect(scopeOf(created.agent.ctx)).toBe(created.agent)
+    await created.dispose()
+  })
+
+  it.skipIf(!existsSync(builtLib))('keeps dsh-scope and zod external in the built Host bundle', () => {
+    const source = readFileSync(builtLib, 'utf8')
+    expect(source).not.toContain('Symbol("dsh.scope")')
+    expect(source).not.toMatch(/node_modules\/\.pnpm\/zod@/)
+    expect(source).toMatch(/from\s+["']@deepseek-ai\/dsh-scope["']/)
+    expect(source).toMatch(/from\s+["']zod["']/)
   })
 })
 
