@@ -12,6 +12,7 @@ import type {
 
 /** The client surface a driver needs; narrowed for tests and composition. */
 export type OmpDriverClient = Pick<OmpRpcClient, 'request' | 'onFrame'>
+  & Partial<Pick<OmpRpcClient, 'onClose'>>
 
 interface OmpUsage {
   readonly input?: number
@@ -114,14 +115,18 @@ export interface OmpUnsolicitedWake {
   readonly source?: OmpTriggerSource
 }
 
-/** The trigger-card source a waking message maps onto, or undefined for real user prose. */
+/**
+ * Map one waking input onto the trigger-card source it is presented under.
+ * @param text - the exact input text OMP received for the unasked run.
+ * @returns the trigger-card source, or undefined for real user prose.
+ */
 export function ompTriggerSource(text: string): OmpTriggerSource | undefined {
   const head = text.trimStart()
   if (head.startsWith('<system-notice') || text.includes('<task-result')) {
-    return { kind: 'subagent-settled', form: 'notice', summary: boundContextSummary(firstMeaningfulLine(text)) }
+    return { kind: 'omp-subagent-settled', form: 'notice', summary: boundContextSummary(firstMeaningfulLine(text)) }
   }
   if (head.startsWith('<hcom') || head.startsWith('[hcom')) {
-    return { kind: 'agent-message', form: 'relay' }
+    return { kind: 'omp-agent-message', form: 'relay' }
   }
   return undefined
 }
@@ -385,6 +390,69 @@ function objectOf(value: unknown): Record<string, unknown> | undefined {
   return value as Record<string, unknown>
 }
 
+/**
+ * One compaction OMP announced over the live RPC surface.
+ *
+ * OMP brackets every compaction with lifecycle frames but names no transcript
+ * entry in them, so `end` only says a durable boundary now exists; the caller
+ * reads the entry to project it.
+ */
+export type OmpCompactionSignal =
+  | {
+    readonly phase: 'start'
+    /** True for a manual `/compact`, false for a threshold, overflow, or idle pass. */
+    readonly manual: boolean
+    /** Why OMP started an automatic pass. */
+    readonly reason?: string
+    /** Strategy OMP selected for this pass. */
+    readonly action?: string
+  }
+  | {
+    readonly phase: 'end'
+    readonly manual: boolean
+    /** True when OMP abandoned the pass and wrote no boundary. */
+    readonly aborted: boolean
+    /** True when the pass completed without compacting anything. */
+    readonly skipped: boolean
+    /** Failure OMP reported for an unsuccessful pass. */
+    readonly error?: string
+  }
+
+/**
+ * Read the compaction lifecycle a frame reports.
+ *
+ * A compaction can start and finish inside one turn, at a threshold, on
+ * context overflow, or while the session sits idle past its maintenance
+ * interval, and OMP announces all of them through the same four frame types.
+ * @param frame - one inbound RPC frame.
+ * @returns the lifecycle step, or undefined for every other frame.
+ */
+export function ompCompactionSignal(frame: OmpRpcFrame): OmpCompactionSignal | undefined {
+  const record = objectOf(frame)
+  if (record === undefined) return undefined
+  switch (frame.type) {
+    case 'auto_compaction_start':
+    case 'manual_compaction_start':
+      return {
+        phase: 'start',
+        manual: frame.type === 'manual_compaction_start',
+        ...typeof record.reason === 'string' ? { reason: record.reason } : {},
+        ...typeof record.action === 'string' ? { action: record.action } : {},
+      }
+    case 'auto_compaction_end':
+    case 'manual_compaction_end':
+      return {
+        phase: 'end',
+        manual: frame.type === 'manual_compaction_end',
+        aborted: record.aborted === true,
+        skipped: record.skipped === true,
+        ...typeof record.errorMessage === 'string' ? { error: record.errorMessage } : {},
+      }
+    default:
+      return undefined
+  }
+}
+
 function toolContentOf(value: unknown): OmpToolContentBlock[] {
   const result = objectOf(value)
   const rows = result?.content
@@ -493,8 +561,15 @@ export interface OmpAgentDriverOptions {
    * published once, matched against the message id OMP reports.
    */
   readonly onUnsolicitedWake?: (wake: OmpUnsolicitedWake) => void
+  /**
+   * Observe every compaction OMP announces, including one that finishes while
+   * no harness turn is running. The attachment owner projects the durable
+   * boundary, so the card lands where compaction happened.
+   */
+  readonly onCompaction?: (signal: OmpCompactionSignal) => void
 }
 
+/** Drives harness agent steps from one long-lived OMP RPC session. */
 export class OmpAgentDriver {
   private sent: Set<string> | undefined
   private readonly external = new Set<string>()
@@ -509,6 +584,9 @@ export class OmpAgentDriver {
   private readonly onTool: ((events: readonly OmpToolEvent[]) => void) | undefined
   private readonly onContinue: (() => void) | undefined
   private readonly onUnsolicitedWake: ((wake: OmpUnsolicitedWake) => void) | undefined
+  private readonly onCompaction: ((signal: OmpCompactionSignal) => void) | undefined
+  /** Stops the connection-loss subscription the client offered, if any. */
+  private readonly stopClose: () => void
   /** OMP message ids already published as external user input. */
   private readonly announced = new Set<string>()
   /** Whether the operator aborted this step on purpose, not because the owner went away. */
@@ -522,11 +600,16 @@ export class OmpAgentDriver {
     this.onTool = options.onTool
     this.onContinue = options.onContinue
     this.onUnsolicitedWake = options.onUnsolicitedWake
+    this.onCompaction = options.onCompaction
     this.stopFrames = client.onFrame((frame) => { this.observe(frame) })
+    this.stopClose = client.onClose?.(() => { this.connectionLost() }) ?? (() => {})
     if (options.streaming === true) this.openUnsolicitedPrompt({ detached: true })
   }
 
-  /** Whether OMP is currently serving a prompt that accepts live steering. */
+  /**
+   * Whether OMP is currently serving a prompt that accepts live steering.
+   * @returns true while an open prompt can take a steer.
+   */
   hasActiveRun(): boolean {
     return this.prompt !== undefined && !this.prompt.closed
   }
@@ -556,6 +639,7 @@ export class OmpAgentDriver {
   close(): void {
     this.detaching = true
     this.stopFrames()
+    this.stopClose()
     this.prompt?.channel.close()
     this.prompt = undefined
   }
@@ -569,7 +653,35 @@ export class OmpAgentDriver {
     this.userCancelled = true
   }
 
+  /**
+   * Settle this driver when OMP's byte path closes on its own.
+   *
+   * OMP unloads an idle RPC process after 60 minutes without writing any
+   * terminal frame, so the close itself is the only signal. With no run in
+   * flight that is a clean unload: nothing is appended, and the attachment
+   * owner invalidates the driver so the next turn wakes the transcript. With a
+   * run in flight it is a real failure, and the owning turn records it.
+   */
+  private connectionLost(): void {
+    if (this.detaching) return
+    this.detaching = true
+    const state = this.prompt
+    this.prompt = undefined
+    this.startingPrompt = false
+    if (state === undefined || state.closed) return
+    const message = 'the OMP process unloaded and left its session on disk'
+    state.failure = new Error(message)
+    state.outcome = { status: 'error', message }
+    state.closed = true
+    state.channel.close()
+  }
+
   private observe(frame: OmpRpcFrame): void {
+    const compaction = ompCompactionSignal(frame)
+    if (compaction !== undefined) {
+      this.onCompaction?.(compaction)
+      return
+    }
     if (frame.type === 'agent_start') {
       this.abandonSettledPrompt()
       if (this.prompt === undefined && !this.startingPrompt) this.openUnsolicitedPrompt()

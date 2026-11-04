@@ -8,6 +8,9 @@
 
 import { readdir, readFile, stat } from 'node:fs/promises'
 import { basename, isAbsolute, join, resolve } from 'node:path'
+import type { CommandId } from '@deepseek-ai/dsh-commands/brand'
+import { CompactionId } from '@deepseek-ai/dsh-compaction'
+import { compactCheckpointSource, frameCompactionSummary } from '@deepseek-ai/dsh-compaction/checkpoint'
 import {
   createAssistantMessage,
   createToolResultMessage,
@@ -16,7 +19,7 @@ import {
   type ContentBlock,
   type MessageSourceMap,
 } from '@deepseek-ai/dsh-llm'
-import type { Session, SessionAppendTiming, SessionEvent } from '@deepseek-ai/dsh-session'
+import { foldSurface, type Session, type SessionAppendTiming, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { normalizeSessionTitle } from '@deepseek-ai/dsh-session-title'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import { ompTriggerSource } from './driver.ts'
@@ -261,6 +264,11 @@ interface TranscriptMessageEntry {
   readonly customType?: unknown
   readonly message?: TranscriptMessage
   readonly data?: unknown
+  readonly summary?: unknown
+  readonly shortSummary?: unknown
+  readonly tokensBefore?: unknown
+  readonly tokensAfter?: unknown
+  readonly method?: unknown
 }
 
 function toolArgumentsWithIntent(raw: unknown, intent: unknown): string {
@@ -390,10 +398,183 @@ export interface OmpTranscriptTurn {
   readonly leafEntryId?: string
   /** Structural, message, and tool events the turn recorded. */
   readonly events: readonly OmpHydrationEvent[]
+  /** Compaction boundaries OMP recorded before this turn's first message. */
+  readonly boundariesBefore?: readonly OmpTranscriptCompaction[]
+  /** Compaction boundaries OMP recorded after this turn and before the next one. */
+  readonly boundariesAfter?: readonly OmpTranscriptCompaction[]
+}
+
+/** One compaction boundary an OMP transcript recorded between its messages. */
+export interface OmpTranscriptCompaction {
+  /** Identity OMP assigned the compaction entry. */
+  readonly entryId: string
+  /** Historical time recorded on the entry, epoch-ms when it parses. */
+  readonly time?: number
+  /** Summary body OMP recorded as the replacement context. */
+  readonly summary: string
+  /** Condensed summary OMP recorded for display, when present. */
+  readonly shortSummary?: string
+  /** Context tokens the boundary replaced. */
+  readonly tokensBefore: number
+  /** Context tokens remaining after the boundary, when OMP projected them. */
+  readonly tokensAfter?: number
+  /** Compaction method OMP used, when it recorded one. */
+  readonly method?: string
 }
 
 function entryIdOf(entry: TranscriptMessageEntry): string | undefined {
   return typeof entry.id === 'string' && entry.id.length > 0 ? entry.id : undefined
+}
+
+/** Read one compaction entry's boundary facts, or nothing when it cannot replace context. */
+function compactionOf(entry: TranscriptMessageEntry, time: number | undefined): OmpTranscriptCompaction | undefined {
+  const entryId = entryIdOf(entry)
+  if (entryId === undefined || typeof entry.summary !== 'string' || entry.summary.trim().length === 0) return undefined
+  const tokensBefore = typeof entry.tokensBefore === 'number' && Number.isFinite(entry.tokensBefore)
+    ? Math.max(0, Math.trunc(entry.tokensBefore))
+    : 0
+  const tokensAfter = typeof entry.tokensAfter === 'number' && Number.isFinite(entry.tokensAfter)
+    ? Math.max(0, Math.trunc(entry.tokensAfter))
+    : undefined
+  const method = typeof entry.method === 'string' && entry.method.length > 0 ? entry.method : undefined
+  const shortSummary = typeof entry.shortSummary === 'string' && entry.shortSummary.length > 0
+    ? entry.shortSummary
+    : undefined
+  return {
+    entryId,
+    ...time === undefined ? {} : { time },
+    summary: entry.summary,
+    ...shortSummary === undefined ? {} : { shortSummary },
+    tokensBefore,
+    ...tokensAfter === undefined ? {} : { tokensAfter },
+    ...method === undefined ? {} : { method },
+  }
+}
+
+/** One compaction boundary read back from a transcript's newest records. */
+export interface OmpTranscriptCompactionTail {
+  /** Boundary facts the newest compaction entry recorded. */
+  readonly compaction: OmpTranscriptCompaction
+  /** Entry the compacted branch continued from; hydrating through it represents everything before the boundary. */
+  readonly parentEntryId?: string
+  /** Transcript bytes carrying the boundary; hydrating past it needs no second read. */
+  readonly byteOffset: number
+}
+
+/**
+ * Read the newest compaction entry a transcript recorded.
+ *
+ * Live RPC compaction announces that a boundary finished but never names the
+ * entry it wrote, while the durable entry is the only place OMP records the
+ * compaction method and the projected context size. Reading only the tail keeps
+ * a live boundary identical to the one hydration projects from the same entry.
+ * @param path - transcript path.
+ * @returns the newest boundary and the file size that carried it, or nothing when no compaction is recorded.
+ */
+export async function tailOmpTranscriptCompaction(path: string): Promise<OmpTranscriptCompactionTail | undefined> {
+  const text = await readFile(path, 'utf8').catch(() => undefined)
+  if (text === undefined || text.length === 0) return undefined
+  const lines = text.split('\n')
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index]
+    if (line === undefined || line.trim().length === 0) continue
+    let entry: TranscriptMessageEntry
+    try {
+      entry = JSON.parse(line) as TranscriptMessageEntry
+    } catch {
+      continue
+    }
+    if (entry.type !== 'compaction') continue
+    const recorded = typeof entry.timestamp === 'string' ? Date.parse(entry.timestamp) : Number.NaN
+    const compaction = compactionOf(entry, Number.isFinite(recorded) ? recorded : undefined)
+    if (compaction === undefined) continue
+    return {
+      compaction,
+      ...typeof entry.parentId !== 'string' || entry.parentId.length === 0 ? {} : { parentEntryId: entry.parentId },
+      byteOffset: Buffer.byteLength(text, 'utf8'),
+    }
+  }
+  return undefined
+}
+
+/**
+ * Collect the compaction boundaries one session already projects.
+ * @param session - session whose event log is read.
+ * @returns identities of every boundary the log already carries.
+ */
+export function projectedCompactionIds(session: Session): Set<string> {
+  const represented = new Set<string>()
+  for (const event of session.snapshotEvents()) {
+    if (event.type === 'compaction/summary') represented.add(event.data.compactionId)
+  }
+  return represented
+}
+
+/** The turn currently open in one event log, when the log ends inside an unfinished turn. */
+function openTurnStart(eventLog: readonly SessionEvent[]): SessionEvent['seq'] | undefined {
+  let open: SessionEvent['seq'] | undefined
+  for (const event of eventLog) {
+    if (event.type === 'turn/start') open = event.seq
+    else if (event.type === 'turn/end') open = undefined
+  }
+  return open
+}
+
+/**
+ * Append one compaction boundary to a session's surface.
+ *
+ * This is the single projection every compaction path uses: transcript
+ * hydration and live RPC compaction both emit `compaction/start`, the summary
+ * that replaces the shadowed surface, the `compact-checkpoint` user message
+ * carrying that summary, and `compaction/end`. A boundary that is already in
+ * the log is never appended twice, so reopening, waking, or re-observing the
+ * same OMP compaction leaves exactly one card.
+ * @param session - session receiving the boundary.
+ * @param boundary - boundary facts read from the OMP compaction entry.
+ * @param timing - append time applied to all four events; omitted uses the session clock.
+ * @param sourceCommandId - command that requested a manual compaction, when the caller can correlate it.
+ * @returns the boundary identity, or undefined when it is already recorded or nothing can be shadowed.
+ */
+export function appendOmpCompactionBoundary(
+  session: Session,
+  boundary: OmpTranscriptCompaction,
+  timing: SessionAppendTiming = {},
+  sourceCommandId?: CommandId,
+): CompactionId | undefined {
+  const compactionId = CompactionId(`omp-${boundary.entryId}`)
+  if (projectedCompactionIds(session).has(compactionId)) return undefined
+  const eventLog = session.snapshotEvents()
+  const surface = foldSurface(eventLog).nodes
+  const open = openTurnStart(eventLog)
+  const settled = open === undefined ? surface : surface.filter(seq => seq < open)
+  const shadowed = settled.length > 0 ? settled : surface
+  const start = shadowed.at(0)
+  const end = shadowed.at(-1)
+  if (start === undefined || end === undefined) return undefined
+  const command = sourceCommandId === undefined ? {} : { sourceCommandId }
+  const startEvent = session.append('compaction/start', { compactionId, turn: null, ...command }, timing)
+  const summaryEvent = session.append('compaction/summary', {
+    compactionId,
+    summary: [{ type: 'text', text: boundary.summary }],
+    shadowedRange: { start, end },
+    shadowedSeqs: shadowed,
+    shadowedTokenCount: boundary.tokensBefore,
+    ...boundary.method === undefined ? {} : { method: boundary.method },
+    ...boundary.tokensAfter === undefined ? {} : { tokensAfter: boundary.tokensAfter },
+    provider: 'omp',
+    model: 'omp',
+  }, timing)
+  const checkpoint = createUserMessage({
+    content: frameCompactionSummary([{ type: 'text', text: boundary.summary }]),
+    source: compactCheckpointSource(compactionId, sourceCommandId),
+  })
+  session.append('user/message', checkpoint, {
+    surfaceOp: { op: 'replace', startSeq: start, endSeq: end },
+    sourceEventSeqs: [startEvent.seq, summaryEvent.seq, ...shadowed],
+    ...timing,
+  })
+  session.append('compaction/end', { compactionId, turn: null, ...command }, timing)
+  return compactionId
 }
 
 function isSyntheticPrompt(blocks: readonly ContentBlock[]): boolean {
@@ -532,9 +713,16 @@ export async function ompTranscriptTurns(path: string): Promise<OmpTranscriptTur
     return ids
   }
 
-  const drafts: { userEntryId?: string; leafEntryId?: string; events: OmpHydrationEvent[] }[] = []
+  type TurnDraft = {
+    userEntryId?: string
+    leafEntryId?: string
+    events: OmpHydrationEvent[]
+    boundaries?: OmpTranscriptCompaction[]
+  }
+  const beforeFirst: OmpTranscriptCompaction[] = []
+  const drafts: TurnDraft[] = []
   let current: OmpHydrationEvent[] | undefined
-  let draft: { userEntryId?: string; leafEntryId?: string; events: OmpHydrationEvent[] } | undefined
+  let draft: TurnDraft | undefined
   let turn = 0
   let step = 0
   let stepHasAssistant = false
@@ -578,6 +766,15 @@ export async function ompTranscriptTurns(path: string): Promise<OmpTranscriptTur
     const id = entryIdOf(entry)
     const recorded = typeof entry.timestamp === 'string' ? Date.parse(entry.timestamp) : Number.NaN
     const time = Number.isFinite(recorded) ? Math.max(lastTime ?? recorded, recorded) : lastTime
+    if (entry.type === 'compaction') {
+      const boundary = compactionOf(entry, time)
+      if (boundary !== undefined) {
+        if (draft === undefined) beforeFirst.push(boundary)
+        else (draft.boundaries ??= []).push(boundary)
+      }
+      if (draft !== undefined && id !== undefined) draft.leafEntryId = id
+      continue
+    }
     if (entry.type !== 'message' || entry.message === undefined) {
       if (draft !== undefined && id !== undefined) draft.leafEntryId = id
       continue
@@ -670,6 +867,8 @@ export async function ompTranscriptTurns(path: string): Promise<OmpTranscriptTur
     turn: index + 1,
     ...entry.userEntryId === undefined ? {} : { userEntryId: entry.userEntryId },
     ...entry.leafEntryId === undefined ? {} : { leafEntryId: entry.leafEntryId },
+    ...index === 0 && beforeFirst.length > 0 ? { boundariesBefore: beforeFirst } : {},
+    ...entry.boundaries === undefined ? {} : { boundariesAfter: entry.boundaries },
     events: entry.events,
   }))
 }
@@ -734,7 +933,11 @@ export async function ompHydrationEvents(path: string, limit = Number.POSITIVE_I
     .flatMap((entry, index) => renumberTurn(entry.events, index + 1))
 }
 
-/** Turns one harness session already projects, from its structural events. */
+/**
+ * Count the turns one harness session already projects, from its structural events.
+ * @param session - harness session whose recorded events are counted.
+ * @returns the number of turns the session surface already holds.
+ */
 export function projectedTurnCount(
   session: { snapshotEvents(): readonly { readonly type: string; readonly data?: unknown }[] },
 ): number {
@@ -869,57 +1072,73 @@ export async function hydrateOmpSession(
   const selected = admitted.map((entry, index) => renumberTurn(entry.events, base + index + 1))
   const title = await readOmpTranscriptTitle(path)
   const appendedTitle = title !== undefined && title !== projectedTitle(session) ? title : undefined
-  const events = selected.flat()
+  const sessionFloor = session.snapshotEvents().at(-1)?.time
   let floorTime = -Number.MAX_SAFE_INTEGER
-  const lastProjectedTime = session.snapshotEvents().at(-1)?.time
-  if (lastProjectedTime !== undefined) floorTime = lastProjectedTime
-  const timingOf = (event: OmpHydrationEvent): SessionAppendTiming => {
-    if (event.time === undefined) return floorTime === -Number.MAX_SAFE_INTEGER ? {} : { time: floorTime }
-    const time = Math.max(floorTime, Math.trunc(event.time))
-    floorTime = time
-    return { time }
+  const timingOf = (time: number | undefined): SessionAppendTiming => {
+    if (time === undefined) return floorTime === -Number.MAX_SAFE_INTEGER ? {} : { time: floorTime }
+    const clamped = Math.max(floorTime, Math.trunc(time))
+    floorTime = clamped
+    return { time: clamped }
   }
+  const firstEventTime = selected[0]?.find(event => event.time !== undefined)?.time
   if (appendedTitle !== undefined) {
-    const titleTime = floorTime === -Number.MAX_SAFE_INTEGER
-      ? events.find(event => event.time !== undefined)?.time
-      : floorTime
+    const importedTime = floorTime === -Number.MAX_SAFE_INTEGER ? firstEventTime : floorTime
+    const titleTime = importedTime === undefined
+      ? sessionFloor
+      : sessionFloor === undefined ? importedTime : Math.max(sessionFloor, importedTime)
     session.append('session/title', { title: appendedTitle, messageSeqs: [], source: { kind: 'user' } },
       titleTime === undefined ? {} : { time: titleTime })
   }
-  for (const event of events) {
-    switch (event.type) {
-      case 'turn/start':
-        session.append('turn/start', event.data, timingOf(event))
-        break
-      case 'turn/end':
-        session.append('turn/end', event.data, timingOf(event))
-        break
-      case 'step/start':
-        session.append('step/start', event.data, timingOf(event))
-        break
-      case 'step/end':
-        session.append('step/end', event.data, timingOf(event))
-        break
-      case 'user/message':
-        session.append('user/message', event.data, { surfaceOp: 'append', ...timingOf(event) })
-        break
-      case 'assistant/message':
-        session.append('assistant/message', event.data, { surfaceOp: 'append', ...timingOf(event) })
-        break
-      case 'tool/call':
-        session.append('tool/call', event.data, timingOf(event))
-        break
-      case 'tool/result':
-        session.append('tool/result', event.data, { surfaceOp: 'append', ...timingOf(event) })
-        break
+  let appendedBoundaries = 0
+  const emitBoundary = (boundary: OmpTranscriptCompaction): void => {
+    const timing = timingOf(boundary.time)
+    if (appendOmpCompactionBoundary(session, boundary, timing) === undefined) return
+    appendedBoundaries += 4
+  }
+  const matchedTurn = matched >= 0 ? turns[matched] : undefined
+  for (const boundary of matchedTurn?.boundariesAfter ?? []) emitBoundary(boundary)
+  for (const boundary of admitted[0]?.boundariesBefore ?? []) emitBoundary(boundary)
+  let appendedEvents = 0
+  for (const [index, events] of selected.entries()) {
+    for (const event of events) {
+      appendedEvents += 1
+      switch (event.type) {
+        case 'turn/start':
+          session.append('turn/start', event.data, timingOf(event.time))
+          break
+        case 'turn/end':
+          session.append('turn/end', event.data, timingOf(event.time))
+          break
+        case 'step/start':
+          session.append('step/start', event.data, timingOf(event.time))
+          break
+        case 'step/end':
+          session.append('step/end', event.data, timingOf(event.time))
+          break
+        case 'user/message':
+          session.append('user/message', event.data, { surfaceOp: 'append', ...timingOf(event.time) })
+          break
+        case 'assistant/message':
+          session.append('assistant/message', event.data, { surfaceOp: 'append', ...timingOf(event.time) })
+          break
+        case 'tool/call':
+          session.append('tool/call', event.data, timingOf(event.time))
+          break
+        case 'tool/result':
+          session.append('tool/result', event.data, { surfaceOp: 'append', ...timingOf(event.time) })
+          break
+      }
     }
+    for (const boundary of admitted[index]?.boundariesAfter ?? []) emitBoundary(boundary)
   }
   const newestTurn = admitted.at(-1)
+  const leafEntryId = newestTurn?.leafEntryId
+    ?? (admitted.length === 0 ? matchedTurn?.leafEntryId : undefined)
   return {
-    appended: events.length + (appendedTitle === undefined ? 0 : 1),
+    appended: appendedEvents + appendedBoundaries + (appendedTitle === undefined ? 0 : 1),
     turns: base + selected.length,
     hydratedTurns: base + selected.length,
-    ...newestTurn?.leafEntryId === undefined ? {} : { hydratedLeafEntryId: newestTurn.leafEntryId },
+    ...leafEntryId === undefined ? {} : { hydratedLeafEntryId: leafEntryId },
     ...byteOffset === undefined ? {} : { hydratedByteOffset: byteOffset },
   }
 }

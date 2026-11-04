@@ -15,6 +15,15 @@
       "path": "../../../vendor/schemastery"
     },
     {
+      "path": "../../api/session-controller/tsconfig.host.json"
+    },
+    {
+      "path": "../../client/connection/tsconfig.host.json"
+    },
+    {
+      "path": "../../compaction/compaction"
+    },
+    {
       "path": "../../core/agent"
     },
     {
@@ -30,31 +39,25 @@
       "path": "../../llm/llm"
     },
     {
-      "path": "../../util/values"
-    },
-    {
-      "path": "../../util/home-paths"
+      "path": "../../preset/agent-preset-registry"
     },
     {
       "path": "../../session/session-title"
     },
     {
-      "path": "../../workspace/workspace"
-    },
-    {
       "path": "../../subprocess/subprocess"
     },
     {
-      "path": "../../preset/agent-preset-registry"
-    },
-    {
-      "path": "../../api/session-controller/tsconfig.host.json"
-    },
-    {
-      "path": "../../client/connection/tsconfig.host.json"
-    },
-    {
       "path": "../../todo/tool-todo"
+    },
+    {
+      "path": "../../util/home-paths"
+    },
+    {
+      "path": "../../util/values"
+    },
+    {
+      "path": "../../workspace/workspace"
     }
   ]
 }

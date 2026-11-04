@@ -38,6 +38,14 @@ declare module '@deepseek-ai/dsh-session/types' {
       shadowedRange: { start: SessionSeq; end: SessionSeq }
       shadowedSeqs: SessionSeq[]
       shadowedTokenCount: number
+      /**
+       * Method the producing runtime used (an OMP `CompactionMethod`, or any
+       * backend-reported name), so a presentation can say which rewrite ran.
+       * Absent when the backend reports no method.
+       */
+      method?: string
+      /** Estimated context tokens after the rewrite, when the backend projected them. */
+      tokensAfter?: number
       /** The provider route that wrote the summary. */
       provider: string
       /**

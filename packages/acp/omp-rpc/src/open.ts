@@ -12,6 +12,7 @@ import {
   OmpResumeError,
   type OmpTranscriptMatch,
 } from './resume.ts'
+import type { OmpSocketSession, OmpSocketState } from './socket.ts'
 
 /** Exact shared-API route that opens an OMP transcript in a harness session. */
 export const OMP_OPEN_PATH = '/api/exocortex/omp/open'
@@ -98,6 +99,77 @@ export async function reuseOrCreateDshSession(
   const bound = await target.findBound()
   if (bound !== undefined) return { sessionId: bound, created: false }
   return { sessionId: await target.create(), created: true }
+}
+
+/** How one attach or wake rejoins an OMP session publication. */
+export type OmpWakePlan =
+  /** A live process already serves the session on its socket. */
+  | { readonly kind: 'attach'; readonly session: OmpSocketSession }
+  /** Wake the transcript in a fresh process; a stale publication was already collected. */
+  | { readonly kind: 'resume'; readonly stalePid?: number }
+  /** A live process owns the session but cannot be attached to it. */
+  | { readonly kind: 'hung'; readonly pid: number; readonly reason: string }
+
+/**
+ * Decide how one harness session rejoins a published OMP session.
+ *
+ * OMP unloads an idle RPC process after 60 minutes without writing a terminal
+ * frame, and a killed process skips its exit hook entirely, so the sidecar
+ * alone proves nothing. The three publication states must stay distinct: an
+ * absent sidecar means the process is gone and the transcript simply resumes,
+ * a sidecar whose pid is dead means a crashed publication that must be
+ * collected before resuming, and a live pid that cannot be attached to is a
+ * hung session rather than a stale one.
+ * @param state - publication state read from the run directory.
+ * @returns the attach, resume, or refusal decision.
+ */
+export function planOmpWake(state: OmpSocketState): OmpWakePlan {
+  switch (state.kind) {
+    case 'live':
+      return { kind: 'attach', session: state.session }
+    case 'stale':
+      return { kind: 'resume', stalePid: state.pid }
+    case 'hung':
+      return { kind: 'hung', pid: state.pid, reason: state.reason }
+    case 'absent':
+      return { kind: 'resume' }
+  }
+}
+
+/** What one open-transcript pass needs from the bridge and its attachment. */
+export interface OmpTranscriptOpenDeps {
+  /** OMP session identity the caller asked to open. */
+  readonly ompSessionId: string
+  /** OMP session already serving the harness session, when one is attached. */
+  readonly attached: { readonly id: string } | undefined
+  /** Attach a socket or resume the transcript; only called when nothing serves it. */
+  readonly attach: () => Promise<void>
+  /** Append the transcript turns the session has not recorded yet. */
+  readonly hydrate: () => Promise<number>
+}
+
+/** What one open-transcript pass did. */
+export interface OmpTranscriptOpenOutcome {
+  /** Appended event count from the hydration pass. */
+  readonly hydrated: number
+  /** True when an existing attachment served the transcript, so nothing was attached. */
+  readonly reused: boolean
+}
+
+/**
+ * Open one transcript, reusing the process already serving it.
+ *
+ * A second open of the same transcript must not probe ownership or attach
+ * again: the probe spawns `omp` and takes seconds, while the attachment already
+ * answers for that session. Only a session bound to a different OMP session
+ * detaches and attaches.
+ * @param deps - requested identity, current attachment, attach, and hydrate steps.
+ * @returns the hydration outcome and whether the attachment was reused.
+ */
+export async function openOmpTranscript(deps: OmpTranscriptOpenDeps): Promise<OmpTranscriptOpenOutcome> {
+  const reused = deps.attached !== undefined && deps.attached.id === deps.ompSessionId
+  if (!reused) await deps.attach()
+  return { hydrated: await deps.hydrate(), reused }
 }
 
 /** Collaborators of the open endpoint. */

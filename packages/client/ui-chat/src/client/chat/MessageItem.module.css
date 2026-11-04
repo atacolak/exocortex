@@ -161,6 +161,21 @@
   color: inherit;
 }
 
+.compactionMethod {
+  flex: none;
+  max-width: 32%;
+  margin-left: 6px;
+  padding: 0 6px;
+  overflow: hidden;
+  border: 0.5px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12));
+  border-radius: 4px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: var(--dsh-content-font-size-secondary, 13px);
+  line-height: calc(16px + var(--dsh-content-font-delta, 0px));
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .compactionSep {
   flex: none;
   width: 2px;

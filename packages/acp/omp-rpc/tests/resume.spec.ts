@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { SESSION_FORMAT_VERSION, Session, SessionId } from '@deepseek-ai/dsh-session'
+import { isCompactCheckpointSource } from '@deepseek-ai/dsh-compaction/checkpoint'
 import { afterEach, describe, expect, it, onTestFinished } from 'vitest'
 import {
   hydrateOmpSession,
@@ -63,13 +64,13 @@ function turnUserTexts(turns: readonly OmpTranscriptTurn[]): (string | undefined
 
 function sessionUserTexts(session: Session): (string | undefined)[] {
   return session.snapshotEvents()
-    .filter(event => event.type === 'user/message')
+    .filter(event => event.type === 'user/message' && !isCompactCheckpointSource(event.data.source))
     .map(event => firstText(event.data.content))
 }
 
 function sessionUserTimes(session: Session): number[] {
   return session.snapshotEvents()
-    .filter(event => event.type === 'user/message')
+    .filter(event => event.type === 'user/message' && !isCompactCheckpointSource(event.data.source))
     .map(event => event.time)
 }
 
@@ -613,8 +614,8 @@ describe('ompHydrationEvents trigger cards', () => {
     const users = (await ompHydrationEvents(path)).filter(event => event.type === 'user/message')
 
     expect(users.map(event => event.data.source)).toEqual([
-      { kind: 'subagent-settled', form: 'notice', summary: 'Background job abc has completed. Resume your work.' },
-      { kind: 'agent-message', form: 'relay' },
+      { kind: 'omp-subagent-settled', form: 'notice', summary: 'Background job abc has completed. Resume your work.' },
+      { kind: 'omp-agent-message', form: 'relay' },
       { kind: 'user' },
     ])
   })
@@ -870,6 +871,9 @@ describe.skipIf(!existsSync(REAL_TRANSCRIPT))('real OMP transcript hydration', (
     const recordedUserTimes = turns.map(turn => turn.events.find(event => event.type === 'user/message')?.time)
     expect(recordedUserTimes.every(time => time !== undefined)).toBe(true)
     expect(sessionUserTimes(session)).toEqual(recordedUserTimes)
+    const checkpoints = session.snapshotEvents().filter(event => event.type === 'compaction/summary')
+    expect(checkpoints.length).toBeGreaterThan(0)
+    for (const checkpoint of checkpoints) expect(checkpoint.data.shadowedSeqs.length).toBeGreaterThan(0)
 
     const root = await mkdtemp(join(tmpdir(), 'dsh-real-hydrate-log-'))
     onTestFinished(() => rm(root, { recursive: true, force: true }))
@@ -893,11 +897,13 @@ describe.skipIf(!existsSync(REAL_TRANSCRIPT))('real OMP transcript hydration', (
     try {
       const stored = await reopened.read()
       expect(stored.events.filter(event => event.type === 'turn/start')).toHaveLength(turns.length)
-      expect(stored.events.filter(event => event.type === 'user/message')).toHaveLength(turns.length)
+      const storedUsers = stored.events.filter(event => event.type === 'user/message'
+        && !isCompactCheckpointSource(event.data.source))
+      expect(storedUsers).toHaveLength(turns.length)
       expect(stored.events.filter(event => event.type === 'turn/start').map(event => event.data.turn))
         .toEqual(turns.map(turn => turn.turn))
-      expect(stored.events.filter(event => event.type === 'user/message').map(event => event.time))
-        .toEqual(recordedUserTimes)
+      expect(storedUsers.map(event => event.time)).toEqual(recordedUserTimes)
+      expect(stored.events.filter(event => event.type === 'compaction/summary')).toHaveLength(checkpoints.length)
       const storedTimes = stored.events.map(event => event.time)
       expect(storedTimes).toEqual([...storedTimes].sort((left, right) => left - right))
     } finally {

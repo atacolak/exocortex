@@ -33,6 +33,7 @@ export function turnTriggerDetails(node: ContextMessageNode): {
       break
     }
     case 'agent-message':
+    case 'omp-agent-message':
       title = 'message.trigger.agent'
       icon = 'agent'
       break
@@ -40,7 +41,8 @@ export function turnTriggerDetails(node: ContextMessageNode): {
       title = 'message.trigger.team'
       icon = 'team'
       break
-    case 'subagent-settled': {
+    case 'subagent-settled':
+    case 'omp-subagent-settled': {
       title = 'message.trigger.subagent'
       icon = 'subagent'
       break

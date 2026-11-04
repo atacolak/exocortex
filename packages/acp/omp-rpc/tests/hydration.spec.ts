@@ -1,9 +1,13 @@
 import { appendFile, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { Context } from '@deepseek-ai/cordis'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
+import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { afterEach, describe, expect, it } from 'vitest'
 import { hydrateOmpBinding, OmpBindings, type OmpBinding } from '../src/bindings.ts'
+
+const contexts: Context[] = []
 
 const roots: string[] = []
 
@@ -94,6 +98,7 @@ async function storedBinding(file: string): Promise<OmpBinding> {
 }
 
 afterEach(async () => {
+  for (const ctx of contexts.splice(0)) await ctx.fiber.dispose()
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
 
@@ -181,5 +186,136 @@ describe('hydrateOmpBinding', () => {
     expect(again.hydratedLeafEntryId).toBe(first.hydratedLeafEntryId)
     expect(again.hydratedByteOffset).toBe(first.hydratedByteOffset)
     expect(session.snapshotEvents()).toHaveLength(before)
+  })
+})
+
+describe('OMP compaction boundaries', () => {
+  function compactionLine(parent: string): unknown {
+    return {
+      type: 'compaction',
+      id: entryId(101),
+      parentId: parent,
+      timestamp: new Date(EPOCH + 2 * 60_000 + 30_000).toISOString(),
+      summary: 'archived context',
+      shortSummary: 'archived',
+      firstKeptEntryId: entryId(2),
+      tokensBefore: 182_000,
+      tokensAfter: 24_000,
+      method: 'snapcompact',
+    }
+  }
+
+  it('hydrates one OMP compaction entry into a checkpoint card carrying method and token counts', async () => {
+    const path = await transcript([
+      sessionLine(),
+      userEntry(1, OMP_SESSION),
+      assistantEntry(1),
+      userEntry(2, entryId(2)),
+      assistantEntry(2),
+      compactionLine(entryId(4)),
+      userEntry(3, entryId(101)),
+      assistantEntry(3),
+    ])
+    const session = Session.create(SESSION_ID)
+    const file = join(await sandbox(), 'omp', 'bindings.json')
+    await hydrateOmpBinding({ bindings: new OmpBindings(file), session, binding: bindingOf(path), includeNewestTurn: true })
+
+    const events = session.snapshotEvents()
+    const summaries = events.filter(event => event.type === 'compaction/summary')
+    expect(summaries).toHaveLength(1)
+    const summary = summaries[0]!
+    expect(summary.data.shadowedTokenCount).toBe(182_000)
+    expect(summary.data.tokensAfter).toBe(24_000)
+    expect(summary.data.method).toBe('snapcompact')
+    expect(summary.data.summary).toEqual([{ type: 'text', text: 'archived context' }])
+
+    const checkpoint = events.find(event => event.type === 'user/message' && event.data.source.kind === 'compact-checkpoint')
+    expect(checkpoint).toBeDefined()
+    expect(checkpoint!.seq).toBeGreaterThan(summary.seq)
+
+    const boundary = events.filter(event => event.type === 'compaction/start' || event.type === 'compaction/end')
+    expect(boundary.map(event => event.type)).toEqual(['compaction/start', 'compaction/end'])
+    for (const event of boundary) expect(event.data.turn).toBeNull()
+
+    const turnStart = events.find(event => event.type === 'turn/start' && event.data.turn === 3)!
+    expect(checkpoint!.seq).toBeLessThan(turnStart.seq)
+
+    const boundaryTime = Date.parse(new Date(EPOCH + 2 * 60_000 + 30_000).toISOString())
+    for (const event of [summary, checkpoint!, ...boundary]) expect(event.time).toBe(boundaryTime)
+  })
+
+  it('emits one compaction card when an idle compaction lands between keyword wakes', async () => {
+    const path = await transcript([
+      sessionLine(),
+      userEntry(1, OMP_SESSION),
+      assistantEntry(1),
+      userEntry(2, entryId(2)),
+      assistantEntry(2),
+    ])
+    const file = join(await sandbox(), 'omp', 'bindings.json')
+    const session = Session.create(SESSION_ID)
+    const first = await hydrateOmpBinding({
+      bindings: new OmpBindings(file), session, binding: bindingOf(path), includeNewestTurn: true,
+    })
+    expect(session.snapshotEvents().filter(event => event.type === 'compaction/summary')).toHaveLength(0)
+
+    await appendFile(path, `${JSON.stringify(compactionLine(entryId(4)))}\n`)
+    const reopened = new OmpBindings(file)
+    const cursor = (await reopened.get(SESSION_ID))!
+    const second = await hydrateOmpBinding({
+      bindings: reopened, session, binding: cursor, includeNewestTurn: true,
+    })
+    expect(second.appended).toBe(4)
+    expect(session.snapshotEvents().filter(event => event.type === 'compaction/summary')).toHaveLength(1)
+
+    const third = new OmpBindings(file)
+    const settled = await hydrateOmpBinding({
+      bindings: third, session, binding: (await third.get(SESSION_ID))!, includeNewestTurn: true,
+    })
+    expect(settled.appended).toBe(0)
+    expect(session.snapshotEvents().filter(event => event.type === 'compaction/summary')).toHaveLength(1)
+    expect(first.hydratedLeafEntryId).not.toBe(entryId(101))
+  })
+
+  it('persists historical times instead of stamping imported history with today', async () => {
+    const path = await transcript([
+      sessionLine(),
+      userEntry(1, OMP_SESSION),
+      assistantEntry(1),
+      userEntry(2, entryId(2)),
+      assistantEntry(2),
+      compactionLine(entryId(4)),
+      userEntry(3, entryId(101)),
+      assistantEntry(3),
+    ])
+    const root = await sandbox()
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(JsonlSessionPersistence, { root, compression: 'none' })
+    const persistence = ctx.get('sessionPersistence')!
+    const session = Session.create(SESSION_ID)
+    const handle = await persistence.create(session.header)
+    session.append('model/selection', { provider: 'deepseek', model: 'deepseek-v4' })
+    await hydrateOmpBinding({
+      bindings: new OmpBindings(join(root, 'bindings.json')),
+      session,
+      binding: bindingOf(path),
+      includeNewestTurn: true,
+    })
+    await handle.append(session.snapshotEvents())
+    await handle.close()
+
+    const read = await persistence.open(SESSION_ID, 'read')
+    const stored = await read.read()
+    await read.close()
+    const historical = (turn: number): number => Date.parse(stamp(turn))
+    const userTimes = stored.events
+      .filter(event => event.type === 'user/message' && event.data.source.kind === 'user')
+      .map(event => event.time)
+    expect(userTimes).toEqual([historical(1), historical(2), historical(3)])
+    const boundaryTime = Date.parse(new Date(EPOCH + 2 * 60_000 + 30_000).toISOString())
+    const boundary = stored.events.filter(event => event.type === 'compaction/summary')
+    expect(boundary.map(event => event.time)).toEqual([boundaryTime])
+    expect(stored.events.every(event => event.time < Date.now())).toBe(true)
   })
 })

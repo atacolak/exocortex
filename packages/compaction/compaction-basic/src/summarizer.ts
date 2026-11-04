@@ -11,16 +11,13 @@ import type {
   ContentBlock, FinishReason, GenerateOptions, Message, RequestMessage, TokenUsage, ToolSchema,
 } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { CHECKPOINT_PREAMBLE, SUMMARY_OPEN_TAG } from '@deepseek-ai/dsh-compaction/checkpoint'
 
 interface SummaryConfig {
   readonly summarizationProvider: string
   readonly summarizationModel: string
   readonly maxTokens: number
 }
-
-/** Tags wrapping the structured summary inside the landed checkpoint node. */
-const SUMMARY_OPEN_TAG = '<compacted-summary>'
-const SUMMARY_CLOSE_TAG = '</compacted-summary>'
 
 /**
  * The summarization directive, delivered as the FINAL user message after the
@@ -65,10 +62,6 @@ const COMPACTION_INSTRUCTION = [
   '- Output only the checkpoint text: do not call any tool or take any other action.',
   `- If the conversation already contains a ${SUMMARY_OPEN_TAG} block, it is a PRIOR checkpoint. Do not copy it forward verbatim: preserve still-true facts, drop stale ones, and merge newer information into a single consolidated summary under the same structure.`,
 ].join('\n')
-
-/** Framing that makes the replacement user message established context. */
-const CHECKPOINT_PREAMBLE =
-  'This is an automatically generated checkpoint condensing an earlier span of the conversation to free up context. Treat the captured context as established background and build on it without restating it. Continue the task directly from the messages that follow, without acknowledging this checkpoint.'
 
 /**
  * The replayed conversation surface the summarizer condenses. Reproducing the
@@ -185,14 +178,6 @@ export async function summarizeWithLlm(
  * @param summary - safe text-only model output.
  * @returns content for the synthesized replacement user message.
  */
-export function frameSummary(summary: readonly ContentBlock[]): ContentBlock[] {
-  return [
-    { type: 'text', text: `${CHECKPOINT_PREAMBLE}\n\n${SUMMARY_OPEN_TAG}` },
-    ...summary,
-    { type: 'text', text: SUMMARY_CLOSE_TAG },
-  ]
-}
-
 /** Map a terminal summarization finish to its fail-closed error. */
 function finishError(finish: FinishReason): Error | undefined {
   switch (finish.kind) {

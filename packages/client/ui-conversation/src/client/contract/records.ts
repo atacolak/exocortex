@@ -206,6 +206,10 @@ export interface CompactionSummaryNode {
   shadowedItemCount: number | null
   /** Estimated token price of the replaced items, or null when the summary event is unavailable or malformed. */
   shadowedTokenCount: number | null
+  /** Producing runtime's compaction method name (for example `snapcompact`), or null when unreported. */
+  method?: string | null
+  /** Estimated context tokens remaining after the rewrite, or null when unreported or malformed. */
+  tokensAfter?: number | null
 }
 
 /**

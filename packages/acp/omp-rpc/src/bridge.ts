@@ -2,6 +2,7 @@ import { mkdir, stat } from 'node:fs/promises'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentStepStream } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-commands'
+import type { CommandId } from '@deepseek-ai/dsh-commands/brand'
 import { createAssistantMessage, createToolResultMessage, createUserMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, RequestMessage, StreamChunk, UserMessage } from '@deepseek-ai/dsh-llm'
 import type { SessionId } from '@deepseek-ai/dsh-session'
@@ -11,10 +12,11 @@ import type { OmpBindings } from './bindings.ts'
 import { OMP_THINKING_LEVELS, OmpModelCatalogSync, type CatalogSyncOutcome, type OmpModelSelection } from './catalog.ts'
 import { OmpRpcClient } from './client.ts'
 import { DEFAULT_OMP_HOST_TOOLS, ompCordisHostTools } from './cordis-tools.ts'
-import { OmpAgentDriver, type OmpImageInput, type OmpImageRef, type OmpToolEvent } from './driver.ts'
+import { OmpAgentDriver, type OmpCompactionSignal, type OmpImageInput, type OmpImageRef, type OmpToolEvent } from './driver.ts'
 import { OmpHostToolBridge } from './host-tools.ts'
 import { launchOmp, type LaunchedOmp } from './launch.ts'
-import { CLIENT_OWNED_COMMANDS, ompNativeCommandLine } from './native-commands.ts'
+import { CLIENT_OWNED_COMMANDS, ompCompactCommand, ompNativeCommandLine } from './native-commands.ts'
+import { appendOmpCompactionBoundary, tailOmpTranscriptCompaction } from './resume.ts'
 import { connectOmpSocket, type OmpSocketConnection } from './socket.ts'
 import { OmpUiBridge, type OmpUiAsker } from './ui.ts'
 import type { OmpExtensionUiRequest, OmpPromptResultFrame, OmpRpcCommand } from './types.ts'
@@ -69,6 +71,13 @@ declare module '@deepseek-ai/dsh-agent' {
      * @param wake - cleaned external prompt text.
      */
     projectExternalWake?(wake: OmpExternalWake): void
+    /**
+     * Release the driver of an attachment whose OMP process went away, so the
+     * next turn wakes the transcript in a fresh process instead of reusing a
+     * dead connection.
+     * @param driver - the exact driver the attachment published.
+     */
+    forgetOmpDriver?(driver: OmpAgentDriver): void
   }
 }
 
@@ -137,6 +146,15 @@ export interface OmpBridgeOptions {
   readonly hcomExtension?: string
   readonly asker?: OmpUiAsker
   readonly onSurface?: (request: OmpExtensionUiRequest) => void
+  /**
+   * Record a boundary this bridge projected from OMP's live lifecycle as far as
+   * the transcript had been synced, so a later reopen tail-syncs from beyond it
+   * instead of replaying the same compaction.
+   */
+  readonly onCompactionCursor?: (
+    sessionId: SessionId,
+    cursor: { readonly entryId: string; readonly byteOffset: number },
+  ) => void
 }
 
 /**
@@ -196,7 +214,11 @@ export interface OmpAttachPlan {
   readonly forkPath?: string
 }
 
-/** Convert OMP's todo phases into the whole-list snapshot DSH's TodoPanel records. */
+/**
+ * Convert OMP's todo phases into the whole-list snapshot DSH's TodoPanel records.
+ * @param state - OMP's reported todo state of any wire shape.
+ * @returns the todo items in the order OMP listed them.
+ */
 export function ompTodoItems(state: unknown): TodoItem[] {
   const phases = objectOf(state)?.todoPhases
   if (!Array.isArray(phases)) return []
@@ -284,6 +306,8 @@ interface LiveAttachment {
   readonly disconnect?: () => void
   /** OMP session identity this attachment serves, for duplicate-attach refusal. */
   readonly ompSessionId: string
+  /** Transcript OMP reported as active, when it persists one. */
+  readonly transcriptPath?: string
   readonly driver: OmpAgentDriver
   readonly hostTools: OmpHostToolBridge
   readonly ui: OmpUiBridge
@@ -291,6 +315,8 @@ interface LiveAttachment {
   readonly disposeCommands: () => void
   detachStream: () => void
   readonly cursor: LiveCursor
+  /** Serializes live compaction projection so two boundaries cannot reorder. */
+  projections: Promise<void>
   todos: TodoItem[]
 }
 
@@ -338,6 +364,24 @@ export class OmpBridge {
       if (live.ompSessionId === ompSessionId) return true
     }
     return false
+  }
+
+  /**
+   * What the OMP process already bound to one harness session reports as active.
+   *
+   * A second open of the same transcript must reuse that process instead of
+   * probing ownership and attaching again, so callers can hydrate and return.
+   * @param id - harness session identity.
+   * @returns the served OMP session, or undefined without an attachment.
+   */
+  attachedSession(id: SessionId): OmpAttachment['session'] | undefined {
+    const live = this.attachments.get(id)
+    if (live === undefined) return undefined
+    return {
+      id: live.ompSessionId,
+      ...live.transcriptPath === undefined ? {} : { path: live.transcriptPath },
+      streaming: live.driver.hasActiveRun(),
+    }
   }
 
   private enqueueAttach<T>(id: SessionId, operation: () => Promise<T>): Promise<T> {
@@ -409,12 +453,14 @@ export class OmpBridge {
       })
       const cursor = { agent, turn: 0, step: 0 }
       const pendingTools: OmpToolEvent[] = []
+      let attachment: LiveAttachment | undefined
       const driver = new OmpAgentDriver(client, {
         transcript: options.mode === 'fork' && options.forkPath === undefined ? 'replay' : 'latest',
         streaming: session.streaming,
         resolveImages: refs => this.readImages(refs),
         onTool: (events) => { pendingTools.push(...events) },
         ...options.managedStreams === true ? {} : { onContinue: () => { this.continueTurn(agent) } },
+        onCompaction: (signal) => { this.observeCompaction(attachment, signal) },
         onUnsolicitedWake: ({ text, source }) => {
           if (agent.projectExternalWake !== undefined) {
             agent.projectExternalWake({ text, ...source === undefined ? {} : { source } })
@@ -437,6 +483,7 @@ export class OmpBridge {
         ...launched === undefined ? {} : { launched },
         ...socket === undefined ? {} : { disconnect: () => { socket.close() } },
         ompSessionId: session.id,
+        ...session.path === undefined ? {} : { transcriptPath: session.path },
         driver,
         hostTools,
         ui,
@@ -444,12 +491,19 @@ export class OmpBridge {
         disposeCommands,
         detachStream: () => {},
         cursor,
+        projections: Promise.resolve(),
         todos: [],
       }
+      attachment = live
       if (options.managedStreams !== true) live.detachStream = this.bindStream(live)
       await hostTools.sync()
       await this.publishTodos(live)
       this.attachments.set(agent.id, live)
+      const stopClose = client.onClose(() => { this.releaseUnloaded(live) })
+      if (client.closed) {
+        stopClose()
+        throw new Error('the OMP process closed its RPC connection while attaching')
+      }
       agent.ctx.effect(() => () => this.detach(agent.id), 'omp-rpc attachment')
       return {
         client,
@@ -535,6 +589,30 @@ export class OmpBridge {
   }
 
   /**
+   * Compact the attached OMP session and project the boundary it wrote.
+   *
+   * OMP reports no lifecycle frame for a manual compaction: the command
+   * response is the only live signal, so the durable entry is read back here
+   * and appended as the same card hydration would produce.
+   * @param id - harness session identity.
+   * @param rawInput - invocation text following `/compact`.
+   * @param sourceCommandId - command identity to correlate the boundary with.
+   * @returns the context size OMP reported before the boundary.
+   */
+  async compact(
+    id: SessionId,
+    rawInput: string,
+    sourceCommandId?: CommandId,
+  ): Promise<{ readonly tokensBefore?: number }> {
+    const live = this.attachments.get(id)
+    if (live === undefined) throw new Error(`no OMP process is attached to session "${id}"`)
+    const result = await live.client.request(ompCompactCommand(rawInput))
+    const tokensBefore = objectOf(result)?.tokensBefore
+    await this.projectCompaction(live, sourceCommandId)
+    return typeof tokensBefore === 'number' ? { tokensBefore } : {}
+  }
+
+  /**
    * Run one slash command line in the process attached to a session.
    * @param id - harness session identity.
    * @param line - slash-prefixed command line OMP's prompt surface resolves.
@@ -566,6 +644,78 @@ export class OmpBridge {
     live.ui.close()
     live.disconnect?.()
     await live.launched?.close()
+  }
+
+  /**
+   * Project the boundary a lifecycle signal announced.
+   *
+   * OMP brackets every automatic pass with start/end frames, including the idle
+   * maintenance pass that runs while no harness turn is active, so the card is
+   * queued as soon as the pass ends and lands before the next turn opens.
+   * @param live - attachment that observed the signal, absent while attaching.
+   * @param signal - lifecycle step OMP reported.
+   */
+  private observeCompaction(live: LiveAttachment | undefined, signal: OmpCompactionSignal): void {
+    if (live === undefined || signal.phase === 'start') return
+    if (signal.aborted || signal.skipped || signal.error !== undefined) return
+    live.projections = live.projections
+      .then(() => this.projectCompaction(live))
+      .catch((error: unknown) => {
+        this.options.ctx.logger.warn(`omp-rpc: cannot project the OMP compaction boundary: ${String(error)}`)
+      })
+  }
+
+  /**
+   * Project the boundary OMP just wrote into the attached harness session.
+   *
+   * The card is appended as soon as the lifecycle or command response arrives,
+   * so it lands where compaction happened and before the next turn opens. The
+   * durable entry names the boundary, so a second observation - a repeated
+   * signal, a reopen, or a wake - finds it already represented and appends
+   * nothing.
+   * @param live - attachment whose compaction finished.
+   * @param sourceCommandId - command identity when a `/compact` requested it.
+   * @returns nothing; the projection resolves once the boundary is appended or skipped.
+   */
+  private async projectCompaction(live: LiveAttachment, sourceCommandId?: CommandId): Promise<void> {
+    const path = live.transcriptPath
+    if (path === undefined) return
+    const tail = await tailOmpTranscriptCompaction(path)
+    if (tail === undefined) {
+      this.options.ctx.logger.warn('omp-rpc: OMP reported compaction but its transcript records no boundary')
+      return
+    }
+    const session = live.agent.session
+    const floor = session.snapshotEvents().at(-1)?.time ?? 0
+    const time = Math.max(tail.compaction.time ?? Date.now(), floor)
+    if (appendOmpCompactionBoundary(session, tail.compaction, { time }, sourceCommandId) === undefined) return
+    if (tail.parentEntryId === undefined) return
+    this.options.onCompactionCursor?.(live.agent.id, {
+      entryId: tail.parentEntryId,
+      byteOffset: tail.byteOffset,
+    })
+  }
+
+  /**
+   * Invalidate one attachment whose OMP process closed its byte path.
+   *
+   * OMP unloads an idle RPC process after 60 minutes without writing any
+   * terminal frame, and a killed process never writes one either. Dropping the
+   * attachment here keeps the conversation on screen, releases the driver so
+   * the next turn wakes the transcript with `--resume`, and leaves no pending
+   * command to fail into the UI.
+   * @param live - attachment whose connection closed.
+   */
+  private releaseUnloaded(live: LiveAttachment): void {
+    if (this.attachments.get(live.agent.id) !== live) return
+    this.attachments.delete(live.agent.id)
+    live.driver.close()
+    live.detachStream()
+    live.disposeCommands()
+    live.hostTools.close()
+    live.ui.close()
+    live.disconnect?.()
+    live.agent.forgetOmpDriver?.(live.driver)
   }
 
   /** Stop every attachment, as when the owning plugin unloads. */
@@ -657,15 +807,10 @@ export class OmpBridge {
         name: 'compact',
         description: 'Compact the attached OMP session natively, preserving its own summary and transcript.',
         input: { hint: '[instructions]' },
-        async handler(invocation) {
-          const instructions = invocation.rawInput.trim()
+        handler: async (invocation) => {
           try {
-            const result = await client.request({
-              type: 'compact',
-              ...instructions.length === 0 ? {} : { customInstructions: instructions },
-            } as unknown as OmpRpcCommand)
-            const tokens = objectOf(result)?.tokensBefore
-            const before = typeof tokens === 'number' ? ` (${String(tokens)} tokens before)` : ''
+            const { tokensBefore } = await this.compact(agent.id, invocation.rawInput, invocation.commandId)
+            const before = tokensBefore === undefined ? '' : ` (${String(tokensBefore)} tokens before)`
             return { kind: 'success', text: `Compacted OMP context${before}.` }
           } catch (error: unknown) {
             return { kind: 'error', text: error instanceof Error ? error.message : String(error) }
@@ -843,6 +988,13 @@ export function registerAgentCommand(
   }
 }
 
+/**
+ * Run one slash command line against an attached OMP process and collect its output.
+ * @param client - attached OMP RPC client.
+ * @param commandLine - slash-prefixed command line OMP resolves.
+ * @param signal - cancellation signal for the command run.
+ * @returns the command output text.
+ */
 export async function runOmpCommand(
   client: Pick<OmpRpcClient, 'request' | 'onFrame'>,
   commandLine: string,

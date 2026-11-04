@@ -4,9 +4,9 @@ import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import BasicCompactionEngine from '@deepseek-ai/dsh-compaction-basic'
 import type { BasicCompactionConfig } from '@deepseek-ai/dsh-compaction-basic'
 import { selectCompactableRange } from '@deepseek-ai/dsh-compaction-basic/src/region.ts'
-import { frameSummary } from '@deepseek-ai/dsh-compaction-basic/src/summarizer.ts'
 import type { SummarizationInput, SummaryResult } from '@deepseek-ai/dsh-compaction-basic/src/summarizer.ts'
 import { CompactionId, toolPairingBalancedAfter, toolPairingBalancedBefore } from '@deepseek-ai/dsh-compaction'
+import { frameCompactionSummary } from '@deepseek-ai/dsh-compaction/checkpoint'
 import {
   resolveCompactSpec,
   resolveConfig,
@@ -2514,7 +2514,7 @@ describe('route-priced image pressure', () => {
         + 'while the route-priced comparison accepts the pressure reduction.',
     }]
     const framed = ctx.tokenMeter.estimateMessage(createUserMessage({
-      content: frameSummary(compact.summary),
+      content: frameCompactionSummary(compact.summary),
       source: { kind: 'test' },
     }))
     expect(framed).toBeGreaterThan(imageNode.heuristicTokens)

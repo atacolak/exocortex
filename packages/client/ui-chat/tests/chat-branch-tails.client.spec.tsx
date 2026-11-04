@@ -853,6 +853,76 @@ describe('MessageItem arms', () => {
     expect(row.getAttribute('aria-expanded')).toBe('false')
   })
 
+  it('a compaction marker names its method and token reduction', () => {
+    const view = render(
+      <MessageItem t={t} node={{
+        kind: 'compaction', seq: 5, time: 1_000,
+        summary: '## 摘要标题\n\n保留的事实。',
+        summaryEventSeq: 4,
+        shadowedItemCount: 16,
+        shadowedTokenCount: 182_000,
+        method: 'snapcompact',
+        tokensAfter: 24_000,
+      }}
+      />,
+    )
+    const row = view.getByRole('button', { name: /上下文已压缩/ })
+    expect(row.getAttribute('data-compaction-method')).toBe('snapcompact')
+    expect(view.getByText('182K → 24K（-158K）')).toBeTruthy()
+    expect(view.queryByText(/已压缩 16 条历史记录/)).toBeNull()
+    fireEvent.click(row)
+    expect(view.getByRole('heading', { name: '摘要标题' })).toBeTruthy()
+  })
+
+  it('omits the saved delta when the projection reports no token reduction', () => {
+    const view = render(
+      <MessageItem t={t} node={{
+        kind: 'compaction', seq: 7, time: 1_000,
+        summary: null,
+        summaryEventSeq: null,
+        shadowedItemCount: 4,
+        shadowedTokenCount: 12_000,
+        tokensAfter: 12_000,
+      }}
+      />,
+    )
+    expect(view.getByText('12K → 12K')).toBeTruthy()
+  })
+
+  it('keeps the pre-method compaction wording when the backend reports no method or post-token count', () => {
+    const view = render(
+      <MessageItem t={t} node={{
+        kind: 'compaction', seq: 5, time: 1_000,
+        summary: '## 摘要标题\n\n保留的事实。',
+        summaryEventSeq: 4,
+        shadowedItemCount: 16,
+        shadowedTokenCount: 11_309,
+      }}
+      />,
+    )
+    const row = view.getByRole('button', { name: /上下文已压缩/ })
+    expect(row.hasAttribute('data-compaction-method')).toBe(false)
+    expect(view.getByText('已压缩 16 条历史记录（约 11309 tokens）')).toBeTruthy()
+  })
+
+  it('shows a reported method even when the marker carries no token totals', () => {
+    const view = render(
+      <MessageItem t={t} node={{
+        kind: 'compaction', seq: 6, time: 1_000,
+        summary: '摘要正文。',
+        summaryEventSeq: 5,
+        shadowedItemCount: null,
+        shadowedTokenCount: null,
+        method: 'remote',
+      }}
+      />,
+    )
+    const row = view.getByRole('button', { name: /上下文已压缩/ })
+    expect(row.getAttribute('data-compaction-method')).toBe('remote')
+    expect(view.getByText('remote')).toBeTruthy()
+    expect(view.getByText('点击查看压缩摘要')).toBeTruthy()
+  })
+
   it('anchors the sticky-header selector: the compaction body sits under compactionRow only while open', () => {
     const view = render(
       <MessageItem t={t} node={{

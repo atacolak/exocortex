@@ -102,6 +102,8 @@ function compactSummary(match: ConversationMatch | undefined, checkpoint: Conver
   let summary: string | null = null
   let shadowedItemCount: number | null = null
   let shadowedTokenCount: number | null = null
+  let method: string | null = null
+  let tokensAfter: number | null = null
   if (match?.event.type === 'compaction/summary') {
     const data = match.event.data
     if (Array.isArray(data.summary)) {
@@ -118,6 +120,13 @@ function compactSummary(match: ConversationMatch | undefined, checkpoint: Conver
       && data.shadowedTokenCount >= 0
       ? data.shadowedTokenCount
       : null
+    const reportedMethod = typeof data.method === 'string' ? data.method.trim() : ''
+    method = reportedMethod === '' ? null : reportedMethod
+    tokensAfter = typeof data.tokensAfter === 'number'
+      && Number.isSafeInteger(data.tokensAfter)
+      && data.tokensAfter >= 0
+      ? data.tokensAfter
+      : null
   }
   return {
     kind: 'compaction',
@@ -127,6 +136,8 @@ function compactSummary(match: ConversationMatch | undefined, checkpoint: Conver
     summaryEventSeq: match?.event.seq ?? null,
     shadowedItemCount,
     shadowedTokenCount,
+    method,
+    tokensAfter,
   }
 }
 

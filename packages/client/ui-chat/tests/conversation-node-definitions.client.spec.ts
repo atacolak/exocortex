@@ -2786,6 +2786,94 @@ describe('built-in conversation node Definitions', () => {
     expect(snapshot(compactions).nodes.values().filter(candidate => candidate.kind === 'compaction')).toHaveLength(1)
   })
 
+  it('projects the compaction method and post-compaction tokens onto both compaction owners', () => {
+    const value = assembler([
+      at(10, 'command/run', {
+        commandId: 'command-1',
+        name: 'compact',
+        source: { kind: 'user' },
+      }),
+      at(11, 'compaction/start', {
+        compactionId: 'manual-1',
+        sourceCommandId: 'command-1',
+        turn: null,
+      }),
+      at(12, 'compaction/summary', {
+        compactionId: 'manual-1',
+        sourceCommandId: 'command-1',
+        method: 'snapcompact',
+        summary: [{ type: 'text', text: 'manual summary' }],
+        shadowedSeqs: [1, 2],
+        shadowedTokenCount: 182_000,
+        tokensAfter: 24_000,
+      }),
+      at(13, 'user/message', {
+        ...textMessage('manual-checkpoint', 'checkpoint'),
+        source: {
+          kind: 'compact-checkpoint',
+          compactionId: 'manual-1',
+          sourceCommandId: 'command-1',
+        },
+      }, { surfaceOp: { op: 'replace', startSeq: 1, endSeq: 2 } }),
+      at(20, 'compaction/start', { compactionId: 'automatic-1', turn: null }),
+      at(21, 'compaction/summary', {
+        compactionId: 'automatic-1',
+        method: 'soft',
+        summary: [{ type: 'text', text: 'automatic summary' }],
+        shadowedSeqs: [3, 4],
+        shadowedTokenCount: 90_000,
+        tokensAfter: 12_000,
+      }),
+      at(22, 'user/message', {
+        ...textMessage('automatic-checkpoint', 'checkpoint'),
+        source: { kind: 'compact-checkpoint', compactionId: 'automatic-1' },
+      }, { surfaceOp: { op: 'replace', startSeq: 3, endSeq: 4 } }),
+    ])
+
+    expect((node(snapshot(value), 'manual-compaction')?.data as ManualCompactionChatData).compaction)
+      .toMatchObject({ method: 'snapcompact', shadowedTokenCount: 182_000, tokensAfter: 24_000 })
+    expect(node(snapshot(value), 'compaction')?.data)
+      .toMatchObject({ method: 'soft', shadowedTokenCount: 90_000, tokensAfter: 12_000 })
+  })
+
+  it('normalizes compaction method whitespace and drops unsafe token projections', () => {
+    const trimmed = assembler([
+      at(10, 'compaction/start', { compactionId: 'compact-trim', turn: null }),
+      at(11, 'compaction/summary', {
+        compactionId: 'compact-trim',
+        method: '  soft  ',
+        summary: [{ type: 'text', text: 'summary' }],
+        shadowedSeqs: [1, 2],
+        shadowedTokenCount: 42,
+        tokensAfter: 2.5,
+      }),
+      at(12, 'user/message', {
+        ...textMessage('trim-checkpoint', 'checkpoint'),
+        source: { kind: 'compact-checkpoint', compactionId: 'compact-trim' },
+      }, { surfaceOp: { op: 'replace', startSeq: 1, endSeq: 2 } }),
+    ])
+    expect(node(snapshot(trimmed), 'compaction')?.data)
+      .toMatchObject({ method: 'soft', tokensAfter: null })
+
+    const blank = assembler([
+      at(10, 'compaction/start', { compactionId: 'compact-blank', turn: null }),
+      at(11, 'compaction/summary', {
+        compactionId: 'compact-blank',
+        method: '   ',
+        summary: [{ type: 'text', text: 'summary' }],
+        shadowedSeqs: [1, 2],
+        shadowedTokenCount: 42,
+        tokensAfter: -1,
+      }),
+      at(12, 'user/message', {
+        ...textMessage('blank-checkpoint', 'checkpoint'),
+        source: { kind: 'compact-checkpoint', compactionId: 'compact-blank' },
+      }, { surfaceOp: { op: 'replace', startSeq: 1, endSeq: 2 } }),
+    ])
+    expect(node(snapshot(blank), 'compaction')?.data)
+      .toMatchObject({ method: null, tokensAfter: null })
+  })
+
   it('fills a landed compaction marker when an older page supplies its summary', () => {
     const value = assembler([
       at(13, 'user/message', {
