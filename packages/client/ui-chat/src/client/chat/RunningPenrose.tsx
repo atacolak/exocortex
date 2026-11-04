@@ -1,4 +1,4 @@
-/** The 3-tone topological-breathing Penrose spinner for the running Chat status. */
+/** The penrose-lab topological-breathing Penrose spinner for the running Chat status. */
 import { PenroseMark } from '@deepseek-ai/dsh-client-ui-primitives'
 import css from './ChatView.module.css'
 

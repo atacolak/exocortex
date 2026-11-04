@@ -75,8 +75,8 @@
   white-space: nowrap;
 }
 
-/* Keep hover detection on a stationary box while the mark breathes within it;
-   hover rules target the hitbox so a slot-occupant mark breathes too. */
+/* Keep hover detection on a stationary box while the mark scales within it;
+   hover rules target the hitbox so a slot-occupant mark scales too. */
 .markHitbox {
   display: inline-flex;
   flex: none;
@@ -90,9 +90,7 @@
   transform-origin: 50% 50%;
 }
 
-/* Hover breathing: the three ribbons run one 2x luminous wave, 120° apart,
-   over the mark's own breathing scale. Seams stay welded because only
-   luminance and the whole-mark scale move. */
+/* Hover breathing: the whole masked mark scales around its centre. */
 @keyframes penrose-hero-scale {
   0%,
   100% {
@@ -104,32 +102,9 @@
   }
 }
 
-@keyframes penrose-hero-breathe {
-  0%,
-  100% {
-    opacity: 0.42;
-  }
-
-  50% {
-    opacity: 1;
-  }
-}
-
 @media (hover: hover) and (prefers-reduced-motion: no-preference) {
   .markHitbox:hover .mark {
     animation: penrose-hero-scale 1.4s cubic-bezier(0.45, 0, 0.55, 1) infinite;
-  }
-
-  .markHitbox:hover .mark [data-penrose-face] {
-    animation: penrose-hero-breathe 1.4s cubic-bezier(0.45, 0, 0.55, 1) infinite;
-  }
-
-  .markHitbox:hover .mark [data-penrose-face='mid'] {
-    animation-delay: -0.45s;
-  }
-
-  .markHitbox:hover .mark [data-penrose-face='deep'] {
-    animation-delay: -0.9s;
   }
 }
 

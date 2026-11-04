@@ -3,121 +3,147 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { cleanup, render } from '@testing-library/react'
-import { afterEach, describe, expect, it } from 'vitest'
-import {
-  PENROSE_BREATH_MS, PENROSE_FACES, PENROSE_MARK_VIEWBOX, PENROSE_SILHOUETTE_PATH, PenroseMark,
-} from '../src/PenroseMark.tsx'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { PenroseMark } from '../src/PenroseMark.tsx'
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  vi.unstubAllGlobals()
+})
 
 const markCss = readFileSync(resolve(import.meta.dirname, '../src/PenroseMark.module.css'), 'utf8')
 
-type Point = [number, number]
+const MARK_VIEWBOX = '-541.587 -541.583 1083.17 1083.17'
+const BODY_PATH =
+  'M-81.99 -431.57L82.83 -431.57L515.72 309.67L439.35 431.58L-441.37 431.58L-515.72 308.15ZM-6.34 -73.41L161.79 211.56L-175.39 211.56Z'
+const LINES_PATH = `${BODY_PATH}M81.5 -431.57L-302.17 211.56L-175.39 211.56M432.52 431.58L64.17 -192.27L-6.34 -73.41M-512.74 313.11L221.7 313.11L161.79 211.56`
+const BREATH_BODY_FIRST =
+  'M-82.33 -431L83.16 -431.02L515.72 309.67L439.7 431.02L-441.7 431.02L-515.72 308.15ZM3.92 -80L166.51 208.61L-165.27 211.83Z'
+const BREATH_LINES_FIRST = `${BREATH_BODY_FIRST}M81.16 -431.02L-303.13 213.17L-165.27 211.83M432.19 431.02L66.62 -188.13L3.92 -80M-515.48 307.74L222.35 307.74L166.51 208.61`
 
-function parsePolygon(d: string): Point[] {
-  const numbers = d.match(/-?\d+(?:\.\d+)?/g)!
-  expect(numbers.length % 2).toBe(0)
-  const points: Point[] = []
-  for (let index = 0; index < numbers.length; index += 2) {
-    points.push([Number(numbers[index]), Number(numbers[index + 1])])
-  }
-  return points
+const widthFor = (size: number): string => String(Math.max(6, (0.9 * 1083.17) / Math.max(1, size || 24)))
+
+function markSvg(container: HTMLElement): SVGSVGElement {
+  const svg = container.querySelector('svg')
+  expect(svg).not.toBeNull()
+  return svg as SVGSVGElement
 }
-
-function shoelace(points: readonly Point[]): number {
-  let total = 0
-  for (let index = 0; index < points.length; index += 1) {
-    const [x1, y1] = points[index]!
-    const [x2, y2] = points[(index + 1) % points.length]!
-    total += x1 * y2 - x2 * y1
-  }
-  return Math.abs(total) / 2
-}
-
-const key = (point: Point): string => `${point[0].toFixed(3)},${point[1].toFixed(3)}`
 
 describe('PenroseMark geometry', () => {
-  it('is three closed L-ribbons that tile the tribar exactly: no gap cuts, no overlaps', () => {
-    expect(PENROSE_FACES.map(face => face.tone)).toEqual(['light', 'mid', 'deep'])
-    const polygons = PENROSE_FACES.map(face => parsePolygon(face.d))
-    for (const polygon of polygons) expect(polygon).toHaveLength(6)
+  it('renders the penrose-lab masked mark in currentColor with no tonal faces', () => {
+    const view = render(<PenroseMark size={24} />)
+    const svg = markSvg(view.container)
 
-    const outline = parsePolygon(PENROSE_SILHOUETTE_PATH)
-    expect(outline).toHaveLength(9)
-    const silhouette = outline.slice(0, 6)
-    const aperture = outline.slice(6)
-    expect(shoelace(aperture)).toBeGreaterThan(0)
-
-    const expected = shoelace(silhouette) - shoelace(aperture)
-    const tessellated = polygons.reduce((sum, polygon) => sum + shoelace(polygon), 0)
-    expect(Math.abs(tessellated - expected) / expected).toBeLessThan(1e-5)
-
-    const edgeKeys = polygons.flatMap(polygon => polygon.map((point, index) => {
-      const next = polygon[(index + 1) % polygon.length]!
-      return [key(point), key(next)].sort().join('|')
-    }))
-    const counts = new Map<string, number>()
-    for (const edge of edgeKeys) counts.set(edge, (counts.get(edge) ?? 0) + 1)
-    expect([...counts.values()].filter(count => count === 2)).toHaveLength(3)
-    expect([...counts.values()].every(count => count <= 2)).toBe(true)
-
-    const vertices = new Set(polygons.flat().map(key))
-    expect(vertices.size).toBe(12)
-    for (const face of PENROSE_FACES) {
-      expect(face.d.startsWith('M')).toBe(true)
-      expect(face.d.endsWith('Z')).toBe(true)
-      expect(face.d).not.toMatch(/NaN|Infinity|undefined/)
-    }
-  })
-
-  it('stays inside the 64 box with even padding', () => {
-    for (const face of PENROSE_FACES) {
-      for (const [x, y] of parsePolygon(face.d)) {
-        expect(x).toBeGreaterThanOrEqual(6)
-        expect(x).toBeLessThanOrEqual(58)
-        expect(y).toBeGreaterThanOrEqual(9)
-        expect(y).toBeLessThanOrEqual(55)
-      }
-    }
-  })
-})
-
-describe('PenroseMark rendering', () => {
-  it('renders the three faces in order with no inline styles and no whale', () => {
-    const view = render(<PenroseMark />)
-    const svg = view.container.querySelector('svg')!
-    expect(svg.getAttribute('viewBox')).toBe(PENROSE_MARK_VIEWBOX)
+    expect(svg.getAttribute('viewBox')).toBe(MARK_VIEWBOX)
+    expect(svg.getAttribute('width')).toBe('24')
+    expect(svg.getAttribute('height')).toBe('24')
     expect(svg.getAttribute('aria-hidden')).toBe('true')
-    const faces = [...svg.querySelectorAll('[data-penrose-face]')]
-    expect(faces.map(face => face.getAttribute('data-penrose-face'))).toEqual(['light', 'mid', 'deep'])
-    expect(faces.map(face => face.getAttribute('d'))).toEqual(PENROSE_FACES.map(face => face.d))
-    expect(faces.map(face => face.getAttribute('fill'))).toEqual([null, null, null])
+    expect(svg.getAttribute('focusable')).toBe('false')
+
+    const mask = svg.querySelector('mask')
+    expect(mask).not.toBeNull()
+    expect(mask!.getAttribute('maskUnits')).toBe('userSpaceOnUse')
+    expect(mask!.getAttribute('x')).toBe('-541.587')
+    expect(mask!.getAttribute('y')).toBe('-541.583')
+    expect(mask!.getAttribute('width')).toBe('1083.17')
+    expect(mask!.getAttribute('height')).toBe('1083.17')
+    expect(mask!.id).not.toBe('')
+
+    const paths = [...mask!.querySelectorAll('path')]
+    expect(paths).toHaveLength(2)
+    const [body, lines] = paths
+    expect(body!.getAttribute('d')).toBe(BODY_PATH)
+    expect(body!.getAttribute('fill')).toBe('#fff')
+    expect(body!.getAttribute('fill-rule')).toBe('evenodd')
+    expect(lines!.getAttribute('d')).toBe(LINES_PATH)
+    expect(lines!.getAttribute('fill')).toBe('none')
+    expect(lines!.getAttribute('stroke')).toBe('#000')
+    expect(lines!.getAttribute('stroke-width')).toBe(widthFor(24))
+    expect(lines!.getAttribute('stroke-linejoin')).toBe('miter')
+    expect(lines!.getAttribute('stroke-miterlimit')).toBe('8')
+
+    const rect = svg.querySelector('rect')
+    expect(rect).not.toBeNull()
+    expect(rect!.getAttribute('fill')).toBe('currentColor')
+    expect(rect!.getAttribute('mask')).toBe(`url(#${mask!.id})`)
+    expect(rect!.getAttribute('x')).toBe('-541.587')
+    expect(rect!.getAttribute('width')).toBe('1083.17')
+
+    expect(svg.querySelectorAll('[data-penrose-face]')).toHaveLength(0)
+    expect(svg.querySelector('animate')).toBeNull()
     expect(view.container.querySelector('[style]')).toBeNull()
-    expect(view.container.querySelector('animate')).toBeNull()
+    expect(markCss).not.toMatch(/penrose-light|penrose-mid|penrose-deep|penrose-breathe/)
   })
 
-  it('adds the silhouette backing only for the breathing variant', () => {
-    const still = render(<PenroseMark size={34} />)
-    expect(still.container.querySelectorAll('path')).toHaveLength(3)
-    still.unmount()
-    const animated = render(<PenroseMark size={14} animated />)
-    const paths = [...animated.container.querySelectorAll('path')]
-    expect(paths).toHaveLength(4)
-    expect(paths[0]!.getAttribute('d')).toBe(PENROSE_SILHOUETTE_PATH)
-    expect(paths[0]!.getAttribute('fill-rule')).toBe('evenodd')
-    expect(animated.container.querySelector('svg')?.getAttribute('width')).toBe('14')
+  it('scales the seam knockout to a hairline and floors it at the canonical width', () => {
+    const small = render(<PenroseMark size={14} />)
+    const large = render(<PenroseMark size={500} />)
+    expect(markSvg(small.container).querySelectorAll('mask path')[1]!.getAttribute('stroke-width'))
+      .toBe(widthFor(14))
+    expect(markSvg(large.container).querySelectorAll('mask path')[1]!.getAttribute('stroke-width'))
+      .toBe('6')
+  })
+
+  it('mints a unique mask id for every instance', () => {
+    const view = render(
+      <>
+        <PenroseMark />
+        <PenroseMark />
+      </>,
+    )
+    const ids = [...view.container.querySelectorAll('mask')].map(mask => mask.id)
+    expect(ids).toHaveLength(2)
+    expect(new Set(ids).size).toBe(2)
   })
 })
 
-describe('PenroseMark breathing contract', () => {
-  it('cycles the three tones at the 2x cadence with phase offsets', () => {
-    expect(PENROSE_BREATH_MS).toBe(1400)
-    expect(markCss).toContain('--dsw-alias-penrose-light')
-    expect(markCss).toContain('--dsw-alias-penrose-mid')
-    expect(markCss).toContain('--dsw-alias-penrose-deep')
-    expect(markCss.match(/1\.4s cubic-bezier\(0\.45, 0, 0\.55, 1\)/g)).toHaveLength(4)
-    expect(markCss).toMatch(/\.breathing \.mid \{\s*animation-delay: -0\.45s;/)
-    expect(markCss).toMatch(/\.breathing \.deep \{\s*animation-delay: -0\.9s;/)
-    expect(markCss).toMatch(/@media \(prefers-reduced-motion: reduce\)/)
+describe('PenroseMark breathing', () => {
+  it('runs the 08-topological-breathing wave at 2x speed', () => {
+    const view = render(<PenroseMark size={14} animated />)
+    const svg = markSvg(view.container)
+    const animations = [...svg.querySelectorAll('animate')]
+
+    expect(animations).toHaveLength(2)
+    for (const animation of animations) {
+      expect(animation.getAttribute('attributeName')).toBe('d')
+      expect(animation.getAttribute('dur')).toBe('4s')
+      expect(animation.getAttribute('repeatCount')).toBe('indefinite')
+      expect(animation.getAttribute('calcMode')).toBe('linear')
+    }
+
+    const keyTimes = animations[0]!.getAttribute('keyTimes')!.split(';')
+    expect(keyTimes).toHaveLength(161)
+    expect(keyTimes[0]).toBe('0')
+    expect(keyTimes.at(-1)).toBe('1')
+
+    const bodyFrames = animations[0]!.getAttribute('values')!.split(';')
+    const lineFrames = animations[1]!.getAttribute('values')!.split(';')
+    expect(bodyFrames).toHaveLength(161)
+    expect(lineFrames).toHaveLength(161)
+    expect(bodyFrames[0]).toBe(BREATH_BODY_FIRST)
+    expect(bodyFrames.at(-1)).toBe(BREATH_BODY_FIRST)
+    expect(lineFrames[0]).toBe(BREATH_LINES_FIRST)
+    expect(lineFrames.at(-1)).toBe(BREATH_LINES_FIRST)
+    for (const [index, frame] of lineFrames.entries()) {
+      expect(frame.startsWith(bodyFrames[index]!)).toBe(true)
+    }
+  })
+
+  it('keeps the mark still when prefers-reduced-motion asks for it', () => {
+    vi.stubGlobal('matchMedia', (query: string) => ({
+      matches: query === '(prefers-reduced-motion: reduce)',
+      media: query,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      dispatchEvent: () => false,
+      onchange: null,
+    }))
+
+    const view = render(<PenroseMark animated />)
+    const svg = markSvg(view.container)
+    expect(svg.querySelectorAll('animate')).toHaveLength(0)
+    expect(svg.querySelectorAll('mask path')).toHaveLength(2)
   })
 })
