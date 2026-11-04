@@ -176,6 +176,38 @@ describe('sessions.list cold merge', () => {
     expect(observe).not.toHaveBeenCalled()
   })
 
+  it('recovers a cold title from the stored log when the projection cache misses', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const meta = header('cold-title-fallback', 100)
+    const events = [
+      ...conversationEvents(),
+      { type: 'session/title', seq: SessionSeq(2), time: 1300, data: {
+        title: 'Recovered cold title', messageSeqs: [1], source: { kind: 'fallback' },
+      } },
+    ] as SessionEvent[]
+    providePersistence(ctx, {
+      list: () => Promise.resolve([meta]),
+      stat: vi.fn(),
+      inspect: vi.fn(async () => ({ meta, events })),
+    })
+    ctx.provide('sessionProjectionCache', { cachedSnapshot: () => undefined, cachedPredecessorTitle: () => undefined } as never)
+    const remote = await createSessionTestRemote(ctx, {
+      defaultModelSelection: () => ({ provider: 'p', model: 'm' }),
+      cwd: '/tmp',
+    })
+
+    const response = await remote.list(request({}))
+
+    if (!response.ok) throw new Error('list failed')
+    expect(response.value.items).toEqual([
+      expect.objectContaining({
+        sessionId: sid('cold-title-fallback'),
+        projections: { kind: 'cached', asOfSeq: 2, values: expect.objectContaining({ title: 'Recovered cold title' }) },
+      }),
+    ])
+  })
+
   it('serves cold rows from current cached projections without body access', async () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)

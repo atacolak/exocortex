@@ -52,10 +52,13 @@ holds only OMP's own native commands plus the session's Harness commands.
 
 Opening a transcript that another OMP pane still holds is refused. Hydration
 replays the recorded surface events as real user/assistant/tool bubbles rather
-than one seed message: a blank Session receives the newest 200 events, and an
-already-mirrored Session appends only the turns OMP recorded after it, numbered
-contiguously after the turns it holds, so a terminal that kept working while the
-Harness was detached catches up without duplicating bubbles. The newest recorded
+than one seed message: a blank Session receives every turn the transcript's
+active branch holds, and an already-mirrored Session appends only the turns
+recorded after its persisted cursor, numbered contiguously after the turns it
+holds, so a terminal that kept working while the Harness was detached catches up
+without duplicating bubbles. The active branch is walked from its newest leaf
+through branches, compactions, and dangling parents, while synthetic continue
+prompts and memory injections stay out of the transcript. The newest recorded
 title is applied whenever it differs from the Session's current title.
 
 Attaching to an existing transcript never replays Harness history into OMP:
