@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -91,6 +91,36 @@ describe('OMP skill discovery from SKILL.md frontmatter', () => {
     expect(discovered).toHaveLength(1)
     expect(discovered[0]).toMatchObject({ name: 'quoted', description: 'Quoted: value' })
     expect(discovered[0]?.hide).toBeUndefined()
+  })
+
+  it('discovers skills published through a symlinked skill directory', async () => {
+    const { cwd, home } = await scratch()
+    const shared = join(home, 'worlds/base/skills')
+    await skill(shared, 'cordis-plugin-development', 'name: cordis-plugin-development\ndescription: Use for Cordis plugins')
+    await skill(shared, 'agent-experience', 'name: agent-experience\ndescription: Use for tool definitions')
+    const linked = join(home, '.omp/agent/skills')
+    await mkdir(linked, { recursive: true })
+    await symlink(join(shared, 'cordis-plugin-development'), join(linked, 'cordis-plugin-development'), 'dir')
+    await symlink(join(shared, 'agent-experience'), join(linked, 'agent-experience'), 'dir')
+    await writeFile(join(linked, 'README.md'), 'not a skill directory\n', 'utf8')
+    await symlink(join(shared, 'missing'), join(linked, 'broken'), 'dir')
+
+    const discovered = await discoverOmpSkillsFromDisk({ cwd, home })
+    expect(names(discovered).toSorted()).toEqual(['agent-experience', 'cordis-plugin-development'])
+    expect(discovered.map(skill => skill.source)).toEqual(['.omp/agent/skills', '.omp/agent/skills'])
+  })
+
+  it('lowercases skill names so an uppercase SKILL.md never breaks a command name', async () => {
+    const { cwd, home } = await scratch()
+    await skill(cwd, '.omp/skills/mixed', 'name: MixedCase\ndescription: Mixed case skill')
+
+    const skills = await resolveOmpSkills({ cwd, home })
+    expect(ompSkillCommands(skills)).toEqual([{
+      name: 'skill:mixedcase',
+      description: 'Mixed case skill',
+      hint: 'arguments',
+      source: 'skill',
+    }])
   })
 })
 

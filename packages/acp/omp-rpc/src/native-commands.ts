@@ -1,4 +1,5 @@
-import { readdir, readFile } from 'node:fs/promises'
+import type { Dirent } from 'node:fs'
+import { readdir, readFile, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import type { OmpCompactCommand } from './types.ts'
@@ -118,7 +119,7 @@ export function ompSkillCommands(skills: readonly OmpSkillListing[]): OmpNativeC
   return skills
     .filter(skill => skill.hide !== true)
     .map(skill => ({
-      name: `skill:${skill.name}`,
+      name: `skill:${skill.name.toLowerCase()}`,
       description: skill.description ?? `Run the ${skill.name} skill`,
       hint: 'arguments',
       source: 'skill',
@@ -233,6 +234,21 @@ function skillFrontmatter(text: string): Record<string, string> | undefined {
 }
 
 /**
+ * Decide whether one directory entry contributes a skill directory.
+ *
+ * Skill roots routinely link a shared skill tree, and `readdir` reports such a
+ * link as a symlink instead of a directory, so its target must be followed.
+ * @param parent - directory the entry was read from.
+ * @param entry - one `readdir` entry.
+ * @returns true for a real directory or a symlink that resolves to one.
+ */
+async function isDirectoryEntry(parent: string, entry: Dirent): Promise<boolean> {
+  if (!entry.isSymbolicLink()) return false
+  const target = await stat(join(parent, entry.name)).catch(() => undefined)
+  return target?.isDirectory() === true
+}
+
+/**
  * Discover skills straight from `SKILL.md` frontmatter, without a subprocess.
  * @param roots - session working directory and account home to scan.
  * @returns visible skills in precedence order, first declaration winning.
@@ -244,7 +260,7 @@ export async function discoverOmpSkillsFromDisk(roots: OmpSkillRoots): Promise<O
     const directory = join(root.base === 'cwd' ? roots.cwd : roots.home, root.path)
     const entries = await readdir(directory, { withFileTypes: true }).catch(() => [])
     for (const entry of entries) {
-      if (!entry.isDirectory()) continue
+      if (!entry.isDirectory() && !await isDirectoryEntry(directory, entry)) continue
       const text = await readFile(join(directory, entry.name, 'SKILL.md'), 'utf8').catch(() => undefined)
       if (text === undefined) continue
       const frontmatter = skillFrontmatter(text)

@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
-import { appendFile, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
+import { appendFile, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { PassThrough } from 'node:stream'
 import { join } from 'node:path'
@@ -13,6 +14,7 @@ import type { SubprocessHandle, SubprocessRuntime } from '@deepseek-ai/dsh-subpr
 import { afterEach, describe, expect, it, onTestFinished } from 'vitest'
 import { bindingFactsOf, OmpBindings, rememberOmpBinding } from '../src/bindings.ts'
 import { OmpBridge } from '../src/bridge.ts'
+import * as ompRpc from '../src/index.ts'
 import { openOmpTranscript, planOmpWake } from '../src/open.ts'
 import { hydrateOmpSession, type OmpHydrationCursor, type OmpHydrationOutcome } from '../src/resume.ts'
 import {
@@ -446,14 +448,14 @@ describe('idle OMP unload', () => {
   })
 })
 
-describe('stale OMP publication cleanup', () => {
-  async function deadPid(): Promise<number> {
-    const child = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' })
-    const exited = Promise.withResolvers<number>()
-    child.once('exit', () => { exited.resolve(child.pid ?? 0) })
-    return await exited.promise
-  }
+async function deadPid(): Promise<number> {
+  const child = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' })
+  const exited = Promise.withResolvers<number>()
+  child.once('exit', () => { exited.resolve(child.pid ?? 0) })
+  return await exited.promise
+}
 
+describe('stale OMP publication cleanup', () => {
   it('collects the sidecar, socket, and bind lock of a killed process before resuming', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'omp-stale-run-'))
     directories.add(directory)
@@ -526,6 +528,230 @@ describe('stale OMP publication cleanup', () => {
     const state = await probeOmpSocketSession(directory, sessionId)
     expect(state.kind).toBe('live')
     expect(planOmpWake(state).kind).toBe('attach')
+  })
+})
+
+interface PublicationProbe {
+  readonly argv: string[][]
+  readonly lease: boolean[]
+  readonly launch: boolean[]
+}
+
+function publicationRuntime(request: {
+  readonly probe: PublicationProbe
+  readonly sidecars: readonly string[]
+  readonly current: { transcriptPath: string }
+}): SubprocessRuntime {
+  const text = (stdout: string): SubprocessHandle => {
+    const exited = Promise.withResolvers<{ exitCode: number | null; signal: NodeJS.Signals | null }>()
+    exited.resolve({ exitCode: 0, signal: null })
+    return {
+      stdin: undefined,
+      stdout: undefined,
+      stderr: undefined,
+      control: undefined,
+      collected: {
+        stdout: { readFrom: () => ({ text: stdout }) },
+        stderr: { readFrom: () => ({ text: '' }) },
+      },
+      done: exited.promise,
+      terminate: () => {},
+      waitForExit: async () => true,
+    } as unknown as SubprocessHandle
+  }
+  return {
+    resolveExecutable: async (command: string) => command,
+    spawn: (spawnRequest: { readonly argv: readonly string[] }): SubprocessHandle => {
+      request.probe.argv.push([...spawnRequest.argv])
+      if (spawnRequest.argv[1] === 'skill') return text('[]')
+      const published = request.sidecars.some(path => existsSync(path))
+      if (spawnRequest.argv[1] === 'session') {
+        request.probe.lease.push(published)
+        return text('{"held":[],"unknown":[]}')
+      }
+      request.probe.launch.push(published)
+      const stdin = new PassThrough()
+      const stdout = new PassThrough()
+      stdout.write(`${JSON.stringify({
+        type: 'ready',
+        protocolVersion: 1,
+        supportedProtocolVersions: [1],
+        maxFrameBytes: 1024 * 1024,
+      })}\n`)
+      let buffered = ''
+      stdin.setEncoding('utf8')
+      stdin.on('data', (chunk: string) => {
+        buffered += chunk
+        let newline = buffered.indexOf('\n')
+        while (newline !== -1) {
+          const frame = JSON.parse(buffered.slice(0, newline)) as Record<string, unknown>
+          buffered = buffered.slice(newline + 1)
+          const data = frame.type === 'get_state'
+            ? { sessionId: OMP_SESSION, sessionFile: request.current.transcriptPath, cwd: '/work', isStreaming: false }
+            : []
+          stdout.write(`${JSON.stringify({
+            type: 'response',
+            id: frame.id,
+            command: frame.type,
+            success: true,
+            data,
+          })}\n`)
+          newline = buffered.indexOf('\n')
+        }
+      })
+      const exited = Promise.withResolvers<{ exitCode: number | null; signal: NodeJS.Signals | null }>()
+      return {
+        stdin,
+        stdout,
+        stderr: undefined,
+        control: undefined,
+        collected: {},
+        done: exited.promise,
+        terminate: () => { exited.resolve({ exitCode: 0, signal: null }) },
+        waitForExit: async () => true,
+      } as unknown as SubprocessHandle
+    },
+  } as unknown as SubprocessRuntime
+}
+
+interface MountedOmpPlugin {
+  readonly ctx: Context
+  readonly open: (body: unknown) => Promise<Response>
+}
+
+async function mountedOmpPlugin(options: {
+  readonly home: string
+  readonly runDir: string
+  readonly bindingsFile: string
+  readonly runtime: SubprocessRuntime
+  readonly agents: ReadonlyMap<string, Agent>
+}): Promise<MountedOmpPlugin> {
+  const ctx = new Context()
+  onTestFinished(() => ctx.fiber.dispose())
+  await ctx.plugin(SessionStore)
+  await ctx.plugin(CommandRuntime)
+  ctx.provide('tools', { definitions: () => [] } as never)
+  ctx.provide('subprocess', options.runtime as never)
+  ctx.provide('llm', { registerAdapter: () => () => {} } as never)
+  ctx.provide('agents', { setFactory: () => {} } as never)
+  ctx.provide('sessionProjections', { register: async () => ({ readerFor: () => undefined }) } as never)
+  ctx.provide('sessionController', {
+    resolveAgent: async (id: SessionId) => {
+      const agent = options.agents.get(String(id))
+      return agent === undefined
+        ? { error: { code: 'session/not-found', message: `no session ${String(id)}` } }
+        : { agent }
+    },
+  } as never)
+  let route: { fetch: (request: Request) => Promise<Response> } | undefined
+  ctx.provide('connection', {
+    fetch: {
+      register: (registered: { fetch: (request: Request) => Promise<Response> }) => {
+        route = registered
+        return () => { route = undefined }
+      },
+    },
+  } as never)
+  await ctx.plugin(ompRpc, {
+    home: options.home,
+    watchRunDir: options.runDir,
+    bindingsFile: options.bindingsFile,
+    ompSessionsRoot: options.home,
+    cwd: '/work',
+  })
+  await tick()
+  if (route === undefined) throw new Error('the omp open route was never registered')
+  return {
+    ctx,
+    open: async body => route!.fetch(new Request('http://localhost/api/exocortex/omp/open', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    })),
+  }
+}
+
+describe('stale OMP publication cleanup across the watched and publication directories', () => {
+  it('clears dead publications in both directories before an open resumes and a bound session attaches', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'omp-publish-'))
+    directories.add(root)
+    const home = join(root, 'home')
+    const runDir = join(root, 'stage-omp-run')
+    const publicationDir = join(home, '.omp', 'run')
+    await mkdir(runDir, { recursive: true })
+    await mkdir(publicationDir, { recursive: true })
+    const dead = await deadPid()
+    const transcriptPath = await transcriptOf([sessionLine(), userEntry(1, OMP_SESSION), assistantEntry(1)])
+    const sidecars = [
+      join(runDir, `${OMP_SESSION}.json`),
+      join(publicationDir, `${OMP_SESSION}.json`),
+    ]
+    const publishDead = async (): Promise<void> => {
+      for (const directory of [runDir, publicationDir]) {
+        await writeFile(join(directory, `${OMP_SESSION}.json`), JSON.stringify({
+          pid: dead,
+          sessionId: OMP_SESSION,
+          sessionFile: transcriptPath,
+          cwd: '/work',
+        }))
+        await writeFile(ompSocketPath(directory, OMP_SESSION), 'stale')
+        await writeFile(join(directory, `${OMP_SESSION}.sock.bind.lock`), 'stale')
+      }
+    }
+    await publishDead()
+    await rm(ompSocketPath(runDir, OMP_SESSION))
+    await symlink(ompSocketPath(publicationDir, OMP_SESSION), ompSocketPath(runDir, OMP_SESSION))
+
+    const probe: PublicationProbe = { argv: [], lease: [], launch: [] }
+    const current = { transcriptPath }
+    const bindingsFile = join(root, 'bindings.json')
+    const opened = Session.create(SessionId('session-publish-open'))
+    const bound = Session.create(SessionId('session-publish-bound'))
+    const agents = new Map<string, Agent>([
+      ['session-publish-open', { id: opened.id, session: opened, model: { current: () => undefined } } as unknown as Agent],
+      ['session-publish-bound', { id: bound.id, session: bound, model: { current: () => undefined } } as unknown as Agent],
+    ])
+    const bindings = new OmpBindings(bindingsFile)
+    await bindings.set(SessionId('session-publish-bound'), {
+      ompSessionId: OMP_SESSION,
+      path: transcriptPath,
+      cwd: '/work',
+      updatedAt: '2026-11-05T00:00:00.000Z',
+    })
+
+    const plugin = await mountedOmpPlugin({
+      home,
+      runDir,
+      bindingsFile,
+      runtime: publicationRuntime({ probe, sidecars, current }),
+      agents,
+    })
+
+    const openedAgent = agents.get('session-publish-open')!
+    ;(openedAgent as unknown as { ctx: Context }).ctx = createScope(plugin.ctx, openedAgent).ctx
+    const response = await plugin.open({ ompSession: transcriptPath, sessionId: 'session-publish-open' })
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({ sessionId: 'session-publish-open' })
+    expect(probe.lease).toEqual([false])
+    expect(probe.launch).toEqual([false])
+    expect(probe.argv.at(-1)).toEqual(expect.arrayContaining(['--resume', transcriptPath]))
+    for (const sidecar of sidecars) await expect(readFile(sidecar)).rejects.toThrow()
+    await expect(readFile(ompSocketPath(runDir, OMP_SESSION))).rejects.toThrow()
+    await expect(readFile(ompSocketPath(publicationDir, OMP_SESSION))).rejects.toThrow()
+    await expect(readFile(join(publicationDir, `${OMP_SESSION}.sock.bind.lock`))).rejects.toThrow()
+
+    await publishDead()
+    const boundAgent = agents.get('session-publish-bound')!
+    ;(boundAgent as unknown as { ctx: Context }).ctx = createScope(plugin.ctx, boundAgent).ctx
+    plugin.ctx.emit('agent/created', { agent: boundAgent, source: 'startup' })
+
+    await expect.poll(() => probe.launch.length).toBe(2)
+    expect(probe.launch[1]).toBe(false)
+    for (const sidecar of sidecars) await expect(readFile(sidecar)).rejects.toThrow()
+    await expect(readFile(join(publicationDir, `${OMP_SESSION}.sock.bind.lock`))).rejects.toThrow()
+    expect(await bindings.get(SessionId('session-publish-bound'))).toMatchObject({
+      ompSessionId: OMP_SESSION,
+      path: transcriptPath,
+    })
   })
 })
 

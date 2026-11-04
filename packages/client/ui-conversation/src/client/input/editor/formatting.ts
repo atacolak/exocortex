@@ -19,7 +19,10 @@ const FORMAT_BITS: Readonly<Record<InlineFormat, number>> = {
 
 const WORD_CHARACTER = /[\p{L}\p{N}_]/u
 
-/** Whether the selection anchor sits inside a fenced code block. */
+/**
+ * Whether the selection anchor sits inside a fenced code block.
+ * @returns true when the anchor's top-level element is a fenced code block.
+ */
 export function $isSelectionInCodeBlock(): boolean {
   const selection = $getSelection()
   if (!$isRangeSelection(selection)) return false

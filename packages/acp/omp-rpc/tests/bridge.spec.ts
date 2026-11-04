@@ -10,7 +10,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import SessionStore, { Session, SessionId } from '@deepseek-ai/dsh-session'
 import type { SubprocessHandle, SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
-import { afterEach, describe, expect, it, onTestFinished } from 'vitest'
+import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { OmpBindings } from '../src/bindings.ts'
 import type { OmpAgentDriver } from '../src/driver.ts'
 import { ompSocketPath } from '../src/socket.ts'
@@ -320,6 +320,35 @@ describe('OmpBridge command registration', () => {
 
     const native = await ctx.commands.execute(agent, '/status now', [], signal)
     expect(native?.result).toEqual({ kind: 'success', text: 'OMP status ok' })
+
+    await bridge.detach(agent.id)
+  })
+
+  it('drops one malformed catalog row and still registers the rest', async () => {
+    const { ctx, bridge, bridgeCtx } = await mountedBridge((frame) => {
+      if (frame.type === 'get_state') return { sessionId: 'omp-session-2' }
+      if (frame.type === 'get_available_models') return { models: [] }
+      if (frame.type === 'get_available_commands') {
+        return {
+          commands: [
+            { name: 'a:b:c', description: 'Two namespaces deep', source: 'extension' },
+            { name: 'status', description: 'Show OMP status', source: 'builtin' },
+            { name: 'skill:workflows', description: 'Namespaced skill', source: 'skill' },
+          ],
+        }
+      }
+      return {}
+    })
+    const warn = vi.spyOn(bridgeCtx.logger, 'warn').mockImplementation(() => {})
+    const agent = await scopedAgent(ctx, 'bridge-commands-malformed')
+    const sessionDir = await mkdtemp(join(tmpdir(), 'omp-attach-'))
+    onTestFinished(() => rm(sessionDir, { recursive: true, force: true }))
+
+    await bridge.attach(agent, { mode: 'attach', sessionDir, cwd: '/work' })
+    await tick()
+
+    expect(ctx.commands.list(agent).map(descriptor => descriptor.name)).toEqual(['compact', 'skill:workflows', 'status'])
+    expect(warn).toHaveBeenCalledExactlyOnceWith(expect.stringContaining('cannot register native command "a:b:c"'))
 
     await bridge.detach(agent.id)
   })

@@ -30,7 +30,10 @@ type SerializedInlineCodeNode = Spread<{ revealed: boolean }, SerializedTextNode
  * backticks and carries no format, so the DOM shows exactly what typing edits.
  */
 export class InlineCodeNode extends LexicalTextNode {
-  /** @internal */
+  /**
+   * Whether the pill currently shows literal backticks instead of a folded span.
+   * @internal
+   */
   __revealed: boolean
 
   constructor(text: string, revealed = false, key?: NodeKey) {
@@ -42,10 +45,20 @@ export class InlineCodeNode extends LexicalTextNode {
     return 'dsh-inline-code'
   }
 
+  /**
+   * Clone the pill with its reveal state.
+   * @param node - the pill to copy.
+   * @returns a fresh pill carrying the same text, reveal state, and key.
+   */
   static override clone(node: InlineCodeNode): InlineCodeNode {
     return new InlineCodeNode(node.__text, node.__revealed, node.__key)
   }
 
+  /**
+   * Rebuild a pill from its serialized form.
+   * @param json - the serialized pill, including its reveal state.
+   * @returns the restored pill carrying the persisted formats.
+   */
   static override importJSON(json: SerializedInlineCodeNode): InlineCodeNode {
     const node = $createInlineCodeNode(json.text, json.revealed === true)
     node.setFormat(json.format)
@@ -64,10 +77,19 @@ export class InlineCodeNode extends LexicalTextNode {
     }
   }
 
+  /**
+   * Whether the pill currently shows literal backticks.
+   * @returns true while the pill is revealed.
+   */
   isRevealed(): boolean {
     return this.getLatest().__revealed
   }
 
+  /**
+   * Swap the pill's reveal state on the writable copy.
+   * @param revealed - whether the pill should show literal backticks.
+   * @returns the writable pill carrying the new state.
+   */
   setRevealed(revealed: boolean): this {
     const writable = this.getWritable()
     writable.__revealed = revealed
@@ -79,6 +101,7 @@ export class InlineCodeNode extends LexicalTextNode {
  * Create a folded inline code pill.
  * @param text - the span's content, without delimiters.
  * @param revealed - whether the node currently shows literal backticks.
+ * @returns the pill, formatted as inline code unless revealed.
  */
 export function $createInlineCodeNode(text: string, revealed = false): InlineCodeNode {
   const node = new InlineCodeNode(text, revealed)
@@ -86,7 +109,11 @@ export function $createInlineCodeNode(text: string, revealed = false): InlineCod
   return node
 }
 
-/** Whether a node is the composer's backtick-authored inline pill. */
+/**
+ * Whether a node is the composer's backtick-authored inline pill.
+ * @param node - the node to classify, possibly null mid-selection-walk.
+ * @returns true when the node is an InlineCodeNode.
+ */
 export function $isInlineCodeNode(node: LexicalNode | null | undefined): node is InlineCodeNode {
   return node instanceof InlineCodeNode
 }
