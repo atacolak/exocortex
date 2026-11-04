@@ -30,6 +30,7 @@ import type {} from '@deepseek-ai/dsh-goal/client'
 // api-remotes import already places it in every client program.
 import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ComposerBarProps } from '../contract/slots.ts'
+import type { DraftAttachmentId } from '../contract/input.ts'
 import { DraftEditor } from '../input/editor/DraftEditor.tsx'
 import {
   focusDraftEditor, installDraftFilePicker, installDraftKeyboardDismissal, installDraftKeymap, installDraftWheel,
@@ -38,6 +39,8 @@ import {
 import { resolveSubmitMode } from '../input/submission-policy.ts'
 import { attachmentErrorText, imageSizeText } from '../image-labels.ts'
 import { isImageMediaType } from '../service.ts'
+import { planImageIntake } from '../image-dedupe.ts'
+import type { ImageIntakePlan } from '../image-dedupe.ts'
 import { ContextMeter } from './ContextMeter.tsx'
 import { observeControlRow } from './control-row-layout.ts'
 import css from './InputBar.module.css'
@@ -45,7 +48,7 @@ import css from './InputBar.module.css'
 export type InputBarProps = ComposerBarProps
 
 export const InputBar = memo(function InputBar({
-  useSession, useInput, inputActions, keyboard, addFiles, removeAttachment, resolveDraftAttachments,
+  useSession, useInput, inputActions, keyboard, addFiles, removeAttachment, replaceAttachment, resolveDraftAttachments,
   retryFileUpload,
   toggleCommandMenu, stop, t,
   renderSlot, useBusyEnter, useFileUploads, useNotices, useLexicon, useMenuLauncher, useStopShortcut,
@@ -85,9 +88,12 @@ export const InputBar = memo(function InputBar({
   const live = input !== undefined && keyboard !== undefined && inputActions !== undefined
   const draft = input?.draft ?? ''
   const editor = keyboard?.editor ?? null
+  // In-place image edits mutate a descriptor without changing the id list;
+  // this epoch repaints the rail with the replacement preview.
+  const [attachmentEpoch, setAttachmentEpoch] = useState(0)
   const attachments = useMemo(
     () => input === undefined || resolveDraftAttachments === undefined ? [] : resolveDraftAttachments(input.attachmentIds),
-    [resolveDraftAttachments, input?.attachmentIds],
+    [resolveDraftAttachments, input?.attachmentIds, attachmentEpoch],
   )
   const empty = draft.trim() === '' && attachments.length === 0
   const uploads = useFileUploads(snapshot => snapshot)
@@ -144,7 +150,41 @@ export const InputBar = memo(function InputBar({
     return observeControlRow(row)
   }, [])
   const cardRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    const card = cardRef.current
+    if (card === null || replaceAttachment === undefined) return undefined
+    const onReplaceDraftImage = (event: Event): void => {
+      const detail = (event as CustomEvent<{ readonly id?: DraftAttachmentId; readonly file?: File }>).detail
+      if (detail?.id === undefined || detail.file === undefined) return
+      replaceAttachment(detail.id, detail.file)
+      setAttachmentEpoch(value => value + 1)
+    }
+    card.addEventListener('exocortex:replace-draft-image', onReplaceDraftImage)
+    return () => { card.removeEventListener('exocortex:replace-draft-image', onReplaceDraftImage) }
+  }, [replaceAttachment])
   const scrollRef = useRef<HTMLDivElement | null>(null)
+  const [contentOverflows, setContentOverflows] = useState(false)
+  // The expand affordance exists only when the draft actually exceeds the
+  // collapsed scrollport (or the user already expanded it). ResizeObserver
+  // catches both editor growth and viewport/width changes; the draft effect
+  // covers content edits that do not resize the observed boxes.
+  const measureOverflow = useCallback(() => {
+    const box = scrollRef.current
+    if (box === null) return
+    setContentOverflows(box.scrollHeight > box.clientHeight + 1)
+  }, [])
+  useEffect(() => {
+    const box = scrollRef.current
+    if (box === null || typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(measureOverflow)
+    observer.observe(box)
+    const surface = box.firstElementChild
+    if (surface !== null) observer.observe(surface)
+    return () => { observer.disconnect() }
+  }, [measureOverflow, sessionId])
+  useEffect(() => { measureOverflow() }, [draft, expanded, measureOverflow])
+  const showExpand = contentOverflows || expanded
 
   // A continuable child without its live parent cannot accept human input,
   // but its independent Stop below stays available while it runs.
@@ -249,42 +289,60 @@ export const InputBar = memo(function InputBar({
   const intakeFiles = useCallback((files: readonly File[], directories?: ReadonlySet<File>): void => {
     if (uploadDenied || locked || machineBusy || (subagent !== null && !continuable)
       || addFiles === undefined || files.length === 0) return
-    const rejected = ((): string | null => {
-      // Child prompts support images, but not generic file receipts or the
-      // Desktop path-reference fallback. Refuse mixed batches before intake.
-      if (continuable && files.some(file => directories?.has(file) || !isImageMediaType(file.type))) {
-        return t('image.unsupportedType')
+    const pastedImages = files.filter(file => !directories?.has(file) && isImageMediaType(file.type))
+    const imageAttachments = attachments.filter(attachment => attachment.kind === 'image')
+    const stage = (plan: ImageIntakePlan | null): void => {
+      const freshImages = plan?.fresh ?? pastedImages
+      const accepted = plan === null
+        ? files
+        : files.filter(file => !pastedImages.includes(file) || freshImages.includes(file))
+      const rejected = ((): string | null => {
+        // Child prompts support images, but not generic file receipts or the
+        // Desktop path-reference fallback. Refuse mixed batches before intake.
+        if (continuable && accepted.some(file => directories?.has(file) || !isImageMediaType(file.type))) {
+          return t('image.unsupportedType')
+        }
+        if (imageLimits !== undefined) {
+          const mediaTypes = imageLimits.mediaTypes as readonly string[]
+          const images = freshImages.filter(file => mediaTypes.includes(file.type))
+          if (imageAttachments.length + images.length > imageLimits.maxImagesPerMessage) {
+            return t('image.tooMany', { count: imageLimits.maxImagesPerMessage })
+          }
+          if (images.some(file => file.size > imageLimits.maxImageBytes)) {
+            return t('image.fileTooLarge', { size: imageSizeText(imageLimits.maxImageBytes) })
+          }
+          const total = imageAttachments.reduce((sum, attachment) => sum + attachment.file.size, 0)
+            + images.reduce((sum, file) => sum + file.size, 0)
+          if (total > imageLimits.maxMessageImageBytes) {
+            return t('image.totalTooLarge', { size: imageSizeText(imageLimits.maxMessageImageBytes) })
+          }
+        }
+        if (accepted.length === 0) return null
+        return addFiles(accepted, directories)
+      })()
+      if (rejected !== null) {
+        showToast(rejected)
+        return
       }
-      if (imageLimits !== undefined) {
-        const mediaTypes = imageLimits.mediaTypes as readonly string[]
-        const images = files.filter(file => mediaTypes.includes(file.type))
-        const imageAttachments = attachments.filter(attachment => attachment.kind === 'image')
-        if (imageAttachments.length + images.length > imageLimits.maxImagesPerMessage) {
-          return t('image.tooMany', { count: imageLimits.maxImagesPerMessage })
-        }
-        if (images.some(file => file.size > imageLimits.maxImageBytes)) {
-          return t('image.fileTooLarge', { size: imageSizeText(imageLimits.maxImageBytes) })
-        }
-        const total = imageAttachments.reduce((sum, attachment) => sum + attachment.file.size, 0)
-          + images.reduce((sum, file) => sum + file.size, 0)
-        if (total > imageLimits.maxMessageImageBytes) {
-          return t('image.totalTooLarge', { size: imageSizeText(imageLimits.maxMessageImageBytes) })
-        }
-      }
-      return addFiles(files, directories)
-    })()
-    if (rejected !== null) {
-      showToast(rejected)
+      // Each pasted image gets a stable-looking `[Image #N]` marker at the
+      // caret: the sent prompt then names the attachment it travels with, and
+      // the rail badge carries the same ordinal. Numbering continues after the
+      // images already staged in this draft; a duplicate reuses its number.
+      if (pastedImages.length === 0 || keyboard === undefined) return
+      const used = imageAttachments.length
+      const ordinals = plan?.ordinals
+        ?? pastedImages.map((_, index) => used + index + 1)
+      keyboard.paste(ordinals.map(ordinal => `[Image #${String(ordinal)}]`).join(' '))
+    }
+    // Only equal byte length can denote identical content, so a batch with no
+    // same-size staged image needs no digest work and stays synchronous.
+    const mayDuplicate = pastedImages.some(file =>
+      imageAttachments.some(attachment => attachment.file.size === file.size))
+    if (!mayDuplicate) {
+      stage(null)
       return
     }
-    // Each accepted image gets a stable-looking `[Image #N]` marker at the
-    // caret: the sent prompt then names the attachment it travels with, and
-    // the rail badge carries the same ordinal. Numbering continues after the
-    // images already staged in this draft.
-    const images = files.filter(file => !directories?.has(file) && isImageMediaType(file.type))
-    if (images.length === 0 || keyboard === undefined) return
-    const used = attachments.filter(attachment => attachment.kind === 'image').length
-    keyboard.paste(images.map((_, index) => `[Image #${String(used + index + 1)}]`).join(' '))
+    void planImageIntake(pastedImages, imageAttachments.map(attachment => attachment.file)).then(stage)
   }, [uploadDenied, locked, machineBusy, subagent, continuable, addFiles, attachments, imageLimits, showToast, t, keyboard])
 
   const canAcceptDrop = !uploadDenied && (subagent === null || continuable) && !locked && !machineBusy && addFiles !== undefined
@@ -454,6 +512,7 @@ export const InputBar = memo(function InputBar({
         tabIndex={-1}
         className={clsx(css.card, workspaceTrigger && css.cardWorkspaceTrigger)}
         data-composer-card
+        data-composer-scrollable={contentOverflows || undefined}
         data-composer-expanded={expanded || undefined}
         onClick={workspaceTrigger ? onRequestWorkspace : undefined}
         onPointerDown={workspaceTrigger ? (e) => { e.stopPropagation() } : undefined}
@@ -463,7 +522,7 @@ export const InputBar = memo(function InputBar({
           <div className={css.overlayAnchor} data-composer-overlay>{renderSlot('conversation.input.overlay', {})}</div>
         )}
         {accessory !== undefined && <div className={css.accessory}>{accessory}</div>}
-        {variant === 'composer' && (
+        {!workspaceTrigger && showExpand && (
           <Tooltip label={t(expanded ? 'input.collapse' : 'input.expand')} side="top" delayMs={500}>
             <button
               type="button"

@@ -525,6 +525,8 @@ export interface ComposerBarInjected {
    */
   addFiles: ((files: readonly File[], directories?: ReadonlySet<File>) => string | null) | undefined
   removeAttachment: ((id: DraftAttachmentId) => void) | undefined
+  /** Rewrite one staged image's bytes in place, preserving its ordinal. */
+  replaceAttachment: ((id: DraftAttachmentId, file: File) => void) | undefined
   resolveDraftAttachments: ((ids: readonly DraftAttachmentId[]) => readonly ComposerAttachment[]) | undefined
   /** Restart one failed file upload; absent without a session. */
   retryFileUpload: ((id: DraftAttachmentId) => void) | undefined

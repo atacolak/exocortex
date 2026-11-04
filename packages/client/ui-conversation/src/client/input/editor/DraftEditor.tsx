@@ -34,31 +34,33 @@ export function DraftEditor({
   workspaceTrigger, workspacePickerOpen, onWorkspaceKeyDown, hint, showPlaceholder,
 }: DraftEditorProps): ReactNode {
   return (
-    <div ref={scrollRef} className={css.scroll} data-input-scroll>
-      <HoverCardGroup className={css.grow}>
-        <ComposerContentEditable
-          editor={workspaceTrigger ? null : editor}
-          editable={editable}
-          className={clsx(css.input, editorDisabled && css.inputDisabled)}
-          data-phase={phase}
-          aria-disabled={editorDisabled || undefined}
-          data-placeholder={placeholderText}
-          // The placeholder was the textarea's accessible name; a div's
-          // data attribute is not, so the label restores it.
-          aria-label={ariaLabel}
-          aria-haspopup={workspaceTrigger ? 'menu' : undefined}
-          aria-expanded={workspaceTrigger ? workspacePickerOpen : undefined}
-          tabIndex={workspaceTrigger ? 0 : undefined}
-          onKeyDown={workspaceTrigger ? onWorkspaceKeyDown : undefined}
-          style={hint === null ? undefined : { '--dsh-composer-hint': JSON.stringify(hint) } as CSSProperties}
-        />
-        {showPlaceholder && (
-          <div aria-hidden className={css.placeholder} data-composer-placeholder>
-            {placeholderText}
-          </div>
-        )}
-        <DecoratorPortals editor={workspaceTrigger ? null : editor} />
-      </HoverCardGroup>
+    <div className={css.scrollClip}>
+      <div ref={scrollRef} className={css.scroll} data-input-scroll>
+        <HoverCardGroup className={css.grow}>
+          <ComposerContentEditable
+            editor={workspaceTrigger ? null : editor}
+            editable={editable}
+            className={clsx(css.input, editorDisabled && css.inputDisabled)}
+            data-phase={phase}
+            aria-disabled={editorDisabled || undefined}
+            data-placeholder={placeholderText}
+            // The placeholder was the textarea's accessible name; a div's
+            // data attribute is not, so the label restores it.
+            aria-label={ariaLabel}
+            aria-haspopup={workspaceTrigger ? 'menu' : undefined}
+            aria-expanded={workspaceTrigger ? workspacePickerOpen : undefined}
+            tabIndex={workspaceTrigger ? 0 : undefined}
+            onKeyDown={workspaceTrigger ? onWorkspaceKeyDown : undefined}
+            style={hint === null ? undefined : { '--dsh-composer-hint': JSON.stringify(hint) } as CSSProperties}
+          />
+          {showPlaceholder && (
+            <div aria-hidden className={css.placeholder} data-composer-placeholder>
+              {placeholderText}
+            </div>
+          )}
+          <DecoratorPortals editor={workspaceTrigger ? null : editor} />
+        </HoverCardGroup>
+      </div>
     </div>
   )
 }

@@ -2,7 +2,8 @@
 import type { ElementNode, LexicalNode, TextNode } from 'lexical'
 import {
   $createLineBreakNode, $createParagraphNode, $createTextNode, $formatText, $getRoot,
-  $getSelection, $isElementNode, $isRangeSelection, $isTextNode, IS_BOLD, IS_CODE, IS_ITALIC,
+  $getSelection, $isElementNode, $isLineBreakNode, $isRangeSelection, $isTextNode,
+  IS_BOLD, IS_CODE, IS_ITALIC,
 } from 'lexical'
 import { $createCodeNode, $isCodeNode } from '@lexical/code'
 import type { CodeNode } from '@lexical/code'
@@ -27,8 +28,10 @@ export function $isSelectionInCodeBlock(): boolean {
 
 /**
  * Toggle one inline format. A ranged selection formats its text; a collapsed
- * caret formats the word it touches and leaves the caret in place; a caret
- * outside every word arms the format for the next typed characters.
+ * caret strictly inside a word (a word character on each side) formats that
+ * whole word in place; every other caret — end of a word, start of one,
+ * after whitespace, or an empty line — leaves the draft untouched and arms
+ * the format for the characters typed from here.
  * @param type - the format the gesture names.
  */
 export function $toggleInlineFormat(type: InlineFormat): void {
@@ -38,9 +41,12 @@ export function $toggleInlineFormat(type: InlineFormat): void {
     $formatText(selection, type)
     return
   }
-  const word = wordAt(selection.anchor.getNode(), selection.anchor.offset)
+  const bit = FORMAT_BITS[type]
+  const anchor = selection.anchor
+  const node = anchor.getNode()
+  const word = $isTextNode(node) ? wordSurrounding(node, anchor.offset) : null
   if (word === null) {
-    $formatText(selection, type)
+    selection.setFormat(selection.format ^ bit)
     return
   }
   const parts = word.node.splitText(word.start, word.end)
@@ -50,9 +56,26 @@ export function $toggleInlineFormat(type: InlineFormat): void {
       ? (word.start === 0 ? parts[0] : parts[1])
       : parts[0]
   if (formatted === undefined) return
-  const bit = FORMAT_BITS[type]
   const format = formatted.getFormat()
   formatted.setFormat((format & bit) === 0 ? format | bit : format ^ bit)
+  formatted.select(anchor.offset - word.start, anchor.offset - word.start)
+}
+
+/**
+ * The word a caret sits strictly inside: the node plus the half-open range
+ * of word characters on BOTH sides of the caret. Only that shape means the
+ * gesture targets the word; a caret touching a word boundary formats what is
+ * typed next instead.
+ */
+function wordSurrounding(node: TextNode, offset: number): { node: TextNode; start: number; end: number } | null {
+  const text = node.getTextContent()
+  if (offset <= 0 || offset >= text.length) return null
+  if (!WORD_CHARACTER.test(text[offset - 1] ?? '') || !WORD_CHARACTER.test(text[offset] ?? '')) return null
+  let start = offset
+  let end = offset
+  while (start > 0 && WORD_CHARACTER.test(text[start - 1] ?? '')) start -= 1
+  while (end < text.length && WORD_CHARACTER.test(text[end] ?? '')) end += 1
+  return { node, start, end }
 }
 
 /**
@@ -76,16 +99,54 @@ export function $toggleCodeBlock(): void {
   code.selectEnd()
 }
 
-/** One word touching a caret: the text node plus the half-open range inside it. */
-function wordAt(node: LexicalNode, offset: number): { node: TextNode; start: number; end: number } | null {
-  if (!$isTextNode(node)) return null
-  const text = node.getTextContent()
-  let start = offset
-  let end = offset
-  while (start > 0 && WORD_CHARACTER.test(text[start - 1] ?? '')) start -= 1
-  while (end < text.length && WORD_CHARACTER.test(text[end] ?? '')) end += 1
-  if (start === end) return null
-  return { node, start, end }
+/**
+ * Escape a fenced block at its first or last line: the caret lands at the
+ * matching edge of the neighbouring block, or a fresh empty paragraph is
+ * inserted when the block is the document's first or last block.
+ * @param direction - the arrow gesture: up = first line, down = last line.
+ * @returns whether the caret moved (false leaves it inside the block).
+ */
+export function $moveCaretOutOfCodeBlock(direction: 'up' | 'down'): boolean {
+  const selection = $getSelection()
+  if (!$isRangeSelection(selection) || !selection.isCollapsed()) return false
+  const anchor = selection.anchor
+  const anchorNode = anchor.getNode()
+  if ($isCodeNode(anchorNode)) {
+    const children = anchorNode.getChildren()
+    if (anchor.offset !== (direction === 'up' ? 0 : children.length)) return false
+    return moveOut(anchorNode, direction)
+  }
+  const node = anchorNode
+  const code = node.getTopLevelElement()
+  if (!$isCodeNode(code)) return false
+  const index = node.getIndexWithinParent()
+  if (index < 0) return false
+  const siblings = code.getChildren()
+  const line = direction === 'up'
+    ? siblings.slice(0, index)
+    : siblings.slice(index + 1)
+  if (line.some(child => $isLineBreakNode(child))) return false
+  return moveOut(code, direction)
+}
+
+/** Move the caret to the neighbouring block at the fenced boundary. */
+function moveOut(code: CodeNode, direction: 'up' | 'down'): boolean {
+  const sibling = direction === 'up' ? code.getPreviousSibling() : code.getNextSibling()
+  if (sibling !== null && !$isElementNode(sibling)) return false
+  if (sibling !== null) {
+    if (direction === 'up') sibling.selectEnd()
+    else sibling.selectStart()
+    return true
+  }
+  const paragraph = $createParagraphNode()
+  if (direction === 'up') {
+    code.insertBefore(paragraph)
+    paragraph.selectStart()
+  } else {
+    code.insertAfter(paragraph)
+    paragraph.selectStart()
+  }
+  return true
 }
 
 /** The top-level blocks spanned by a selection, in document order. */

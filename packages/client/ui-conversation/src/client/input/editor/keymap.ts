@@ -20,11 +20,14 @@ import {
   KEY_DOWN_COMMAND, MOVE_TO_END,
   COMMAND_PRIORITY_CRITICAL, KEY_ARROW_DOWN_COMMAND, KEY_ARROW_UP_COMMAND, KEY_ENTER_COMMAND,
   KEY_ESCAPE_COMMAND, KEY_SPACE_COMMAND, KEY_TAB_COMMAND, PASTE_COMMAND,
+  COMMAND_PRIORITY_NORMAL,
 } from 'lexical'
 import { mergeRegister } from '@lexical/utils'
 import type { ArbitrateKey, ArbitrateOutcome } from '../../contract/draft-editor.ts'
 import { $isQuoteNode } from './QuoteNode.tsx'
-import { $isSelectionInCodeBlock, $toggleCodeBlock, $toggleInlineFormat } from './formatting.ts'
+import {
+  $isSelectionInCodeBlock, $moveCaretOutOfCodeBlock, $toggleCodeBlock, $toggleInlineFormat,
+} from './formatting.ts'
 
 /** The bar-supplied behavior behind each intercepted gesture. */
 export interface ComposerKeymapHandlers {
@@ -245,6 +248,20 @@ export function registerComposerKeymap(editor: LexicalEditor, handlers: Composer
     editor.registerUpdateListener(syncComposition),
     editor.registerCommand(KEY_ARROW_UP_COMMAND, arrow('up'), COMMAND_PRIORITY_CRITICAL),
     editor.registerCommand(KEY_ARROW_DOWN_COMMAND, arrow('down'), COMMAND_PRIORITY_CRITICAL),
+    // Fenced blocks: the first line's ArrowUp and the last line's ArrowDown
+    // leave the block instead of trapping the caret against its edge.
+    editor.registerCommand(KEY_ARROW_UP_COMMAND, (event) => {
+      if (event !== null && (event.shiftKey || event.altKey || event.metaKey || event.ctrlKey)) return false
+      if (!$moveCaretOutOfCodeBlock('up')) return false
+      event?.preventDefault()
+      return true
+    }, COMMAND_PRIORITY_NORMAL),
+    editor.registerCommand(KEY_ARROW_DOWN_COMMAND, (event) => {
+      if (event !== null && (event.shiftKey || event.altKey || event.metaKey || event.ctrlKey)) return false
+      if (!$moveCaretOutOfCodeBlock('down')) return false
+      event?.preventDefault()
+      return true
+    }, COMMAND_PRIORITY_NORMAL),
     // Tab settles the highlighted completion and passes without one, keeping
     // native focus traversal; Shift+Tab leaves the menu like Escape whenever it
     // is open, highlight or not, so the two Tab gestures never disagree about

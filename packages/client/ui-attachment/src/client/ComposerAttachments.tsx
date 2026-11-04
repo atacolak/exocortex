@@ -104,7 +104,7 @@ export function ComposerAttachments({
                 ? uploadFailureText(upload.reason)
                 : undefined
               return (
-                <div className={css.imageItem}>
+                <div className={css.imageItem} data-draft-attachment-id={attachment.id}>
                   {ordinal !== undefined && (
                     <span className={css.badge} aria-hidden>#{ordinal}</span>
                   )}
