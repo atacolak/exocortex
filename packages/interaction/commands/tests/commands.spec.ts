@@ -44,11 +44,16 @@ describe('parseCommand()', () => {
     ['/goal create the thing', { name: 'goal', rawInput: ' create the thing' }],
     ['/goal\ncreate the thing', { name: 'goal', rawInput: '\ncreate the thing' }],
     ['/goal_name-2\t x ', { name: 'goal_name-2', rawInput: '\t x ' }],
+    ['/skill:workflows', { name: 'skill:workflows', rawInput: '' }],
+    ['/skill:cordis-plugin-development focus', { name: 'skill:cordis-plugin-development', rawInput: ' focus' }],
   ] as const)('parses %j without normalizing trailing input', (line, expected) => {
     expect(parseCommand(line)).toEqual(expected)
   })
 
-  it.each(['goal', ' /goal', '/', '/Goal', '/goal/path', '/goal🔥'])('rejects non-command boundary %j', (line) => {
+  it.each([
+    'goal', ' /goal', '/', '/Goal', '/goal/path', '/goal🔥',
+    '/:bad', '/skill:', '/a:b:c',
+  ])('rejects non-command boundary %j', (line) => {
     expect(parseCommand(line)).toBeUndefined()
   })
 })
@@ -87,6 +92,18 @@ describe('CommandRuntime', () => {
     ctx.commands.register(command('alpha'))
     ctx.commands.register(command('middle'))
     expect(ctx.commands.list(agent).map(item => item.name)).toEqual(['alpha', 'middle', 'zeta'])
+  })
+
+  it('registers and executes one colon-namespaced command name', async () => {
+    const ctx = await mount()
+    const { agent } = await mintAgentScope(ctx, 'a')
+    const seen = vi.fn(() => ({ kind: 'success' as const, text: 'skill ran' }))
+    ctx.commands.register({ name: 'skill:workflows', description: 'Run the workflows skill', input: { hint: 'arguments' }, handler: seen })
+
+    expect(ctx.commands.list(agent).map(item => item.name)).toEqual(['skill:workflows'])
+    const execution = await ctx.commands.execute(agent, '/skill:workflows focus', [], new AbortController().signal)
+    expect(execution?.result).toEqual({ kind: 'success', text: 'skill ran' })
+    expect(seen).toHaveBeenCalledWith(expect.objectContaining({ rawInput: ' focus' }))
   })
 
   it('uses agent-scoped shadows and removes them with their scope', async () => {

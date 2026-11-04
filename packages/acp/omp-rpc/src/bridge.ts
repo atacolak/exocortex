@@ -253,13 +253,23 @@ interface OmpAvailableCommand {
   readonly input?: { readonly hint?: string }
 }
 
+/**
+ * A catalog name stays transport-plausible: bounded, unspaced, and slash-free.
+ *
+ * OMP's own catalog carries namespaced `skill:<name>` rows and extensions carry
+ * dotted names, so the exact grammar belongs to the commands service; this
+ * guard only rejects what could never be one slash token, and a name the
+ * service still refuses costs its own row alone.
+ */
+const CATALOG_NAME_SHAPE = /^[^\s/]{1,128}$/u
+
 function ompAvailableCommands(value: unknown): OmpAvailableCommand[] {
   if (!Array.isArray(value)) return []
   const commands: OmpAvailableCommand[] = []
   for (const entry of value) {
     const record = objectOf(entry)
     const name = record?.name
-    if (typeof name !== 'string' || !/^[a-z][a-z0-9_-]{0,63}$/.test(name)) continue
+    if (typeof name !== 'string' || !CATALOG_NAME_SHAPE.test(name)) continue
     const description = typeof record?.description === 'string' ? record.description : undefined
     const hint = objectOf(record?.input)?.hint
     commands.push({
@@ -828,12 +838,13 @@ export class OmpBridge {
     for (const definition of definitions) {
       if (seen.has(definition.name)) continue
       seen.add(definition.name)
-      disposers.push(this.registerCommand(agent, definition))
+      const dispose = this.registerCommand(agent, definition)
+      if (dispose !== undefined) disposers.push(dispose)
     }
     const register = (command: OmpAvailableCommand): void => {
       if (seen.has(command.name) || CLIENT_OWNED_COMMANDS[command.name] === true) return
       seen.add(command.name)
-      disposers.push(this.registerCommand(agent, {
+      const dispose = this.registerCommand(agent, {
         name: command.name,
         description: command.description ?? `Run OMP's native /${command.name} command in the attached session.`,
         ...command.input?.hint === undefined ? {} : { input: { hint: command.input.hint } },
@@ -844,7 +855,8 @@ export class OmpBridge {
             return { kind: 'error', text: error instanceof Error ? error.message : String(error) }
           }
         },
-      }))
+      })
+      if (dispose !== undefined) disposers.push(dispose)
     }
     const stopFrames = client.onFrame((frame) => {
       if (frame.type !== 'available_commands_update') return
@@ -865,8 +877,10 @@ export class OmpBridge {
   private registerCommand(
     agent: Agent,
     definition: Parameters<Context['commands']['register']>[0],
-  ): () => void {
-    return registerAgentCommand(agent, definition)
+  ): (() => void) | undefined {
+    return registerAgentCommand(agent, definition, (error: unknown) => {
+      this.options.ctx.logger.warn(`omp-rpc: cannot register native command "${definition.name}": ${error instanceof Error ? error.message : String(error)}`)
+    })
   }
 
   private projectTool(live: LiveAttachment, event: OmpToolEvent): void {
@@ -970,18 +984,33 @@ function abortedByUser(signal: AbortSignal): boolean {
  */
 /**
  * Register one command on an agent scope whose commands service may inject later.
+ *
+ * The commands service validates names when `register` runs, and OMP's catalog
+ * is third-party extensible, so one malformed name must cost only its own row:
+ * a rejected definition is reported through `onReject` and the rest of the
+ * catalog still registers.
  * @param agent - exact receiving agent.
  * @param definition - command descriptor and handler.
- * @returns disposer that removes this exact registration.
+ * @param onReject - receives the validation failure of a definition that was not registered.
+ * @returns disposer that removes this exact registration, or `undefined` when it was rejected.
  */
 export function registerAgentCommand(
   agent: Agent,
   definition: Parameters<Context['commands']['register']>[0],
-): () => void {
+  onReject?: (error: unknown) => void,
+): (() => void) | undefined {
+  const register = (commands: Context['commands']): (() => void) | undefined => {
+    try {
+      return commands.register(definition)
+    } catch (error: unknown) {
+      onReject?.(error)
+      return undefined
+    }
+  }
   const inject = typeof agent.ctx.inject === 'function' ? agent.ctx.inject.bind(agent.ctx) : undefined
-  if (inject === undefined) return agent.ctx.commands.register(definition)
+  if (inject === undefined) return register(agent.ctx.commands)
   const fiber = agent.ctx.inject(['commands'], (commandCtx) => {
-    commandCtx.effect(() => commandCtx.commands.register(definition))
+    commandCtx.effect(() => register(commandCtx.commands))
   })
   return () => {
     void fiber.dispose()

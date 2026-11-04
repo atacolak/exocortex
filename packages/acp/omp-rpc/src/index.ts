@@ -73,6 +73,7 @@ import {
   resolveOmpRunDirectory,
   watchOmpRunDirectory,
   type OmpSocketSession,
+  type OmpSocketState,
 } from './socket.ts'
 import type { OmpUiAsker } from './ui.ts'
 import type { OmpExtensionUiRequest } from './types.ts'
@@ -100,6 +101,14 @@ export const DEFAULT_OMP_SESSIONS_ROOT = join(homedir(), '.omp', 'agent', 'sessi
 
 export const name = 'omp-rpc'
 export const inject = ['agents', 'sessions', 'llm', 'sessionProjections', 'commands', 'subprocess', 'tools']
+
+/** How one wake resolves, and whether dead publications were collected on the way. */
+interface OmpWakeDecision {
+  /** The attach, resume, or hung decision for the watched run directory. */
+  readonly plan: OmpWakePlan
+  /** True when at least one dead publication was cleared. */
+  readonly collected: boolean
+}
 
 /** Plugin configuration for the OMP bridge. */
 export interface OmpRpcConfig {
@@ -255,6 +264,7 @@ export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
     config.home,
   )
   const watchDir = config.watchRunDir === false ? undefined : runDirectory
+  const ompPublicationDir = join(config.home ?? homedir(), '.omp', 'run')
 
   const recordBranchFork = (sourceSessionId: SessionId, childSessionId: SessionId): void => {
     void (async () => {
@@ -350,25 +360,37 @@ export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
    * Decide how one harness session rejoins an OMP session publication.
    *
    * OMP unloads an idle process after 60 minutes without a terminal frame, and
-   * a killed process skips its exit hook, so the run directory can hold
-   * artifacts whose owner is gone. A stale publication is collected here -
-   * sidecar, socket, then bind lock - before the transcript resumes; a live one
-   * is left untouched and only its socket is attachable.
+   * a killed process skips its exit hook, so a run directory can hold artifacts
+   * whose owner is gone. OMP always publishes under `$HOME/.omp/run` while this
+   * host may watch a different `$OMP_RUN_DIR`, so the same session can leave a
+   * dead publication in both places; each stale one is collected - sidecar,
+   * socket, then bind lock - before the transcript resumes. A live publication
+   * is never touched and only its socket is attachable.
    * @param ompSessionId - OMP session identity the binding recorded.
-   * @returns the attach, resume, or hung decision, or undefined without an identity.
+   * @returns the attach, resume, or hung decision and whether stale artifacts were collected,
+   *   or undefined without an identity.
    */
-  const wakePlanOf = async (ompSessionId: string | undefined): Promise<OmpWakePlan | undefined> => {
+  const wakeDecisionOf = async (ompSessionId: string | undefined): Promise<OmpWakeDecision | undefined> => {
     if (ompSessionId === undefined) return undefined
-    const plan = planOmpWake(await probeOmpSocketSession(runDirectory, ompSessionId))
-    if (plan.kind === 'resume' && plan.stalePid !== undefined) {
-      warn(`collecting OMP session "${ompSessionId}" artifacts left by dead pid ${String(plan.stalePid)}`)
+    const watched = await probeOmpSocketSession(runDirectory, ompSessionId)
+    const publications: { readonly directory: string; readonly state: OmpSocketState }[] = [
+      { directory: runDirectory, state: watched },
+    ]
+    if (ompPublicationDir !== runDirectory) {
+      publications.push({ directory: ompPublicationDir, state: await probeOmpSocketSession(ompPublicationDir, ompSessionId) })
+    }
+    let collected = false
+    for (const publication of publications) {
+      if (publication.state.kind !== 'stale') continue
+      warn(`collecting OMP session "${ompSessionId}" artifacts left by dead pid ${String(publication.state.pid)} in ${publication.directory}`)
       try {
-        await clearOmpSessionArtifacts(runDirectory, ompSessionId)
+        await clearOmpSessionArtifacts(publication.directory, ompSessionId)
+        collected = true
       } catch (error: unknown) {
-        warn(`cannot collect stale OMP session "${ompSessionId}" artifacts`, error)
+        warn(`cannot collect stale OMP session "${ompSessionId}" artifacts in ${publication.directory}`, error)
       }
     }
-    return plan
+    return { plan: planOmpWake(watched), collected }
   }
 
   const openTranscriptNow = async (request: {
@@ -385,14 +407,13 @@ export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
       attached: served,
       async attach() {
         const executable = await ctx.subprocess.resolveExecutable(resolveOmpExecutable(config.executable), undefined)
+        const wake = await wakeDecisionOf(transcript.id)
         const lease = await probeOmpSessionLease(ctx.subprocess, executable, transcript.id, cwd)
         const busy = lease.held.includes(transcript.id) || lease.unknown.includes(transcript.id)
-        const wake = await wakePlanOf(transcript.id)
-        const collected = wake?.kind === 'resume' && wake.stalePid !== undefined
-        const live = busy && wake?.kind === 'attach' ? wake.session : undefined
-        if (busy && live === undefined && !collected) {
-          const reason = wake?.kind === 'hung'
-            ? wake.reason
+        const live = busy && wake?.plan.kind === 'attach' ? wake.plan.session : undefined
+        if (busy && live === undefined && wake?.collected !== true) {
+          const reason = wake?.plan.kind === 'hung'
+            ? wake.plan.reason
             : lease.held.includes(transcript.id)
               ? 'is still open in a terminal pane that publishes no attach socket'
               : 'ownership could not be probed'
@@ -477,7 +498,7 @@ export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
     }
     let attachment: OmpAttachment | undefined
     const binding = plan.mode === 'attach' ? await readBinding(agent.id) : undefined
-    const wake = await wakePlanOf(binding?.ompSessionId)
+    const wake = (await wakeDecisionOf(binding?.ompSessionId))?.plan
     if (wake?.kind === 'attach') {
       const live = wake.session
       try {
@@ -578,7 +599,7 @@ export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
       for (const command of ompNativeCommandCatalog(skills)) {
         if (known.has(command.name)) continue
         known.add(command.name)
-        disposers.push(registerAgentCommand(agent, {
+        const dispose = registerAgentCommand(agent, {
           name: command.name,
           description: command.description ?? `Run OMP's native /${command.name} command in this session.`,
           ...command.hint === undefined ? {} : { input: { hint: command.hint } },
@@ -594,7 +615,10 @@ export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
               return { kind: 'error', text: error instanceof Error ? error.message : String(error) }
             }
           },
-        }))
+        }, (error: unknown) => {
+          warn(`cannot register OMP command "${command.name}" for session "${key}"`, error)
+        })
+        if (dispose !== undefined) disposers.push(dispose)
       }
       agent.ctx.effect(() => () => {
         for (const dispose of disposers.splice(0)) dispose()
@@ -620,7 +644,7 @@ export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
     const binding = await readBinding(agent.id)
     if (binding === undefined || !(await existingFile(binding.path))) return
     try {
-      const wake = await wakePlanOf(binding.ompSessionId)
+      const wake = (await wakeDecisionOf(binding.ompSessionId))?.plan
       await hydrateBoundTranscript({
         agent,
         binding,
