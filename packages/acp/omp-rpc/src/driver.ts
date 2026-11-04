@@ -467,6 +467,32 @@ export class OmpAgentDriver {
     this.stopFrames = client.onFrame((frame) => { this.observe(frame) })
   }
 
+  /** Whether OMP is currently serving a prompt that accepts live steering. */
+  hasActiveRun(): boolean {
+    return this.prompt !== undefined && !this.prompt.closed
+  }
+
+  /**
+   * Deliver user messages to the active OMP run without waiting for the
+   * current step to finish. Messages already sent are skipped, and a failed
+   * send unmarks only what OMP did not accept so a later step can retry.
+   * @param messages - the harness request history carrying the new messages.
+   */
+  async steerImmediate(messages: readonly RequestMessage[]): Promise<void> {
+    const turns = pureUserTurns(messages).filter(turn => !this.sent?.has(turn.key))
+    if (turns.length === 0) return
+    this.markSent(turns)
+    const sent = this.sent as Set<string>
+    for (const [index, turn] of turns.entries()) {
+      try {
+        await this.steer(turn)
+      } catch (error) {
+        for (const pending of turns.slice(index)) sent.delete(pending.key)
+        throw error
+      }
+    }
+  }
+
   /** Stop observing the OMP process; the attachment owner calls this once. */
   close(): void {
     this.stopFrames()
@@ -831,11 +857,15 @@ export class OmpAgentDriver {
     const toolCallId = typeof frame.toolCallId === 'string' ? frame.toolCallId : ''
     const toolName = typeof frame.toolName === 'string' ? frame.toolName : ''
     if (toolCallId.length === 0 || toolName.length === 0) return undefined
+    const intent = typeof frame.intent === 'string' && frame.intent.length > 0 ? frame.intent : undefined
     return {
       kind: 'start',
       toolCallId,
       toolName,
-      arguments: objectOf(frame.args) ?? {},
+      arguments: {
+        ...intent === undefined ? {} : { i: intent },
+        ...(objectOf(frame.args) ?? {}),
+      },
     }
   }
 

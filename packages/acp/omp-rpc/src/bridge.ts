@@ -7,12 +7,14 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import type { TodoItem } from '@deepseek-ai/dsh-tool-todo'
 import type { OmpBindings } from './bindings.ts'
-import { OmpModelCatalogSync, type CatalogSyncOutcome, type OmpModelSelection } from './catalog.ts'
+import { OMP_THINKING_LEVELS, OmpModelCatalogSync, type CatalogSyncOutcome, type OmpModelSelection } from './catalog.ts'
 import { OmpRpcClient } from './client.ts'
 import { DEFAULT_OMP_HOST_TOOLS, ompCordisHostTools } from './cordis-tools.ts'
 import { OmpAgentDriver, type OmpImageInput, type OmpImageRef, type OmpToolEvent } from './driver.ts'
 import { OmpHostToolBridge } from './host-tools.ts'
 import { launchOmp, type LaunchedOmp } from './launch.ts'
+import { CLIENT_OWNED_COMMANDS, ompNativeCommandLine } from './native-commands.ts'
+import { connectOmpSocket, type OmpSocketConnection } from './socket.ts'
 import { OmpUiBridge, type OmpUiAsker } from './ui.ts'
 import type { OmpExtensionUiRequest, OmpPromptResultFrame, OmpRpcCommand } from './types.ts'
 
@@ -44,12 +46,15 @@ export interface OmpAttachOptions {
   readonly hostTools?: readonly string[]
   /** Working directory for the OMP process. */
   readonly cwd: string
+  /** Live session socket published by an OMP process this bridge must not own. */
+  readonly socketPath?: string
 }
 
 /** What one successful attachment exposes to callers. */
 export interface OmpAttachment {
   readonly client: OmpRpcClient
-  readonly launched: LaunchedOmp
+  /** Launched process this bridge owns; absent when attaching to a live socket. */
+  readonly launched?: LaunchedOmp
   readonly catalog: CatalogSyncOutcome
   /** Session identity and transcript path OMP reports as active. */
   readonly session: { readonly id: string; readonly path?: string }
@@ -163,14 +168,20 @@ export interface OmpAttachPlan {
 export function ompTodoItems(state: unknown): TodoItem[] {
   const phases = objectOf(state)?.todoPhases
   if (!Array.isArray(phases)) return []
+  const records = phases
+    .map(objectOf)
+    .filter((phase): phase is Record<string, unknown> => phase !== undefined)
+  const multiple = records.length > 1
   const todos: TodoItem[] = []
-  for (const phase of phases) {
-    const record = objectOf(phase)
-    if (record === undefined || record.kind === 'passive' || !Array.isArray(record.tasks)) continue
+  for (const record of records) {
+    if (!Array.isArray(record.tasks)) continue
+    const title = typeof record.name === 'string' && record.name.length > 0 ? record.name : undefined
+    const phase = title !== undefined && (multiple || record.kind === 'passive') ? `[${title}] ` : ''
     for (const task of record.tasks) {
       const row = objectOf(task)
       if (row === undefined || typeof row.content !== 'string' || row.content.length === 0) continue
-      todos.push({ content: row.content, status: ompTodoStatus(row.status) })
+      const blocked = row.status === 'blocked' ? '[blocked] ' : ''
+      todos.push({ content: `${phase}${blocked}${row.content}`, status: ompTodoStatus(row.status) })
     }
   }
   return todos
@@ -180,6 +191,30 @@ function ompTodoStatus(value: unknown): TodoItem['status'] {
   if (value === 'completed') return 'completed'
   if (value === 'in_progress') return 'in_progress'
   return 'pending'
+}
+
+interface OmpAvailableCommand {
+  readonly name: string
+  readonly description?: string
+  readonly input?: { readonly hint?: string }
+}
+
+function ompAvailableCommands(value: unknown): OmpAvailableCommand[] {
+  if (!Array.isArray(value)) return []
+  const commands: OmpAvailableCommand[] = []
+  for (const entry of value) {
+    const record = objectOf(entry)
+    const name = record?.name
+    if (typeof name !== 'string' || !/^[a-z][a-z0-9_-]{0,63}$/.test(name)) continue
+    const description = typeof record?.description === 'string' ? record.description : undefined
+    const hint = objectOf(record?.input)?.hint
+    commands.push({
+      name,
+      ...description === undefined ? {} : { description },
+      ...typeof hint === 'string' ? { input: { hint } } : {},
+    })
+  }
+  return commands
 }
 
 async function existingFile(path: string): Promise<boolean> {
@@ -213,7 +248,10 @@ export async function planOmpAttach(options: {
 interface LiveAttachment {
   readonly agent: Agent
   readonly client: OmpRpcClient
-  readonly launched: LaunchedOmp
+  readonly launched?: LaunchedOmp
+  readonly disconnect?: () => void
+  /** OMP session identity this attachment serves, for duplicate-attach refusal. */
+  readonly ompSessionId: string
   readonly driver: OmpAgentDriver
   readonly hostTools: OmpHostToolBridge
   readonly ui: OmpUiBridge
@@ -239,6 +277,7 @@ interface LiveCursor {
 export class OmpBridge {
   private readonly options: OmpBridgeOptions
   private readonly attachments = new Map<SessionId, LiveAttachment>()
+  private readonly attachTails = new Map<SessionId, Promise<void>>()
 
   constructor(options: OmpBridgeOptions) {
     this.options = options
@@ -246,34 +285,82 @@ export class OmpBridge {
 
   /**
    * Start or resume one OMP process and bind it to an agent.
+   *
+   * Attach and detach for one session serialize, so a watcher adopting a live
+   * socket and an agent-created hook cannot both win the same session.
    * @param agent - the live harness agent to serve.
    * @param options - attach/fork mode, transcript identity, and launch inputs.
    * @returns the launched process and the catalog synchronization outcome.
    */
-  async attach(agent: Agent, options: OmpAttachOptions): Promise<OmpAttachment> {
-    await this.detach(agent.id)
-    await mkdir(options.sessionDir, { recursive: true })
-    const executable = await this.options.subprocess.resolveExecutable(this.options.executable, undefined)
-    const hcomExtension = this.options.hcomExtension !== undefined
-      && await existingFile(this.options.hcomExtension)
-      ? this.options.hcomExtension
-      : undefined
-    const launched = launchOmp(this.options.subprocess, {
-      argv: ompLaunchArgv({
-        ...options,
-        executable,
-        ...hcomExtension === undefined ? {} : { extensions: [hcomExtension] },
-      }),
-      cwd: options.cwd,
-      env: ompLaunchEnvironment({ hcom: hcomExtension !== undefined }),
-    })
-    let client: OmpRpcClient | undefined
+  attach(agent: Agent, options: OmpAttachOptions): Promise<OmpAttachment> {
+    return this.enqueueAttach(agent.id, () => this.attachNow(agent, options))
+  }
+
+  /**
+   * Whether one OMP session identity is already served by any attachment.
+   * @param ompSessionId - session id recorded by the OMP transcript header.
+   * @returns true while an attachment serves that OMP session.
+   */
+  servesOmpSession(ompSessionId: string): boolean {
+    for (const live of this.attachments.values()) {
+      if (live.ompSessionId === ompSessionId) return true
+    }
+    return false
+  }
+
+  private enqueueAttach<T>(id: SessionId, operation: () => Promise<T>): Promise<T> {
+    const previous = this.attachTails.get(id) ?? Promise.resolve()
+    const run = previous.then(operation, operation)
+    this.attachTails.set(id, run.then(() => {}, () => {}))
+    return run
+  }
+
+  private async attachNow(agent: Agent, options: OmpAttachOptions): Promise<OmpAttachment> {
+    await this.detachNow(agent.id)
+    let connection: OmpSocketConnection | undefined
+    let launched: LaunchedOmp | undefined
     try {
-      await launched.ready
-      client = launched.client
+      let client: OmpRpcClient
+      if (options.socketPath === undefined) {
+        await mkdir(options.sessionDir, { recursive: true })
+        const executable = await this.options.subprocess.resolveExecutable(this.options.executable, undefined)
+        const hcomExtension = this.options.hcomExtension !== undefined
+          && await existingFile(this.options.hcomExtension)
+          ? this.options.hcomExtension
+          : undefined
+        launched = launchOmp(this.options.subprocess, {
+          argv: ompLaunchArgv({
+            ...options,
+            executable,
+            ...hcomExtension === undefined ? {} : { extensions: [hcomExtension] },
+          }),
+          cwd: options.cwd,
+          env: ompLaunchEnvironment({ hcom: hcomExtension !== undefined }),
+        })
+        await launched.ready
+        client = launched.client
+      } else {
+        connection = await connectOmpSocket(options.socketPath)
+        client = connection.client
+      }
       await client.negotiateProtocol()
       const session = await activeSessionOf(client)
-      const selection = options.selection ?? agent.model.current()
+      if (options.sessionId !== undefined && session.id !== options.sessionId) {
+        throw new Error(`OMP session socket ${options.socketPath ?? ''} serves session "${session.id}", not "${options.sessionId}"`)
+      }
+      const duplicate = [...this.attachments.values()].find(live => live.ompSessionId === session.id)
+      if (duplicate !== undefined) {
+        throw new Error(`OMP session "${session.id}" is already attached to harness session "${duplicate.agent.id}"`)
+      }
+      const currentSelection = agent.model.current()
+      const selection = options.selection === undefined
+        ? currentSelection
+        : {
+          ...options.selection,
+          ...options.selection.reasoningEffort !== undefined || currentSelection?.reasoningEffort === undefined
+            ? {}
+            : { reasoningEffort: currentSelection.reasoningEffort },
+        }
       const catalog = await new OmpModelCatalogSync(client, selection).sync()
       const hostTools = new OmpHostToolBridge({
         client,
@@ -299,15 +386,19 @@ export class OmpBridge {
           agent.followup(createUserMessage({ content: [{ type: 'text', text }], source }))
         },
       })
+      const disposeCommands = await this.registerCommands(agent, client)
+      const socket = connection
       const live: LiveAttachment = {
         agent,
         client,
-        launched,
+        ...launched === undefined ? {} : { launched },
+        ...socket === undefined ? {} : { disconnect: () => { socket.close() } },
+        ompSessionId: session.id,
         driver,
         hostTools,
         ui,
         pendingTools,
-        disposeCommands: this.registerCommands(agent, client),
+        disposeCommands,
         detachStream: () => {},
         cursor,
         todos: [],
@@ -317,9 +408,16 @@ export class OmpBridge {
       await this.publishTodos(live)
       this.attachments.set(agent.id, live)
       agent.ctx.effect(() => () => this.detach(agent.id), 'omp-rpc attachment')
-      return { client, launched, catalog, session, cwd: options.cwd }
+      return {
+        client,
+        ...launched === undefined ? {} : { launched },
+        catalog,
+        session,
+        cwd: options.cwd,
+      }
     } catch (error: unknown) {
-      await launched.close()
+      connection?.close()
+      await launched?.close()
       throw error
     }
   }
@@ -334,10 +432,39 @@ export class OmpBridge {
   }
 
   /**
+   * Send one native RPC command to the process attached to a session.
+   * @param id - harness session identity.
+   * @param command - exact RPC command frame.
+   * @returns the command response payload.
+   */
+  request(id: SessionId, command: OmpRpcCommand): Promise<unknown> {
+    const live = this.attachments.get(id)
+    if (live === undefined) throw new Error(`no OMP process is attached to session "${id}"`)
+    return live.client.request(command)
+  }
+
+  /**
+   * Run one slash command line in the process attached to a session.
+   * @param id - harness session identity.
+   * @param line - slash-prefixed command line OMP's prompt surface resolves.
+   * @param signal - cancellation signal for the command run.
+   * @returns the command output text.
+   */
+  runLine(id: SessionId, line: string, signal: AbortSignal): Promise<string> {
+    const live = this.attachments.get(id)
+    if (live === undefined) throw new Error(`no OMP process is attached to session "${id}"`)
+    return runOmpCommand(live.client, line, signal)
+  }
+
+  /**
    * Stop the OMP process attached to one session.
    * @param id - harness session identity.
    */
-  async detach(id: SessionId): Promise<void> {
+  detach(id: SessionId): Promise<void> {
+    return this.enqueueAttach(id, () => this.detachNow(id))
+  }
+
+  private async detachNow(id: SessionId): Promise<void> {
     const live = this.attachments.get(id)
     if (live === undefined) return
     this.attachments.delete(id)
@@ -346,7 +473,8 @@ export class OmpBridge {
     live.disposeCommands()
     live.hostTools.close()
     live.ui.close()
-    await live.launched.close()
+    live.disconnect?.()
+    await live.launched?.close()
   }
 
   /** Stop every attachment, as when the owning plugin unloads. */
@@ -374,9 +502,25 @@ export class OmpBridge {
       const tools = live.pendingTools.splice(0)
       for (const event of tools) this.projectTool(live, event)
     })
+    const stopSessionEvents = live.agent.ctx.on('session/event', (session, event) => {
+      if (session !== live.agent.session) return
+      if (event.type === 'model/selection') {
+        const level = event.data.reasoningEffort
+        if (level === undefined || OMP_THINKING_LEVELS[level] !== true) return
+        void live.client.request({ type: 'set_thinking_level', level }).catch(() => {})
+        return
+      }
+      if (event.type !== 'agent/inbox/spliced') return
+      if (event.data.target !== 'next-step' || event.data.inserted.length === 0) return
+      if (!live.driver.hasActiveRun()) return
+      void live.driver.steerImmediate(event.data.inserted).catch((error: unknown) => {
+        this.options.ctx.logger.warn(`omp-rpc: live steer failed, retrying on the next step: ${String(error)}`)
+      })
+    })
     return () => {
       stopStep()
       stopAssistant()
+      stopSessionEvents()
     }
   }
 
@@ -398,7 +542,7 @@ export class OmpBridge {
     }))
   }
 
-  private registerCommands(agent: Agent, client: OmpRpcClient): () => void {
+  private async registerCommands(agent: Agent, client: OmpRpcClient): Promise<() => void> {
     const definitions: Parameters<Context['commands']['register']>[0][] = [
       {
         name: 'compact',
@@ -419,36 +563,56 @@ export class OmpBridge {
           }
         },
       },
-      {
-        name: 'omp',
-        description: 'Run a native OMP slash command (for example `/omp status`) in the attached session.',
-        input: { hint: '<command> [args]' },
+    ]
+    const disposers: (() => void)[] = []
+    const seen = new Set<string>()
+    try {
+      for (const definition of agent.ctx.commands.list(agent)) seen.add(definition.name)
+    } catch {
+      // A scope without the commands service only offers the definitions registered here.
+    }
+    for (const definition of definitions) {
+      if (seen.has(definition.name)) continue
+      seen.add(definition.name)
+      disposers.push(this.registerCommand(agent, definition))
+    }
+    const register = (command: OmpAvailableCommand): void => {
+      if (seen.has(command.name) || CLIENT_OWNED_COMMANDS[command.name] === true) return
+      seen.add(command.name)
+      disposers.push(this.registerCommand(agent, {
+        name: command.name,
+        description: command.description ?? `Run OMP's native /${command.name} command in the attached session.`,
+        ...command.input?.hint === undefined ? {} : { input: { hint: command.input.hint } },
         async handler(invocation) {
-          const line = invocation.rawInput.trim()
-          if (line.length === 0) return { kind: 'error', text: 'expected an OMP slash command' }
           try {
-            return { kind: 'success', text: await runOmpCommand(client, line, invocation.signal) }
+            return { kind: 'success', text: await runOmpCommand(client, ompNativeCommandLine(command.name, invocation.rawInput), invocation.signal) }
           } catch (error: unknown) {
             return { kind: 'error', text: error instanceof Error ? error.message : String(error) }
           }
         },
-      },
-    ]
-    const inject = (agent.ctx as { inject?: Context['inject'] }).inject
-    if (inject === undefined) {
-      const disposers = definitions.map(definition => agent.ctx.commands.register(definition))
-      return () => {
-        for (const dispose of disposers) dispose()
-      }
+      }))
     }
-    const fiber = agent.ctx.inject(['commands'], (commandCtx) => {
-      for (const definition of definitions) {
-        commandCtx.effect(() => commandCtx.commands.register(definition))
-      }
+    const stopFrames = client.onFrame((frame) => {
+      if (frame.type !== 'available_commands_update') return
+      for (const command of ompAvailableCommands(objectOf(frame)?.commands)) register(command)
     })
+    const response = await client.request({ type: 'get_available_commands' })
+      .catch((error: unknown) => {
+        this.options.ctx.logger.warn(`omp-rpc: native command discovery failed: ${String(error)}`)
+        return undefined
+      })
+    for (const command of ompAvailableCommands(objectOf(response)?.commands)) register(command)
     return () => {
-      void fiber.dispose()
+      stopFrames()
+      for (const dispose of disposers) dispose()
     }
+  }
+
+  private registerCommand(
+    agent: Agent,
+    definition: Parameters<Context['commands']['register']>[0],
+  ): () => void {
+    return registerAgentCommand(agent, definition)
   }
 
   private projectTool(live: LiveAttachment, event: OmpToolEvent): void {
@@ -496,6 +660,26 @@ function objectOf(value: unknown): Record<string, unknown> | undefined {
  * @param signal - cancellation for the command.
  * @returns the command's printed output.
  */
+/**
+ * Register one command on an agent scope whose commands service may inject later.
+ * @param agent - exact receiving agent.
+ * @param definition - command descriptor and handler.
+ * @returns disposer that removes this exact registration.
+ */
+export function registerAgentCommand(
+  agent: Agent,
+  definition: Parameters<Context['commands']['register']>[0],
+): () => void {
+  const inject = typeof agent.ctx.inject === 'function' ? agent.ctx.inject.bind(agent.ctx) : undefined
+  if (inject === undefined) return agent.ctx.commands.register(definition)
+  const fiber = agent.ctx.inject(['commands'], (commandCtx) => {
+    commandCtx.effect(() => commandCtx.commands.register(definition))
+  })
+  return () => {
+    void fiber.dispose()
+  }
+}
+
 export async function runOmpCommand(
   client: Pick<OmpRpcClient, 'request' | 'onFrame'>,
   commandLine: string,

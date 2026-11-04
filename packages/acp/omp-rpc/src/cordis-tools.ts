@@ -6,11 +6,21 @@ import type { ToolDefinition, ToolExecutionResult } from '@deepseek-ai/dsh-tools
 import type { OmpHostToolHandler } from './host-tools.ts'
 import type { OmpHostToolContent, OmpHostToolDefinition } from './types.ts'
 
-/** Harness tools the bridge publishes by default: discovery plus profile management. */
+/**
+ * Harness tools the bridge publishes by default: Cordis discovery and dynamic
+ * package control, profile management, and the Exocortex workbench. Names a
+ * profile does not mount are skipped when the host surface is projected.
+ */
 export const DEFAULT_OMP_HOST_TOOLS: readonly string[] = [
   'cordis_inspect_list',
   'cordis_inspect_query',
+  'cordis_inspect_self',
+  'cordis_define',
+  'cordis_run',
+  'cordis_stop',
+  'cordis_undefine',
   'plugin_manager',
+  'exo_workbench',
 ]
 
 /** Inputs for projecting harness tools onto OMP's host-tool protocol. */

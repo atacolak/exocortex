@@ -1,17 +1,20 @@
 /**
  * Cordis composition of the OMP RPC bridge: auto-discovered `omp:<profile>`
- * agent presets, durable reattachment of OMP-preset sessions, `/omp-attach`,
- * `/omp-resume`, and `/omp-fork` commands, `POST /api/exocortex/omp/open`,
+ * agent presets, durable reattachment of OMP-preset sessions over a launched
+ * process or a live session socket, pre-attach native command discovery,
+ * `/omp-attach`, `/omp-resume`, and `/omp-fork` commands,
+ * `POST /api/exocortex/omp/open`,
  * per-agent step streams, host tools, extension UI, catalog sync, and
  * trajectory projection.
  * @module @deepseek-ai/dsh-omp-rpc
  */
 
+import { randomUUID } from 'node:crypto'
 import { stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import type {} from '@deepseek-ai/dsh-api-session-controller'
+import type { SessionController } from '@deepseek-ai/dsh-api-session-controller'
 import type {} from '@deepseek-ai/dsh-client-connection'
 import type {} from '@deepseek-ai/dsh-commands'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -24,11 +27,18 @@ import {
   OmpBridge,
   parseOmpCommandInput,
   planOmpAttach,
+  registerAgentCommand,
   type OmpAttachOptions,
   type OmpAttachPlan,
   type OmpAttachment,
 } from './bridge.ts'
 import { DEFAULT_OMP_HOST_TOOLS } from './cordis-tools.ts'
+import {
+  listOmpSkills,
+  ompNativeCommandCatalog,
+  ompNativeCommandLine,
+  type OmpSkillListing,
+} from './native-commands.ts'
 import { OMP_OPEN_PATH, serveOmpOpen } from './open.ts'
 import {
   discoverOmpPresets,
@@ -42,12 +52,19 @@ import {
   OmpResumeError,
   parseOmpResumeInput,
   probeOmpSessionLease,
+  readOmpTranscriptHeader,
   resolveOmpTranscript,
   type OmpResumeRequest,
   type OmpTranscriptMatch,
 } from './resume.ts'
+import {
+  ompRunDirectory,
+  readOmpSocketSession,
+  watchOmpRunDirectory,
+  type OmpSocketSession,
+} from './socket.ts'
 import type { OmpUiAsker } from './ui.ts'
-import type { OmpExtensionUiRequest } from './types.ts'
+import type { OmpExtensionUiRequest, OmpRpcCommand } from './types.ts'
 
 export * from './bindings.ts'
 export * from './bridge.ts'
@@ -57,9 +74,11 @@ export * from './cordis-tools.ts'
 export * from './driver.ts'
 export * from './host-tools.ts'
 export * from './launch.ts'
+export * from './native-commands.ts'
 export * from './open.ts'
 export * from './presets.ts'
 export * from './resume.ts'
+export * from './socket.ts'
 export * from './ui.ts'
 export * from './types.ts'
 
@@ -90,6 +109,13 @@ export interface OmpRpcConfig {
   readonly hcomExtension?: string
   /** Durable session-to-transcript bindings file; defaults to `$DSH_HOME/omp/bindings.json`. */
   readonly bindingsFile?: string
+  /**
+   * Directory of live OMP session publications to adopt; defaults to
+   * `<home>/.omp/run`. Pass `false` to disable adoption (deterministic tests).
+   */
+  readonly watchRunDir?: string | false
+  /** Adoption poll period in milliseconds; defaults to 1500. */
+  readonly watchIntervalMs?: number
   /** Optional extension UI answerer supplied by a composed surface. */
   readonly asker?: OmpUiAsker
   /** Receives non-interactive OMP extension UI surfaces. */
@@ -107,6 +133,8 @@ export const Config: Schema<OmpRpcConfig> = Schema.object({
   autoAttach: Schema.boolean(),
   hcomExtension: Schema.string(),
   bindingsFile: Schema.string(),
+  watchRunDir: Schema.union([Schema.string(), Schema.const(false)]),
+  watchIntervalMs: Schema.natural(),
   asker: Schema.any(),
   onSurface: Schema.any(),
 })
@@ -118,7 +146,8 @@ function attachmentSummary(mode: OmpAttachOptions['mode'], attachment: OmpAttach
     : attachment.catalog.status === 'not-offered'
       ? 'harness model not offered by the OMP gateway'
       : 'OMP default model'
-  return `${mode === 'fork' ? 'forked' : 'attached'} OMP RPC v${String(version)} (${catalog})`
+  const transport = attachment.launched === undefined ? ' on its live session socket' : ''
+  return `${mode === 'fork' ? 'forked' : 'attached'} OMP RPC v${String(version)} (${catalog})${transport}`
 }
 
 function sessionIsBlank(session: { snapshotEvents(): readonly { readonly type: string }[] }): boolean {
@@ -165,6 +194,7 @@ export function apply(ctx: Context, config: OmpRpcConfig): void {
     readonly mode: OmpAttachOptions['mode']
     readonly preset?: string
     readonly sessionId?: string
+    readonly socketPath?: string
     readonly resumePath?: string
     readonly forkPath?: string
     readonly cwd?: string
@@ -187,6 +217,9 @@ export function apply(ctx: Context, config: OmpRpcConfig): void {
   }
 
   const bindings = new OmpBindings(config.bindingsFile ?? defaultOmpBindingsFile())
+  const watchDir = config.watchRunDir === false
+    ? undefined
+    : config.watchRunDir ?? ompRunDirectory(config.home ?? homedir())
 
   const warn = (message: string, error?: unknown): void => {
     ctx.logger.warn(`[omp-rpc] ${message}${error === undefined ? '' : `: ${error instanceof Error ? error.message : String(error)}`}`)
@@ -267,6 +300,13 @@ export function apply(ctx: Context, config: OmpRpcConfig): void {
     }
   }
 
+  const runDirectory = ompRunDirectory(config.home ?? homedir())
+
+  const liveSocketOf = async (ompSessionId: string | undefined): Promise<OmpSocketSession | undefined> => {
+    if (ompSessionId === undefined) return undefined
+    return await readOmpSocketSession(runDirectory, ompSessionId)
+  }
+
   const openTranscript = async (request: {
     readonly agent: Agent
     readonly transcript: OmpTranscriptMatch
@@ -276,9 +316,11 @@ export function apply(ctx: Context, config: OmpRpcConfig): void {
     const { agent, transcript, cwd, profile } = request
     const executable = await ctx.subprocess.resolveExecutable(config.executable ?? 'omp', undefined)
     const lease = await probeOmpSessionLease(ctx.subprocess, executable, transcript.id, cwd)
-    if (lease.held.includes(transcript.id) || lease.unknown.includes(transcript.id)) {
+    const busy = lease.held.includes(transcript.id) || lease.unknown.includes(transcript.id)
+    const live = busy ? await liveSocketOf(transcript.id) : undefined
+    if (busy && live === undefined) {
       const reason = lease.held.includes(transcript.id)
-        ? 'is still open in a terminal pane'
+        ? 'is still open in a terminal pane that publishes no attach socket'
         : 'ownership could not be probed'
       throw new OmpResumeError(
         'omp/session-busy',
@@ -288,7 +330,9 @@ export function apply(ctx: Context, config: OmpRpcConfig): void {
     }
     const attachment = await bridge.attach(agent, attachOptions(agent, {
       mode: 'attach',
-      resumePath: transcript.path,
+      ...live === undefined
+        ? { resumePath: transcript.path }
+        : { socketPath: live.socketPath, sessionId: live.sessionId },
       cwd,
       ...profile === undefined ? {} : { preset: profile },
     }))
@@ -325,50 +369,297 @@ export function apply(ctx: Context, config: OmpRpcConfig): void {
     })
   }
 
+  const attaching = new Map<string, Promise<void>>()
+  const attachOmpSession = async (agent: Agent, profile: string): Promise<void> => {
+    if (bridge.attached(agent.id)) return
+    let plan: OmpAttachPlan
+    try {
+      plan = await planOmpAttach({ sessionId: agent.id, bindings })
+    } catch (error: unknown) {
+      warn(`cannot read OMP bindings for session "${agent.id}"; starting a fresh OMP session`, error)
+      plan = { mode: 'attach' }
+    }
+    let attachment: OmpAttachment | undefined
+    const binding = plan.mode === 'attach' ? await readBinding(agent.id) : undefined
+    const live = await liveSocketOf(binding?.ompSessionId)
+    if (live !== undefined) {
+      try {
+        attachment = await bridge.attach(agent, attachOptions(agent, {
+          mode: 'attach',
+          socketPath: live.socketPath,
+          sessionId: live.sessionId,
+          preset: profile,
+        }))
+      } catch (error: unknown) {
+        warn(`cannot attach live OMP socket for session "${live.sessionId}"; launching a fresh process`, error)
+      }
+    }
+    try {
+      attachment ??= await bridge.attach(agent, attachOptions(agent, {
+        preset: profile,
+        ...plan,
+      }))
+    } catch (error: unknown) {
+      if (plan.resumePath === undefined) throw error
+      warn(`cannot resume transcript ${plan.resumePath}; starting a fresh OMP session`, error)
+      await forgetBinding(agent.id)
+      attachment = await bridge.attach(agent, attachOptions(agent, {
+        mode: 'attach',
+        preset: profile,
+      }))
+    }
+    await rememberBinding(agent, attachment, profile)
+    if (plan.forkPath !== undefined) {
+      try {
+        await bindings.deleteFork(agent.id)
+      } catch (error: unknown) {
+        warn(`cannot drop consumed branch fork for session "${agent.id}"`, error)
+      }
+    }
+  }
+  const ensureOmpSession = (agent: Agent, profile: string): Promise<void> => {
+    const pending = attaching.get(agent.id)
+    if (pending !== undefined) return pending
+    const started = attachOmpSession(agent, profile).finally(() => {
+      attaching.delete(agent.id)
+    })
+    attaching.set(agent.id, started)
+    return started
+  }
+
+  const skillListings = new Map<string, { readonly at: number; readonly skills: readonly OmpSkillListing[] }>()
+  const skillRequests = new Map<string, Promise<readonly OmpSkillListing[]>>()
+  const prepared = new Map<string, Promise<void>>()
+  const SKILL_LISTING_TTL_MS = 60_000
+
+  const skillsIn = (cwd: string): Promise<readonly OmpSkillListing[]> => {
+    const cached = skillListings.get(cwd)
+    if (cached !== undefined && Date.now() - cached.at < SKILL_LISTING_TTL_MS) return Promise.resolve(cached.skills)
+    const pending = skillRequests.get(cwd)
+    if (pending !== undefined) return pending
+    const request = (async () => {
+      try {
+        const executable = await ctx.subprocess.resolveExecutable(config.executable ?? 'omp', undefined)
+        const skills = await listOmpSkills(ctx.subprocess, executable, cwd)
+        skillListings.set(cwd, { at: Date.now(), skills })
+        return skills
+      } catch (error: unknown) {
+        warn(`cannot list OMP skills for "${cwd}"`, error)
+        skillListings.set(cwd, { at: Date.now(), skills: [] })
+        return []
+      } finally {
+        skillRequests.delete(cwd)
+      }
+    })()
+    skillRequests.set(cwd, request)
+    return request
+  }
+
+  const prepareNativeCommands = (agent: Agent): void => {
+    if (profileOf(agent) === undefined) return
+    const key = String(agent.id)
+    if (prepared.has(key)) return
+    const commands = agent.ctx.get('commands')
+    if (commands === undefined) return
+    const cwd = agent.session.header.cwd ?? config.cwd ?? process.cwd()
+    const started = skillsIn(cwd).then((skills) => {
+      const known = new Set<string>()
+      for (const definition of commands.list(agent)) known.add(definition.name)
+      const disposers: (() => void)[] = []
+      for (const command of ompNativeCommandCatalog(skills)) {
+        if (known.has(command.name)) continue
+        known.add(command.name)
+        disposers.push(registerAgentCommand(agent, {
+          name: command.name,
+          description: command.description ?? `Run OMP's native /${command.name} command in this session.`,
+          ...command.hint === undefined ? {} : { input: { hint: command.hint } },
+          async handler(invocation) {
+            const profile = profileOf(invocation.agent)
+            if (profile === undefined) {
+              return { kind: 'error', text: `/${command.name} applies only to OMP agent presets.` }
+            }
+            try {
+              await ensureOmpSession(invocation.agent, profile)
+              return {
+                kind: 'success',
+                text: await bridge.runLine(invocation.agent.id, ompNativeCommandLine(command.name, invocation.rawInput), invocation.signal),
+              }
+            } catch (error: unknown) {
+              return { kind: 'error', text: error instanceof Error ? error.message : String(error) }
+            }
+          },
+        }))
+      }
+      agent.ctx.effect(() => () => {
+        for (const dispose of disposers.splice(0)) dispose()
+      }, 'omp-rpc native commands')
+    }).catch((error: unknown) => {
+      prepared.delete(key)
+      warn(`cannot pre-populate native OMP commands for session "${key}"`, error)
+    })
+    prepared.set(key, started)
+  }
+
+  ctx.on('agent/created', (payload) => { prepareNativeCommands(payload.agent) })
+  ctx.on('agent/pre-step', async (payload, next) => {
+    prepareNativeCommands(payload.agent)
+    return next()
+  })
+
+  const hosted = new Map<string, SessionId>()
+  const adopting = new Set<string>()
+  const adopted = new Set<string>()
+  let presetNames: ReadonlySet<string> | undefined
+
+  const attachWorkspace = async (sessionId: SessionId, cwd: string, create: boolean): Promise<void> => {
+    const registry = ctx.get('workspaceRegistry')
+    if (registry === undefined) return
+    try {
+      const workspace = await registry.resolveByPath(cwd)
+        ?? (create ? await registry.create(cwd) : undefined)
+      if (workspace === undefined || workspace.sessionIds.includes(sessionId)) return
+      await workspace.attachSession(sessionId)
+    } catch (error: unknown) {
+      warn(`cannot attach adopted session "${sessionId}" to workspace "${cwd}"`, error)
+    }
+  }
+
+  const adoptLiveSession = async (controller: SessionController, live: OmpSocketSession): Promise<void> => {
+    if (bridge.servesOmpSession(live.sessionId)) return
+    const bound = await bindings.findByOmpSession(live.sessionId)
+    let sessionId = bound?.dshSessionId ?? hosted.get(live.sessionId)
+    let profile = bound?.binding.profile
+    const transcriptPath = live.sessionFile ?? bound?.binding.path
+    let created = false
+    if (sessionId === undefined) {
+      if (live.sessionFile === undefined || presetNames === undefined) return
+      const header = await readOmpTranscriptHeader(live.sessionFile).catch(() => undefined)
+      if (header === undefined) return
+      const discovered = header.profile !== undefined && presetNames.has(header.profile) ? header.profile : undefined
+      const generated = SessionId(randomUUID())
+      hosted.set(live.sessionId, generated)
+      adopted.add(String(generated))
+      const result = await controller.create({
+        sessionId: generated,
+        cwd: live.cwd,
+        ...discovered === undefined ? {} : { agentPreset: ompPresetId(discovered) },
+      })
+      sessionId = result.sessionId
+      hosted.set(live.sessionId, sessionId)
+      profile = discovered
+      created = true
+    }
+    const resolved = await controller.resolveAgent(sessionId)
+    adopted.delete(String(sessionId))
+    if ('error' in resolved) {
+      hosted.delete(live.sessionId)
+      return
+    }
+    const agent = resolved.agent
+    if (bridge.attached(agent.id)) {
+      await attachWorkspace(agent.id, live.cwd, false)
+      return
+    }
+    const attachment = await bridge.attach(agent, attachOptions(agent, {
+      mode: 'attach',
+      socketPath: live.socketPath,
+      sessionId: live.sessionId,
+      cwd: live.cwd,
+      ...profile === undefined ? {} : { preset: profile },
+    }))
+    if (transcriptPath !== undefined && sessionIsBlank(agent.session)) {
+      await hydrateOmpSession(agent.session, transcriptPath).catch((error: unknown) => {
+        warn(`cannot hydrate adopted session "${agent.id}"`, error)
+        return 0
+      })
+    }
+    await rememberBinding(agent, attachment, profile)
+    await attachWorkspace(agent.id, live.cwd, created)
+  }
+
+  const onLiveSession = (controller: SessionController, live: OmpSocketSession): void => {
+    if (adopting.has(live.sessionId)) return
+    adopting.add(live.sessionId)
+    void adoptLiveSession(controller, live)
+      .catch((error: unknown) => {
+        warn(`cannot adopt live OMP session "${live.sessionId}"`, error)
+      })
+      .finally(() => {
+        adopting.delete(live.sessionId)
+      })
+  }
+
+  if (watchDir !== undefined) {
+    ctx.inject(['sessionController'], (sessionCtx) => {
+      const controller = sessionCtx.get('sessionController')
+      if (controller === undefined) return
+      sessionCtx.effect(() => watchOmpRunDirectory({
+        runDir: watchDir,
+        ...config.watchIntervalMs === undefined ? {} : { intervalMs: config.watchIntervalMs },
+        onSession: (live) => { onLiveSession(controller, live) },
+      }), 'omp-rpc live session adoption')
+    })
+  }
+
+  ctx.inject(['commands'], (commandCtx) => {
+    try {
+      commandCtx.effect(() => commandCtx.commands.register({
+        name: 'compact',
+        description: 'Compact the attached OMP session natively, preserving its own summary and transcript.',
+        input: { hint: '[instructions]' },
+        async handler(invocation) {
+          const profile = profileOf(invocation.agent)
+          if (profile === undefined) {
+            return { kind: 'error', text: '/compact applies only to OMP agent presets.' }
+          }
+          await ensureOmpSession(invocation.agent, profile)
+          const instructions = invocation.rawInput.trim()
+          try {
+            const result = await bridge.request(invocation.agent.id, {
+              type: 'compact',
+              ...instructions.length === 0 ? {} : { customInstructions: instructions },
+            } as unknown as OmpRpcCommand)
+            const payload = typeof result === 'object' && result !== null && !Array.isArray(result)
+              ? result as Record<string, unknown>
+              : undefined
+            const tokens = payload?.tokensBefore
+            const before = typeof tokens === 'number' ? ` (${String(tokens)} tokens before)` : ''
+            return { kind: 'success', text: `Compacted OMP context${before}.` }
+          } catch (error: unknown) {
+            return { kind: 'error', text: error instanceof Error ? error.message : String(error) }
+          }
+        },
+      }), 'omp-rpc native /compact')
+    } catch (error: unknown) {
+      warn('native /compact is already registered globally; per-session registration remains available', error)
+    }
+  })
+
   ctx.inject(['agentPresets'], (presetCtx) => {
     if (config.autoAttach !== false) {
+      ctx.on('agent/created', (payload) => {
+        if (adopted.has(String(payload.agent.id))) return
+        const profile = profileOf(payload.agent)
+        if (profile === undefined) return
+        void ensureOmpSession(payload.agent, profile).catch((error: unknown) => {
+          warn(`eager OMP attach for session "${payload.agent.id}" failed`, error)
+        })
+      })
       ctx.on('agent/pre-step', async (payload, next) => {
+        if (adopted.has(String(payload.agent.id))) return next()
         if (bridge.attached(payload.agent.id)) return next()
         const profile = profileOf(payload.agent)
         if (profile === undefined) return next()
-        let plan: OmpAttachPlan
-        try {
-          plan = await planOmpAttach({ sessionId: payload.agent.id, bindings })
-        } catch (error: unknown) {
-          warn(`cannot read OMP bindings for session "${payload.agent.id}"; starting a fresh OMP session`, error)
-          plan = { mode: 'attach' }
-        }
-        let attachment: OmpAttachment
-        try {
-          attachment = await bridge.attach(payload.agent, attachOptions(payload.agent, {
-            preset: profile,
-            ...plan,
-          }))
-        } catch (error: unknown) {
-          if (plan.resumePath === undefined) throw error
-          warn(`cannot resume transcript ${plan.resumePath}; starting a fresh OMP session`, error)
-          await forgetBinding(payload.agent.id)
-          attachment = await bridge.attach(payload.agent, attachOptions(payload.agent, {
-            mode: 'attach',
-            preset: profile,
-          }))
-        }
-        await rememberBinding(payload.agent, attachment, profile)
-        if (plan.forkPath !== undefined) {
-          try {
-            await bindings.deleteFork(payload.agent.id)
-          } catch (error: unknown) {
-            warn(`cannot drop consumed branch fork for session "${payload.agent.id}"`, error)
-          }
-        }
+        await ensureOmpSession(payload.agent, profile)
         return next()
       })
     }
     return discoverOmpPresets({
       cwd: config.cwd ?? process.cwd(),
       ...config.home === undefined ? {} : { home: config.home },
-    }).then(async presets => {
+    }).then(async (presets) => {
       const ordered = presets.sort((left, right) => left.name.localeCompare(right.name))
+      presetNames = new Set(ordered.map(preset => preset.name))
       for (const preset of ordered) {
         await presetCtx.agentPresets.register(ompPresetDefinition(preset, ompPresetOrder(preset.name)))
       }

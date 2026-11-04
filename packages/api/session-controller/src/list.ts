@@ -155,9 +155,10 @@ export class ApiSessionList {
         yieldDeadline = performance.now() + this.workSliceMs
       }
     }
+    const titles = await this.coldTitles(cold, signal)
     for (const record of cold) {
       signal?.throwIfAborted()
-      items.push(this.summarizeCold(record))
+      items.push(this.summarizeCold(record, titles.get(record.header.id)))
       if (performance.now() >= yieldDeadline) {
         await scheduler.yield()
         signal?.throwIfAborted()
@@ -169,9 +170,44 @@ export class ApiSessionList {
     return items
   }
 
-  private summarizeCold({ header, formatStatus }: SessionRecord): SessionSummary {
+  private async coldTitles(
+    records: readonly SessionRecord[],
+    signal?: AbortSignal,
+  ): Promise<Map<SessionId, { text: string; seq: number }>> {
+    const cache = this.ctx.get('sessionProjectionCache')
+    const keys = this.ctx.sessionProjections.summaryKeys()
+    const missing = records
+      .filter(({ header }) => {
+        const block = cache?.cachedSnapshot(header, keys) ?? cache?.cachedPredecessorTitle(header)
+        return typeof block?.values.title !== 'string' || block.values.title.length === 0
+      })
+      .map(({ header }) => header.id)
+    const titles = new Map<SessionId, { text: string; seq: number }>()
+    if (missing.length === 0) return titles
+    const results = await this.ctx.sessionQuery.readTitleSnapshots(missing, signal).catch((error: unknown) => {
+      this.ctx.logger.warn(`api-session.list: cold title fallback failed: ${String(error)}`)
+      return []
+    })
+    for (const result of results) {
+      if (result.status === 'rejected') continue
+      const snapshot = result.value.title
+      if (snapshot === undefined || snapshot.title.length === 0) continue
+      titles.set(result.sessionId, { text: snapshot.title, seq: snapshot.eventSeq })
+    }
+    return titles
+  }
+
+  private summarizeCold(
+    { header, formatStatus }: SessionRecord,
+    title?: { text: string; seq: number },
+  ): SessionSummary {
     const projections = this.projectionsFor(header, undefined)
     const metadata = projections?.values.sessionListMetadata
+    const merged = title === undefined ? projections : {
+      kind: 'cached' as const,
+      asOfSeq: Math.max(projections?.asOfSeq ?? 0, title.seq),
+      values: { ...projections?.values, title: title.text },
+    }
     return {
       sessionId: header.id,
       updatedAt: updatedAt(header, metadata),
@@ -181,7 +217,7 @@ export class ApiSessionList {
       // A large, metadata-less, or inaccessible cache miss remains unknown and visible.
       blank: metadata?.blank ?? false,
       ...listFields(header),
-      ...(projections === undefined ? {} : { projections }),
+      ...(merged === undefined ? {} : { projections: merged }),
     }
   }
 

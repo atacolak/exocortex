@@ -12,6 +12,11 @@ export interface OmpCatalogModel {
 export interface OmpModelSelection {
   readonly provider: string
   readonly model: string
+  readonly reasoningEffort?: string
+}
+
+export const OMP_THINKING_LEVELS: Record<string, true> = {
+  off: true, minimal: true, low: true, medium: true, high: true, xhigh: true, max: true,
 }
 
 /** What one catalog synchronization pass did. */
@@ -89,6 +94,10 @@ export class OmpModelCatalogSync {
       provider: model.provider ?? this.selection.provider,
       modelId: model.id,
     })
+    const effort = this.selection.reasoningEffort
+    if (effort !== undefined && OMP_THINKING_LEVELS[effort] === true) {
+      await this.client.request({ type: 'set_thinking_level', level: effort }).catch(() => {})
+    }
     return { status: 'applied', model, models }
   }
 }

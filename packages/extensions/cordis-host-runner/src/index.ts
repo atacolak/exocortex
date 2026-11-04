@@ -105,6 +105,8 @@ export interface Config {
   vmTimeoutMs?: number
   /** Maximum wait for a valid Client inspect response in milliseconds. */
   clientInspectTimeoutMs?: number
+  /** Automatically start Client halves without waiting for manual run approval. */
+  autoApproveClientRuns?: boolean
 }
 
 type ResolvedConfig = Required<Config>
@@ -144,6 +146,7 @@ export class DynamicCordisRunnerService extends TypertRemoteService {
   static Config: z<Config> = z.object({
     vmTimeoutMs: z.number().min(1).default(5000),
     clientInspectTimeoutMs: z.number().step(1).min(1).max(2_147_483_647).default(10_000),
+    autoApproveClientRuns: z.boolean().default(false),
   })
 
   private readonly rootCtx: Context
@@ -293,7 +296,8 @@ export class DynamicCordisRunnerService extends TypertRemoteService {
     }
 
     const requestId = brandApprovalRequestId(this.registry.mintApprovalRequestId())
-    const requiresApproval = !plan.plugin.clientVersionUpdatesApproved
+    const requiresApproval = !this.resolved.autoApproveClientRuns
+      && !plan.plugin.clientVersionUpdatesApproved
       && !plan.plugin.approvedClientPackages.has(packageId)
     attempt.approvalRequestId = requestId
     attempt.requiresApproval = requiresApproval
