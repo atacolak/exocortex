@@ -388,6 +388,126 @@ describe('OmpAgentDriver', () => {
       { kind: 'end', toolCallId: 't-1', toolName: 'cordis_inspect_list', content: [{ type: 'text', text: '[]' }], isError: false },
     ])
   })
+
+  it('never aborts the live OMP run when a teardown signal fires', async () => {
+    const client = new FakeClient()
+    const driver = new OmpAgentDriver(client)
+    const controller = new AbortController()
+    const consume = (async () => {
+      for await (const _chunk of driver.stream(request([user('u1', 'hello')]), controller.signal)) { /* drain */ }
+    })()
+    await tick()
+    client.settle()
+
+    controller.abort({ kind: 'disposed' })
+    await consume
+
+    expect(client.commands.filter(command => command.type === 'abort')).toEqual([])
+  })
+
+  it('aborts the live OMP run when the operator cancels the step', async () => {
+    const client = new FakeClient()
+    const driver = new OmpAgentDriver(client)
+    const controller = new AbortController()
+    const consume = (async () => {
+      for await (const _chunk of driver.stream(request([user('u1', 'hello')]), controller.signal)) { /* drain */ }
+    })()
+    await tick()
+    client.settle()
+
+    driver.markUserCancel()
+    controller.abort({ kind: 'user' })
+    await consume
+
+    expect(client.commands.filter(command => command.type === 'abort')).toEqual([{ type: 'abort' }])
+  })
+
+  it('never aborts the live OMP run after the attachment starts detaching', async () => {
+    const client = new FakeClient()
+    const driver = new OmpAgentDriver(client)
+    const controller = new AbortController()
+    const consume = (async () => {
+      for await (const _chunk of driver.stream(request([user('u1', 'hello')]), controller.signal)) { /* drain */ }
+    })()
+    await tick()
+    client.settle()
+
+    driver.close()
+    driver.markUserCancel()
+    controller.abort({ kind: 'user' })
+    await consume
+
+    expect(client.commands.filter(command => command.type === 'abort')).toEqual([])
+  })
+
+  it('never re-steers an external TUI message on a later turn', async () => {
+    const client = new FakeClient()
+    const driver = new OmpAgentDriver(client)
+    const typed = 'typed in the terminal'
+    const claimController = new AbortController()
+
+    client.emit({ type: 'agent_start' })
+    client.emit({ type: 'message_end', messageId: 'tui-1', message: { role: 'user', content: [{ type: 'text', text: typed }] } })
+
+    const claimed = (async () => {
+      for await (const _chunk of driver.stream(request([user('tui-copy', typed)]), claimController.signal)) { /* drain */ }
+    })()
+    await tick()
+    expect(client.commands).toEqual([])
+    claimController.abort()
+    await claimed
+
+    const next = (async () => {
+      for await (const _chunk of driver.stream(request([
+        user('tui-copy', typed),
+        user('u2', 'next'),
+      ]), new AbortController().signal)) { /* drain */ }
+    })()
+    await tick()
+    expect(client.promptText(0)).toBe('next')
+    client.settle()
+    settlePrompt(client)
+    await next
+    driver.close()
+  })
+
+  it('claims an external message whose delivered copy differs only in whitespace', async () => {
+    const client = new FakeClient()
+    const driver = new OmpAgentDriver(client)
+    const typed = 'typed   in the terminal'
+    const controller = new AbortController()
+
+    client.emit({ type: 'agent_start' })
+    client.emit({ type: 'message_end', messageId: 'tui-2', message: { role: 'user', content: [{ type: 'text', text: typed }] } })
+
+    const consume = (async () => {
+      for await (const _chunk of driver.stream(request([user('tui-copy', 'typed in the terminal')]), controller.signal)) { /* drain */ }
+    })()
+    await tick()
+    expect(client.commands).toEqual([])
+    controller.abort()
+    await consume
+    driver.close()
+  })
+
+  it('claims a custom message so its harness copy is never steered back', async () => {
+    const client = new FakeClient()
+    const driver = new OmpAgentDriver(client)
+    const mail = '<hcom from="lead">ship it</hcom>'
+    const controller = new AbortController()
+
+    client.emit({ type: 'agent_start' })
+    client.emit({ type: 'message_end', messageId: 'custom-1', message: { role: 'custom', content: [{ type: 'text', text: mail }] } })
+
+    const consume = (async () => {
+      for await (const _chunk of driver.stream(request([user('mail-copy', mail)]), controller.signal)) { /* drain */ }
+    })()
+    await tick()
+    expect(client.commands).toEqual([])
+    controller.abort()
+    await consume
+    driver.close()
+  })
 })
 
 describe('OmpAgentDriver unsolicited wakes', () => {
@@ -743,5 +863,49 @@ describe('OmpAgentDriver unsolicited wakes', () => {
 
     expect(wakes).toEqual([{ text: 'steer from terminal' }])
     expect(chunks.at(-1)).toEqual({ type: 'finish', reason: { kind: 'stop' } })
+  })
+
+  it('ignores OMP-injected memory and reminder frames', () => {
+    const client = new FakeClient()
+    const wakes: unknown[] = []
+    const driver = new OmpAgentDriver(client, { onUnsolicitedWake: (wake) => { wakes.push(wake) } })
+
+    client.emit({ type: 'agent_start' })
+    client.emit({
+      type: 'message_end', messageId: 'mem-1', message: { role: 'user', content: [{ type: 'text', text: '<memories>\nrecall\n</memories>' }] },
+    })
+    client.emit({
+      type: 'message_end', messageId: 'rem-1', message: { role: 'user', content: [{ type: 'text', text: '<system-reminder>\nrule\n</system-reminder>' }] },
+    })
+
+    expect(wakes).toEqual([])
+    driver.close()
+  })
+
+  it('strips the interjection notice and claims both copies', async () => {
+    const client = new FakeClient()
+    const wakes: unknown[] = []
+    const driver = new OmpAgentDriver(client, { onUnsolicitedWake: (wake) => { wakes.push(wake) } })
+    const raw = '<system-notice>\nUser interjection during work: priority; supersedes conflicting prior instructions. Re-read; ensure current work reflects user intent.\n</system-notice>\nstop the sidebar refactor'
+    const display = 'stop the sidebar refactor'
+
+    client.emit({ type: 'agent_start' })
+    client.emit({
+      type: 'message_end', messageId: 'i-1', message: { role: 'user', content: [{ type: 'text', text: raw }] },
+    })
+    expect(wakes).toEqual([{ text: display }])
+
+    const first = new AbortController()
+    const consuming = (async () => {
+      for await (const _chunk of driver.stream(request([user('i-copy', display)]), first.signal)) { /* drain */ }
+    })()
+    await tick()
+    expect(client.commands).toEqual([])
+    first.abort()
+    await consuming
+
+    for await (const _chunk of driver.stream(request([user('i-copy', display), user('raw-copy', raw)]), new AbortController().signal)) { /* drain */ }
+    expect(client.commands).toEqual([])
+    driver.close()
   })
 })

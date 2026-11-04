@@ -518,4 +518,45 @@ describe('OmpBridge live socket attachment', () => {
     ])
     expect(events.filter(event => event.type === 'assistant/message')).toHaveLength(2)
   })
+
+  it('aborts OMP only for an operator cancel, never for a teardown abort', async () => {
+    const { ctx, bridge } = await socketBridge()
+    const { directory, frames } = await published('omp-live-cancel')
+    const agent = await scopedAgent(ctx, 'socket-cancel')
+    await bridge.attach(agent, {
+      mode: 'attach',
+      sessionDir: directory,
+      socketPath: ompSocketPath(directory, 'omp-live-cancel'),
+      sessionId: 'omp-live-cancel',
+      cwd: '/work',
+    })
+
+    const live = (bridge as unknown as { attachments: Map<string, object> }).attachments.get(agent.id)
+    const stream = (bridge as unknown as {
+      liveStream(live: object, request: GenerateOptions, signal: AbortSignal): AsyncIterable<StreamChunk>
+    }).liveStream.bind(bridge)
+    const run = (text: string, signal: AbortSignal): Promise<void> => (async () => {
+      const request = {
+        provider: 'omp',
+        model: 'omp',
+        messages: [createUserMessage({ content: [{ type: 'text' as const, text }], source: { kind: 'user' as const } })],
+      }
+      for await (const _chunk of stream(live, request, signal)) { /* drain */ }
+    })()
+
+    const teardown = new AbortController()
+    const drained = run('first', teardown.signal)
+    await tick()
+    teardown.abort({ kind: 'disposed' })
+    await drained
+    await tick()
+    expect(frames.filter(frame => frame.type === 'abort')).toEqual([])
+
+    const operator = new AbortController()
+    const cancelled = run('second', operator.signal)
+    await tick()
+    operator.abort({ kind: 'user' })
+    await cancelled
+    await expect.poll(() => frames.filter(frame => frame.type === 'abort').length).toBe(1)
+  })
 })

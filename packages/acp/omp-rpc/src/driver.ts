@@ -154,6 +154,20 @@ function normalizeUserText(text: string): string {
   return text.replace(/\s+/g, ' ').trim()
 }
 
+/**
+ * The operator's own words from an OMP interjection notice.
+ *
+ * OMP prefixes a human mid-turn steer with a `<system-notice>` block, so the
+ * wrapper is metadata, not message prose.
+ * @param text - the message text OMP emitted.
+ * @returns the interjection body, or undefined when the text is not one.
+ */
+function interjectionBody(text: string): string | undefined {
+  const notice = /^<system-notice>[\s\S]*?User interjection during work:[\s\S]*?<\/system-notice>[ \t]*\r?\n([\s\S]*)$/u
+  const body = notice.exec(text.trimStart())?.[1]?.trim()
+  return body === undefined || body.length === 0 ? undefined : body
+}
+
 function imageCountOf(message: Record<string, unknown> | undefined): number {
   const content = message?.content
   if (!Array.isArray(content)) return 0
@@ -484,6 +498,8 @@ export interface OmpAgentDriverOptions {
 export class OmpAgentDriver {
   private sent: Set<string> | undefined
   private readonly external = new Set<string>()
+  /** Harness turns already satisfied by a terminal-typed message, kept across every later step. */
+  private readonly claimedKeys = new Set<string>()
   private highWaterMark = 0
   private prompt: PromptState | undefined
   private startingPrompt = false
@@ -495,6 +511,10 @@ export class OmpAgentDriver {
   private readonly onUnsolicitedWake: ((wake: OmpUnsolicitedWake) => void) | undefined
   /** OMP message ids already published as external user input. */
   private readonly announced = new Set<string>()
+  /** Whether the operator aborted this step on purpose, not because the owner went away. */
+  private userCancelled = false
+  /** Whether the attachment owner already began tearing this driver down. */
+  private detaching = false
 
   constructor(private readonly client: OmpDriverClient, options: OmpAgentDriverOptions = {}) {
     this.transcript = options.transcript ?? 'replay'
@@ -534,9 +554,19 @@ export class OmpAgentDriver {
 
   /** Stop observing the OMP process; the attachment owner calls this once. */
   close(): void {
+    this.detaching = true
     this.stopFrames()
     this.prompt?.channel.close()
     this.prompt = undefined
+  }
+
+  /**
+   * Record that the operator cancelled the current step, so aborting its
+   * signal also stops the matching run inside OMP. Teardown, detach, and
+   * socket loss never call this.
+   */
+  markUserCancel(): void {
+    this.userCancelled = true
   }
 
   private observe(frame: OmpRpcFrame): void {
@@ -624,6 +654,8 @@ export class OmpAgentDriver {
     const messageId = typeof record.messageId === 'string' ? record.messageId : undefined
     const text = messageText(message)
     if (text === undefined) return
+    const head = text.trimStart()
+    if (head.startsWith('<memories>') || head.startsWith('<system-reminder>')) return
     if (messageId === undefined ? frame.type !== 'message_end' : !this.announce(messageId)) return
     if (state.wake !== undefined) state.wake.fired = true
     const images = imageCountOf(message)
@@ -634,12 +666,20 @@ export class OmpAgentDriver {
       }
       if (state.sentTexts.has(normalizeUserText(text))) return
       state.steered = true
+      const interjection = interjectionBody(text)
+      if (interjection !== undefined) {
+        this.markExternalUserMessage(text)
+        this.markExternalUserMessage(interjection)
+        this.onUnsolicitedWake?.({ text: interjection })
+        return
+      }
       this.markExternalUserMessage(text)
       const source = ompTriggerSource(text)
       this.onUnsolicitedWake?.(source === undefined ? { text } : { text, source })
       return
     }
     const source = ompTriggerSource(text)
+    this.markExternalUserMessage(text)
     this.onUnsolicitedWake?.(source === undefined ? { text } : { text, source })
   }
 
@@ -683,7 +723,7 @@ export class OmpAgentDriver {
    * @param text - the exact user message text OMP received.
    */
   markExternalUserMessage(text: string): void {
-    this.external.add(text)
+    this.external.add(normalizeUserText(text))
   }
 
   private fireWake(state: PromptState, wake: OmpUnsolicitedWake): void {
@@ -699,6 +739,7 @@ export class OmpAgentDriver {
    * @returns the assistant chunk stream.
    */
   async *stream(request: GenerateOptions, signal: AbortSignal): AsyncIterable<StreamChunk> {
+    this.userCancelled = false
     signal.throwIfAborted()
     if (this.sent !== undefined && request.messages.length < this.highWaterMark) await this.restart()
     const pending = this.pendingTurns(request.messages)
@@ -733,7 +774,7 @@ export class OmpAgentDriver {
     let stepFinished = false
 
     const abort = (): void => {
-      void this.client.request({ type: 'abort' }).catch(() => {})
+      if (this.userCancelled && !this.detaching && !state.closed) void this.client.request({ type: 'abort' }).catch(() => {})
       state.closed = true
       state.channel.close()
     }
@@ -887,13 +928,16 @@ export class OmpAgentDriver {
   }
 
   private unclaimedTurns(turns: readonly OmpUserTurn[]): OmpUserTurn[] {
-    if (this.external.size === 0) return [...turns]
-    const claimed = new Set<number>()
-    for (let index = turns.length - 1; index >= 0; index -= 1) {
-      const turn = turns[index] as OmpUserTurn
-      if (this.external.delete(turn.text)) claimed.add(index)
+    const unclaimed: OmpUserTurn[] = []
+    for (const turn of turns) {
+      if (this.claimedKeys.has(turn.key)) continue
+      if (this.external.delete(normalizeUserText(turn.text))) {
+        this.claimedKeys.add(turn.key)
+        continue
+      }
+      unclaimed.push(turn)
     }
-    return turns.filter((_, index) => !claimed.has(index))
+    return unclaimed
   }
 
   private markSent(turns: readonly OmpUserTurn[]): void {

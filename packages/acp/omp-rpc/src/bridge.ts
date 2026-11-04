@@ -3,7 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentStepStream } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-commands'
 import { createAssistantMessage, createToolResultMessage, createUserMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
-import type { RequestMessage } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, RequestMessage, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import type { TodoItem } from '@deepseek-ai/dsh-tool-todo'
@@ -506,7 +506,7 @@ export class OmpBridge {
       live.cursor.turn = payload.turn
       live.cursor.step = payload.step
       if (nextTurn && live.todos.length > 0) live.agent.session.append('todo/write', { todos: live.todos })
-      const stream: AgentStepStream = (request, signal) => live.driver.stream(request, signal)
+      const stream: AgentStepStream = (request, signal) => this.liveStream(live, request, signal)
       return stream
     })
     const stopAssistant = live.agent.ctx.on('agent/assistant-stream', (payload) => {
@@ -539,6 +539,24 @@ export class OmpBridge {
       stopAssistant()
       stopSessionEvents()
     }
+  }
+
+  /**
+   * Serve one harness step from the attached driver. Only an operator cancel
+   * (`cancel({ kind: 'user' })`) may abort the OMP run; disposal, detach, and
+   * scope teardown abort the same signal without touching the terminal's run.
+   * @param live - attachment serving the step.
+   * @param request - the assembled request.
+   * @param signal - the step's abort signal, carrying the harness cancel cause.
+   * @returns the assistant chunk stream.
+   */
+  private liveStream(live: LiveAttachment, request: GenerateOptions, signal: AbortSignal): AsyncIterable<StreamChunk> {
+    const markUserCancel = (): void => {
+      if (abortedByUser(signal)) live.driver.markUserCancel()
+    }
+    if (signal.aborted) markUserCancel()
+    else signal.addEventListener('abort', markUserCancel, { once: true })
+    return live.driver.stream(request, signal)
   }
 
   private async readImages(refs: readonly OmpImageRef[]): Promise<OmpImageInput[]> {
@@ -715,6 +733,12 @@ export class OmpBridge {
 function objectOf(value: unknown): Record<string, unknown> | undefined {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
   return value as Record<string, unknown>
+}
+
+/** Whether an aborted signal carries the harness's explicit operator cancel cause. */
+function abortedByUser(signal: AbortSignal): boolean {
+  const reason: unknown = signal.reason
+  return typeof reason === 'object' && reason !== null && 'kind' in reason && reason.kind === 'user'
 }
 
 /**
