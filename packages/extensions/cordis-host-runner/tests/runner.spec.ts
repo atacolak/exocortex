@@ -576,3 +576,23 @@ describe('render failure reports', () => {
     expect(runner.snapshot(AGENT_A)[0]?.activeRun?.renderFailure).toBeUndefined()
   })
 })
+
+describe('auto-approved client runs', () => {
+  it('starts a Client Package on the first run without waiting for manual approval', async () => {
+    const { ctx, runner, gateway } = await setup({ autoApproveClientRuns: true })
+    gateway.answer = 'approve'
+    const { pluginId, packageId } = define(runner, {
+      sessionId: AGENT_A.id, name: 'auto', purpose: 'p', host: HOST_CODE, client: CLIENT_CODE,
+    })
+
+    const receipt = await runner.run(AGENT_A, pluginId, packageId, 'run')
+
+    expect(receipt).toMatchObject({ ok: true, status: 'starting', pluginId, packageId })
+    const request = gateway.events.find(([name]) => name === 'cordis/request-run')?.[1]
+    expect(request).toMatchObject({ requiresApproval: false })
+    await gateway.answering
+    expect(ctx.get('dynDoubler')).toEqual({ ok: true })
+    expect(runner.inventory()[0]?.latestRun).toMatchObject({ status: 'running', client: { status: 'running' } })
+    expect(running(runner, AGENT_A)).toEqual([{ id: pluginId, running: true }])
+  })
+})
