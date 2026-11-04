@@ -25,6 +25,16 @@ export interface OmpRpcCommand {
   readonly [key: string]: unknown
 }
 
+/** Compaction strategies OMP's `/compact` command accepts. */
+export type OmpCompactMode = 'soft' | 'remote' | 'snapcompact'
+
+/** One `/compact` invocation translated into OMP's compact RPC frame. */
+export interface OmpCompactCommand extends OmpRpcCommand {
+  readonly type: 'compact'
+  readonly mode?: OmpCompactMode
+  readonly customInstructions?: string
+}
+
 /** First frame of every RPC session. */
 export interface OmpRpcReadyFrame {
   readonly type: 'ready'

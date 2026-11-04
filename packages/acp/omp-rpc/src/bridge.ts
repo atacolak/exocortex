@@ -3,7 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentStepStream } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-commands'
 import { createAssistantMessage, createToolResultMessage, createUserMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
-import type { GenerateOptions, RequestMessage, StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, RequestMessage, StreamChunk, UserMessage } from '@deepseek-ai/dsh-llm'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import type { TodoItem } from '@deepseek-ai/dsh-tool-todo'
@@ -49,6 +49,27 @@ export interface OmpAttachOptions {
   readonly cwd: string
   /** Live session socket published by an OMP process this bridge must not own. */
   readonly socketPath?: string
+  /**
+   * Leave prompt streaming and tool projection to the agent factory. The
+   * attachment still owns commands, host tools, and external wakes.
+   */
+  readonly managedStreams?: boolean
+}
+
+/** One external OMP turn the attached process already appended. */
+export interface OmpExternalWake {
+  readonly text: string
+  readonly source?: UserMessage['source']
+}
+
+declare module '@deepseek-ai/dsh-agent' {
+  interface Agent {
+    /**
+     * Adopt an external OMP turn already present in the active run.
+     * @param wake - cleaned external prompt text.
+     */
+    projectExternalWake?(wake: OmpExternalWake): void
+  }
 }
 
 /** What one successful attachment exposes to callers. */
@@ -393,8 +414,12 @@ export class OmpBridge {
         streaming: session.streaming,
         resolveImages: refs => this.readImages(refs),
         onTool: (events) => { pendingTools.push(...events) },
-        onContinue: () => { this.continueTurn(agent) },
+        ...options.managedStreams === true ? {} : { onContinue: () => { this.continueTurn(agent) } },
         onUnsolicitedWake: ({ text, source }) => {
+          if (agent.projectExternalWake !== undefined) {
+            agent.projectExternalWake({ text, ...source === undefined ? {} : { source } })
+            return
+          }
           const content = [{ type: 'text' as const, text }]
           agent.followup(source === undefined
             ? createUserMessage({ content, source: { kind: 'user' } })
@@ -421,7 +446,7 @@ export class OmpBridge {
         cursor,
         todos: [],
       }
-      live.detachStream = this.bindStream(live)
+      if (options.managedStreams !== true) live.detachStream = this.bindStream(live)
       await hostTools.sync()
       await this.publishTodos(live)
       this.attachments.set(agent.id, live)
@@ -462,6 +487,39 @@ export class OmpBridge {
    */
   attached(id: SessionId): boolean {
     return this.attachments.has(id)
+  }
+
+  /**
+   * Read the driver attached to one session.
+   * @param id - harness session identity.
+   * @returns the attached driver, or undefined without an attachment.
+   */
+  driverOf(id: SessionId): OmpAgentDriver | undefined {
+    return this.attachments.get(id)?.driver
+  }
+
+  /**
+   * Take the tool events one attached driver collected since the last read.
+   * @param id - harness session identity.
+   * @returns ordered tool events, emptied from the attachment.
+   */
+  takeTools(id: SessionId): OmpToolEvent[] {
+    return this.attachments.get(id)?.pendingTools.splice(0) ?? []
+  }
+
+  /**
+   * Project tool events into a session at one exact turn and step.
+   * @param id - harness session identity.
+   * @param turn - durable turn number.
+   * @param step - durable step number.
+   * @param events - ordered driver tool events.
+   */
+  projectTools(id: SessionId, turn: number, step: number, events: readonly OmpToolEvent[]): void {
+    const live = this.attachments.get(id)
+    if (live === undefined) return
+    live.cursor.turn = turn
+    live.cursor.step = step
+    for (const event of events) this.projectTool(live, event)
   }
 
   /**

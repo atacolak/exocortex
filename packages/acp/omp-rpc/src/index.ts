@@ -17,9 +17,11 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { SessionController } from '@deepseek-ai/dsh-api-session-controller'
 import type {} from '@deepseek-ai/dsh-client-connection'
 import type {} from '@deepseek-ai/dsh-commands'
-import type { Agent } from '@deepseek-ai/dsh-agent'
+import { modelSelectionProjectionDefinition, type Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import { inboxProjectionDefinition, OmpAgentFactory, type OmpAgentHost } from './agent-factory.ts'
+import { OMP_LLM_PROVIDER, registerOmpLlmProvider } from './llm-catalog.ts'
 import type {} from '@deepseek-ai/dsh-workspace'
 import Schema from '@deepseek-ai/schemastery'
 import { defaultOmpBindingsFile, OmpBindings } from './bindings.ts'
@@ -35,11 +37,19 @@ import {
 import { DEFAULT_OMP_HOST_TOOLS } from './cordis-tools.ts'
 import {
   listOmpSkills,
+  ompCompactCommand,
   ompNativeCommandCatalog,
   ompNativeCommandLine,
+  resolveOmpSkills,
   type OmpSkillListing,
 } from './native-commands.ts'
-import { OMP_OPEN_PATH, serveOmpOpen } from './open.ts'
+import {
+  createOmpSessionLock,
+  normalizeDshSessionId,
+  OMP_OPEN_PATH,
+  reuseOrCreateDshSession,
+  serveOmpOpen,
+} from './open.ts'
 import {
   discoverOmpPresets,
   ompPresetDefinition,
@@ -64,6 +74,7 @@ import {
 import type { OmpUiAsker } from './ui.ts'
 import type { OmpExtensionUiRequest, OmpRpcCommand } from './types.ts'
 
+export * from './agent-factory.ts'
 export * from './bindings.ts'
 export * from './bridge.ts'
 export * from './catalog.ts'
@@ -72,6 +83,7 @@ export * from './cordis-tools.ts'
 export * from './driver.ts'
 export * from './host-tools.ts'
 export * from './launch.ts'
+export * from './llm-catalog.ts'
 export * from './native-commands.ts'
 export * from './open.ts'
 export * from './presets.ts'
@@ -83,7 +95,7 @@ export * from './types.ts'
 export const DEFAULT_OMP_SESSIONS_ROOT = join(homedir(), '.omp', 'agent', 'sessions')
 
 export const name = 'omp-rpc'
-export const inject = ['commands', 'subprocess', 'tools']
+export const inject = ['agents', 'sessions', 'llm', 'sessionProjections', 'commands', 'subprocess', 'tools']
 
 /** Plugin configuration for the OMP bridge. */
 export interface OmpRpcConfig {
@@ -167,7 +179,7 @@ interface OmpTranscriptOpened {
  * @param ctx - Cordis context carrying commands, tools, and subprocess.
  * @param config - executable, transcript root, profile, and host tool selection.
  */
-export function apply(ctx: Context, config: OmpRpcConfig): void {
+export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
   const hcomExtension = config.hcomExtension ?? join(config.home ?? homedir(), '.omp', 'agent', 'extensions', 'hcom.ts')
   const bridge = new OmpBridge({
     ctx,
@@ -192,11 +204,14 @@ export function apply(ctx: Context, config: OmpRpcConfig): void {
     const cwd = options.cwd ?? agent.session.header.cwd ?? config.cwd
     if (cwd === undefined) throw new Error('OMP bridge has no working directory: set omp-rpc cwd or start the session in one')
     const preset = options.preset ?? config.preset
+    const selection = agent.model.current()
     return {
       ...options,
       ...preset === undefined ? {} : { preset },
+      ...selection === undefined ? {} : { selection },
       sessionDir: config.sessionDir ?? sessionsRoot,
       hostTools: config.hostTools ?? DEFAULT_OMP_HOST_TOOLS,
+      managedStreams: true,
       cwd,
     }
   }
@@ -207,6 +222,7 @@ export function apply(ctx: Context, config: OmpRpcConfig): void {
   }
 
   const bindings = new OmpBindings(config.bindingsFile ?? defaultOmpBindingsFile())
+  const serializeOpen = createOmpSessionLock()
   const runDirectory = resolveOmpRunDirectory(
     config.watchRunDir === false ? undefined : config.watchRunDir,
     config.home,
@@ -351,7 +367,7 @@ export function apply(ctx: Context, config: OmpRpcConfig): void {
   }
 
   const attaching = new Map<string, Promise<void>>()
-  const attachOmpSession = async (agent: Agent, profile: string): Promise<void> => {
+  const attachOmpSession = async (agent: Agent, profile?: string): Promise<void> => {
     if (bridge.attached(agent.id)) return
     let plan: OmpAttachPlan
     try {
@@ -369,7 +385,7 @@ export function apply(ctx: Context, config: OmpRpcConfig): void {
           mode: 'attach',
           socketPath: live.socketPath,
           sessionId: live.sessionId,
-          preset: profile,
+          ...profile === undefined ? {} : { preset: profile },
         }))
       } catch (error: unknown) {
         warn(`cannot attach live OMP socket for session "${live.sessionId}"; launching a fresh process`, error)
@@ -377,7 +393,7 @@ export function apply(ctx: Context, config: OmpRpcConfig): void {
     }
     try {
       attachment ??= await bridge.attach(agent, attachOptions(agent, {
-        preset: profile,
+        ...profile === undefined ? {} : { preset: profile },
         ...plan,
       }))
     } catch (error: unknown) {
@@ -386,10 +402,25 @@ export function apply(ctx: Context, config: OmpRpcConfig): void {
       await forgetBinding(agent.id)
       attachment = await bridge.attach(agent, attachOptions(agent, {
         mode: 'attach',
-        preset: profile,
+        ...profile === undefined ? {} : { preset: profile },
       }))
     }
-    await rememberBinding(agent, attachment, profile)
+    let hydratedTurns = binding?.hydratedTurns
+    if (binding?.path !== undefined && await existingFile(binding.path)) {
+      try {
+        hydratedTurns = (await hydrateOmpSession(
+          agent.session,
+          binding.path,
+          Number.POSITIVE_INFINITY,
+          binding.hydratedTurns ?? 0,
+          !attachment.session.streaming,
+        )).turns
+        bridge.seedDelivered(agent.id)
+      } catch (error: unknown) {
+        warn(`cannot tail-sync OMP transcript for session "${agent.id}"`, error)
+      }
+    }
+    await rememberBinding(agent, attachment, profile, hydratedTurns)
     if (plan.forkPath !== undefined) {
       try {
         await bindings.deleteFork(agent.id)
@@ -398,7 +429,7 @@ export function apply(ctx: Context, config: OmpRpcConfig): void {
       }
     }
   }
-  const ensureOmpSession = (agent: Agent, profile: string): Promise<void> => {
+  const ensureOmpSession = (agent: Agent, profile?: string): Promise<void> => {
     const pending = attaching.get(agent.id)
     if (pending !== undefined) return pending
     const started = attachOmpSession(agent, profile).finally(() => {
@@ -415,29 +446,30 @@ export function apply(ctx: Context, config: OmpRpcConfig): void {
 
   const skillsIn = (cwd: string): Promise<readonly OmpSkillListing[]> => {
     const cached = skillListings.get(cwd)
-    if (cached !== undefined && Date.now() - cached.at < SKILL_LISTING_TTL_MS) return Promise.resolve(cached.skills)
+    if (cached !== undefined && cached.skills.length > 0 && Date.now() - cached.at < SKILL_LISTING_TTL_MS) {
+      return Promise.resolve(cached.skills)
+    }
     const pending = skillRequests.get(cwd)
     if (pending !== undefined) return pending
-    const request = (async () => {
-      try {
+    const request = resolveOmpSkills({
+      cwd,
+      home: config.home ?? homedir(),
+      list: async () => {
         const executable = await ctx.subprocess.resolveExecutable(resolveOmpExecutable(config.executable), undefined)
-        const skills = await listOmpSkills(ctx.subprocess, executable, cwd)
-        skillListings.set(cwd, { at: Date.now(), skills })
-        return skills
-      } catch (error: unknown) {
-        warn(`cannot list OMP skills for "${cwd}"`, error)
-        skillListings.set(cwd, { at: Date.now(), skills: [] })
-        return []
-      } finally {
-        skillRequests.delete(cwd)
-      }
-    })()
+        return await listOmpSkills(ctx.subprocess, executable, cwd)
+      },
+    }).then((skills) => {
+      if (skills.length > 0) skillListings.set(cwd, { at: Date.now(), skills })
+      else skillListings.delete(cwd)
+      return skills
+    }).finally(() => {
+      skillRequests.delete(cwd)
+    })
     skillRequests.set(cwd, request)
     return request
   }
 
   const prepareNativeCommands = (agent: Agent): void => {
-    if (profileOf(agent) === undefined) return
     const key = String(agent.id)
     if (prepared.has(key)) return
     const commands = agent.ctx.get('commands')
@@ -455,10 +487,7 @@ export function apply(ctx: Context, config: OmpRpcConfig): void {
           description: command.description ?? `Run OMP's native /${command.name} command in this session.`,
           ...command.hint === undefined ? {} : { input: { hint: command.hint } },
           async handler(invocation) {
-            const profile = profileOf(invocation.agent)
-            if (profile === undefined) {
-              return { kind: 'error', text: `/${command.name} applies only to OMP agent presets.` }
-            }
+            const profile = profileOf(invocation.agent) ?? config.preset
             try {
               await ensureOmpSession(invocation.agent, profile)
               return {
@@ -474,6 +503,7 @@ export function apply(ctx: Context, config: OmpRpcConfig): void {
       agent.ctx.effect(() => () => {
         for (const dispose of disposers.splice(0)) dispose()
       }, 'omp-rpc native commands')
+      if (skills.length === 0) prepared.delete(key)
     }).catch((error: unknown) => {
       prepared.delete(key)
       warn(`cannot pre-populate native OMP commands for session "${key}"`, error)
@@ -481,10 +511,52 @@ export function apply(ctx: Context, config: OmpRpcConfig): void {
     prepared.set(key, started)
   }
 
-  ctx.on('agent/created', (payload) => { prepareNativeCommands(payload.agent) })
-  ctx.on('agent/pre-step', async (payload, next) => {
+  const agentHost: OmpAgentHost = {
+    ensureSession: agent => ensureOmpSession(agent, profileOf(agent) ?? config.preset),
+    driverOf: id => bridge.driverOf(id),
+    takeTools: id => bridge.takeTools(id),
+    projectTools: (id, turn, step, events) => { bridge.projectTools(id, turn, step, events) },
+    modelSelection: session => modelSelection.readerFor(session),
+    inbox: session => inbox.readerFor(session),
+  }
+
+  const hydrateBoundSession = async (agent: Agent): Promise<void> => {
+    const binding = await readBinding(agent.id)
+    if (binding === undefined || !(await existingFile(binding.path))) return
+    try {
+      const live = await liveSocketOf(binding.ompSessionId)
+      const hydration = await hydrateOmpSession(
+        agent.session,
+        binding.path,
+        Number.POSITIVE_INFINITY,
+        binding.hydratedTurns ?? 0,
+        live === undefined,
+      )
+      bridge.seedDelivered(agent.id)
+      await bindings.set(agent.id, {
+        ...binding,
+        hydratedTurns: hydration.turns,
+        updatedAt: new Date().toISOString(),
+      })
+    } catch (error: unknown) {
+      warn(`cannot tail-sync OMP transcript for reopened session "${agent.id}"`, error)
+    }
+  }
+
+  const modelSelection = await ctx.sessionProjections.register(modelSelectionProjectionDefinition)
+  const inbox = await ctx.sessionProjections.register(inboxProjectionDefinition)
+  registerOmpLlmProvider(ctx, OMP_LLM_PROVIDER)
+  ctx.effect(() => ctx.agents.setFactory(new OmpAgentFactory({
+    ctx,
+    host: agentHost,
+    hydrate: hydrateBoundSession,
+  })), 'omp-rpc agent factory')
+
+  ctx.on('agent/created', (payload) => {
     prepareNativeCommands(payload.agent)
-    return next()
+    void ensureOmpSession(payload.agent, profileOf(payload.agent) ?? config.preset).catch((error: unknown) => {
+      warn(`cannot attach native OMP session "${payload.agent.id}"`, error)
+    })
   })
 
   const hosted = new Map<string, SessionId>()
@@ -517,7 +589,7 @@ export function apply(ctx: Context, config: OmpRpcConfig): void {
       const header = await readOmpTranscriptHeader(live.sessionFile).catch(() => undefined)
       if (header === undefined) return
       const discovered = header.profile !== undefined && presetNames.has(header.profile) ? header.profile : undefined
-      const generated = SessionId(randomUUID())
+      const generated = SessionId(normalizeDshSessionId(randomUUID()))
       hosted.set(live.sessionId, generated)
       adopted.add(String(generated))
       const result = await controller.create({
@@ -570,7 +642,7 @@ export function apply(ctx: Context, config: OmpRpcConfig): void {
   const onLiveSession = (controller: SessionController, live: OmpSocketSession): void => {
     if (adopting.has(live.sessionId)) return
     adopting.add(live.sessionId)
-    void adoptLiveSession(controller, live)
+    void serializeOpen(live.sessionId, async () => { await adoptLiveSession(controller, live) })
       .catch((error: unknown) => {
         warn(`cannot adopt live OMP session "${live.sessionId}"`, error)
       })
@@ -603,12 +675,14 @@ export function apply(ctx: Context, config: OmpRpcConfig): void {
             return { kind: 'error', text: '/compact applies only to OMP agent presets.' }
           }
           await ensureOmpSession(invocation.agent, profile)
-          const instructions = invocation.rawInput.trim()
+          let command: OmpRpcCommand
           try {
-            const result = await bridge.request(invocation.agent.id, {
-              type: 'compact',
-              ...instructions.length === 0 ? {} : { customInstructions: instructions },
-            } as unknown as OmpRpcCommand)
+            command = ompCompactCommand(invocation.rawInput)
+          } catch (error: unknown) {
+            return { kind: 'error', text: error instanceof Error ? error.message : String(error) }
+          }
+          try {
+            const result = await bridge.request(invocation.agent.id, command)
             const payload = typeof result === 'object' && result !== null && !Array.isArray(result)
               ? result as Record<string, unknown>
               : undefined
@@ -663,6 +737,7 @@ export function apply(ctx: Context, config: OmpRpcConfig): void {
       requestBody: 'buffered',
       fetch: request => serveOmpOpen(request, {
         resolveTranscript,
+        serialize: serializeOpen,
         ...config.cwd === undefined ? {} : { defaultCwd: config.cwd },
         ...config.preset === undefined ? {} : { defaultProfile: config.preset },
         async openAgent(input) {
@@ -686,17 +761,26 @@ export function apply(ctx: Context, config: OmpRpcConfig): void {
             return { agent: resolved.agent }
           }
           try {
-            const created = await controller.create({
-              cwd: input.cwd,
-              ...input.profile === undefined ? {} : { agentPreset: ompPresetId(input.profile) },
+            let createdPreset: string | undefined
+            const target = await reuseOrCreateDshSession({
+              ompSessionId: input.ompSessionId,
+              findBound: async () => (await bindings.findByOmpSession(input.ompSessionId))?.dshSessionId,
+              create: async () => {
+                const created = await controller.create({
+                  cwd: input.cwd,
+                  ...input.profile === undefined ? {} : { agentPreset: ompPresetId(input.profile) },
+                })
+                createdPreset = created.agentPreset
+                return created.sessionId
+              },
             })
-            const resolved = await controller.resolveAgent(created.sessionId)
+            const resolved = await controller.resolveAgent(target.sessionId)
             if ('error' in resolved) {
               throw new OmpResumeError(resolved.error.code, resolved.error.message, 409)
             }
             return {
               agent: resolved.agent,
-              ...created.agentPreset === undefined ? {} : { agentPreset: created.agentPreset },
+              ...createdPreset === undefined ? {} : { agentPreset: createdPreset },
             }
           } catch (error: unknown) {
             if (error instanceof OmpResumeError) throw error
