@@ -12,8 +12,8 @@
  * @module @deepseek-ai/dsh-compaction/checkpoint
  */
 
+import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { MessageSource } from '@deepseek-ai/dsh-llm/message'
-import type { ContentBlock } from '@deepseek-ai/dsh-llm/message'
 import type { CommandId } from '@deepseek-ai/dsh-commands/brand'
 import type { CompactionId } from './brand.ts'
 
