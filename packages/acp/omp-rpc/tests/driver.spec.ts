@@ -491,4 +491,72 @@ describe('OmpAgentDriver unsolicited wakes', () => {
     expect(client.commands).toEqual([])
     driver.close()
   })
+
+  it('adopts a run already streaming when the driver attaches mid-turn', async () => {
+    const client = new FakeClient()
+    const wakes: unknown[] = []
+    const driver = new OmpAgentDriver(client, {
+      streaming: true,
+      onUnsolicitedWake: (wake) => { wakes.push(wake) },
+    })
+
+    client.emit(messageUpdate('w1', { type: 'text_start', contentIndex: 0 }, assistantMessage('', 'stop', { input: 1, output: 1 })))
+    client.emit(messageUpdate('w1', { type: 'text_delta', contentIndex: 0, delta: 'still' }, assistantMessage('still', 'stop', { input: 1, output: 1 })))
+    client.emit(messageUpdate('w1', { type: 'text_end', contentIndex: 0, content: 'still' }, assistantMessage('still', 'stop', { input: 1, output: 1 })))
+    client.emit({ type: 'agent_end', isTerminal: true })
+
+    const chunks: StreamChunk[] = []
+    for await (const chunk of driver.stream(request([]), new AbortController().signal)) chunks.push(chunk)
+
+    expect(wakes).toEqual([{
+      text: 'Background agent wake',
+      source: { kind: 'omp-wake', form: 'notice', summary: 'Background agent wake' },
+    }])
+    expect(chunks.filter(chunk => chunk.type === 'text-delta')).toEqual([{ type: 'text-delta', index: 0, text: 'still' }])
+    expect(client.commands).toEqual([])
+    driver.close()
+  })
+
+  it('opens an unsolicited prompt when a run streams without an agent_start frame', async () => {
+    const client = new FakeClient()
+    const wakes: unknown[] = []
+    const driver = new OmpAgentDriver(client, { onUnsolicitedWake: (wake) => { wakes.push(wake) } })
+
+    client.emit({ type: 'message_start', message: { role: 'assistant' } })
+    client.emit(messageUpdate('w2', { type: 'text_start', contentIndex: 0 }, assistantMessage('', 'stop', { input: 1, output: 1 })))
+    client.emit(messageUpdate('w2', { type: 'text_delta', contentIndex: 0, delta: 'late' }, assistantMessage('late', 'stop', { input: 1, output: 1 })))
+    client.emit(messageUpdate('w2', { type: 'text_end', contentIndex: 0, content: 'late' }, assistantMessage('late', 'stop', { input: 1, output: 1 })))
+    client.emit({ type: 'agent_end', isTerminal: true })
+
+    const chunks: StreamChunk[] = []
+    for await (const chunk of driver.stream(request([]), new AbortController().signal)) chunks.push(chunk)
+
+    expect(wakes).toHaveLength(1)
+    expect(chunks.filter(chunk => chunk.type === 'text-delta')).toEqual([{ type: 'text-delta', index: 0, text: 'late' }])
+    expect(client.commands).toEqual([])
+    driver.close()
+  })
+
+  it('keeps a TUI-typed prompt out of the outbound prompt and steer path', async () => {
+    const client = new FakeClient()
+    const wakes: unknown[] = []
+    const driver = new OmpAgentDriver(client, { onUnsolicitedWake: (wake) => { wakes.push(wake) } })
+    const typed = 'refactor the sidebar'
+
+    client.emit({ type: 'agent_start' })
+    client.emit({ type: 'message_start', message: { role: 'user' } })
+    client.emit({ type: 'message_end', message: { role: 'user', content: [{ type: 'text', text: typed }] } })
+    client.emit(messageUpdate('w3', { type: 'text_start', contentIndex: 0 }, assistantMessage('', 'stop', { input: 1, output: 1 })))
+    client.emit(messageUpdate('w3', { type: 'text_delta', contentIndex: 0, delta: 'on it' }, assistantMessage('on it', 'stop', { input: 1, output: 1 })))
+    client.emit(messageUpdate('w3', { type: 'text_end', contentIndex: 0, content: 'on it' }, assistantMessage('on it', 'stop', { input: 1, output: 1 })))
+    client.emit({ type: 'agent_end', isTerminal: true })
+
+    const chunks: StreamChunk[] = []
+    for await (const chunk of driver.stream(request([user('u1', typed)]), new AbortController().signal)) chunks.push(chunk)
+
+    expect(wakes).toStrictEqual([{ text: typed }])
+    expect(chunks.filter(chunk => chunk.type === 'text-delta')).toEqual([{ type: 'text-delta', index: 0, text: 'on it' }])
+    expect(client.commands).toEqual([])
+    driver.close()
+  })
 })

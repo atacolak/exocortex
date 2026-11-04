@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { appendFile, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -420,10 +420,11 @@ describe('hydrateOmpSession', () => {
     ])
     const session = Session.create(SessionId('hydrated-title'))
 
-    const appended = await hydrateOmpSession(session, path)
+    const outcome = await hydrateOmpSession(session, path)
     const events = session.snapshotEvents()
 
-    expect(appended).toBe(events.length)
+    expect(outcome.appended).toBe(events.length)
+    expect(outcome.turns).toBe(1)
     expect(events[0]).toMatchObject({
       type: 'session/title',
       data: { title: 'Resume and search OMP history', messageSeqs: [], source: { kind: 'user' } },
@@ -437,6 +438,91 @@ describe('hydrateOmpSession', () => {
       'step/end',
       'turn/end',
     ])
+  })
+})
+
+describe('hydrateOmpSession tail sync', () => {
+  const userLine = (text: string): unknown => ({ type: 'message', message: { role: 'user', content: [{ type: 'text', text }] } })
+  const assistantLine = (text: string): unknown => ({ type: 'message', message: { role: 'assistant', content: [{ type: 'text', text }] } })
+
+  it('appends only the turns the transcript gained and renumbers them after the session', async () => {
+    const path = await transcript([
+      { type: 'title', v: 1, title: 'Yesterday', updatedAt: '2026-11-03T09:00:00.000Z' },
+      userLine('one'),
+      assistantLine('one reply'),
+      userLine('two'),
+      assistantLine('two reply'),
+    ])
+    const session = Session.create(SessionId('tail-sync'))
+    const first = await hydrateOmpSession(session, path)
+    expect(first.turns).toBe(2)
+
+    await appendFile(path, [
+      { type: 'title_change', title: 'Integrate OMP steer handling', timestamp: '2026-11-04T09:00:00.000Z' },
+      userLine('three'),
+      assistantLine('three reply'),
+      userLine('four'),
+      assistantLine('four reply'),
+      userLine('five'),
+      assistantLine('five reply'),
+    ].map(line => JSON.stringify(line)).join('\n') + '\n')
+
+    const second = await hydrateOmpSession(session, path)
+    const events = session.snapshotEvents()
+
+    expect(second.turns).toBe(5)
+    expect(second.appended).toBeGreaterThan(0)
+    expect(events.filter(event => event.type === 'turn/start').map(event => event.data.turn)).toEqual([1, 2, 3, 4, 5])
+    expect(events.filter(event => event.type === 'turn/end').map(event => event.data.turn)).toEqual([1, 2, 3, 4, 5])
+    expect(events.filter(event => event.type === 'user/message').map(event => event.data.content[0]?.text)).toEqual([
+      'one',
+      'two',
+      'three',
+      'four',
+      'five',
+    ])
+    expect(events.filter(event => event.type === 'assistant/message').map(event => event.data.message.content[0]?.text)).toEqual([
+      'one reply',
+      'two reply',
+      'three reply',
+      'four reply',
+      'five reply',
+    ])
+    expect(events.filter(event => event.type === 'session/title').map(event => event.data.title)).toEqual([
+      'Yesterday',
+      'Integrate OMP steer handling',
+    ])
+  })
+
+  it('appends nothing when the transcript has not grown past the session', async () => {
+    const path = await transcript([userLine('only'), assistantLine('reply')])
+    const session = Session.create(SessionId('tail-sync-stable'))
+    await hydrateOmpSession(session, path)
+    const before = session.snapshotEvents().length
+
+    const again = await hydrateOmpSession(session, path)
+
+    expect(again.appended).toBe(0)
+    expect(again.turns).toBe(1)
+    expect(session.snapshotEvents().length).toBe(before)
+  })
+
+  it('trusts a recorded hydration count when the session log carries fewer turns', async () => {
+    const path = await transcript([
+      userLine('one'),
+      assistantLine('one reply'),
+      userLine('two'),
+      assistantLine('two reply'),
+      userLine('three'),
+      assistantLine('three reply'),
+    ])
+    const session = Session.create(SessionId('tail-sync-recorded'))
+
+    const outcome = await hydrateOmpSession(session, path, 200, 2)
+
+    expect(outcome.turns).toBe(3)
+    expect(session.snapshotEvents().filter(event => event.type === 'user/message').map(event => event.data.content[0]?.text))
+      .toEqual(['three'])
   })
 })
 

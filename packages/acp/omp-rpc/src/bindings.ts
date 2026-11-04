@@ -20,6 +20,11 @@ export interface OmpBinding {
   readonly cwd: string
   /** OMP profile the attachment used, when one was named. */
   readonly profile?: string
+  /**
+   * Transcript turns a previous hydration already projected into the Harness
+   * session, so a later attachment appends only the tail OMP recorded since.
+   */
+  readonly hydratedTurns?: number
   /** ISO timestamp of the last successful attachment. */
   readonly updatedAt: string
 }
@@ -77,11 +82,16 @@ function bindingOf(value: unknown): OmpBinding | undefined {
   if (record.profile !== undefined && (typeof record.profile !== 'string' || record.profile.length === 0)) {
     return undefined
   }
+  if (record.hydratedTurns !== undefined
+    && (typeof record.hydratedTurns !== 'number' || !Number.isSafeInteger(record.hydratedTurns) || record.hydratedTurns < 0)) {
+    return undefined
+  }
   return {
     ompSessionId: record.ompSessionId,
     path: record.path,
     cwd: record.cwd,
     ...record.profile === undefined ? {} : { profile: record.profile },
+    ...record.hydratedTurns === undefined ? {} : { hydratedTurns: record.hydratedTurns },
     updatedAt: record.updatedAt,
   }
 }

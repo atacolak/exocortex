@@ -51,8 +51,19 @@ running on the machine is already mirrored into the sidebar, so the `/` palette
 holds only OMP's own native commands plus the session's Harness commands.
 
 Opening a transcript that another OMP pane still holds is refused. Hydration
-only runs on a blank Session and replays the newest 200 recorded surface events,
-so the chat shows real user/assistant/tool bubbles rather than one seed message.
+replays the recorded surface events as real user/assistant/tool bubbles rather
+than one seed message: a blank Session receives the newest 200 events, and an
+already-mirrored Session appends only the turns OMP recorded after it, numbered
+contiguously after the turns it holds, so a terminal that kept working while the
+Harness was detached catches up without duplicating bubbles. The newest recorded
+title is applied whenever it differs from the Session's current title.
+
+Attaching to an existing transcript never replays Harness history into OMP:
+every user message the Session already held when the socket or transcript was
+attached seeds the driver's delivered baseline, so only messages appended after
+attach become `prompt` or `steer` frames. A human prompt typed in an OMP terminal
+also lands as an ordinary user message in the Session, without the Harness
+echoing the same text back into the live run.
 
 ## `POST /api/exocortex/omp/open`
 
@@ -79,7 +90,7 @@ request, transcript, lease, and body-size failures.
 | `sessionDir` | `~/.omp/agent/sessions` | Transcript root OMP writes into. |
 | `ompSessionsRoot` | `~/.omp/agent/sessions` | Root `/omp-resume` and the open route resolve. |
 | `preset` | unset | Default `--agent` profile. |
-| `hostTools` | `cordis_inspect_list`, `cordis_inspect_query`, `plugin_manager` | Discoverable Harness tools published to OMP. |
+| `hostTools` | `cordis_inspect_list`, `cordis_inspect_query`, `plugin_manager`, `plugin_steward`, `exo_workbench`, … | Discoverable Harness tools published to OMP. |
 | `cwd` | unset | Fallback working directory when the Session header has none. |
 | `home` | process home | Home owning `~/.omp/agent/agents`. |
 | `autoAttach` | true | Attach OMP-preset Sessions on turn 1. |

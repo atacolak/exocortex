@@ -20,6 +20,7 @@ export const DEFAULT_OMP_HOST_TOOLS: readonly string[] = [
   'cordis_stop',
   'cordis_undefine',
   'plugin_manager',
+  'plugin_steward',
   'exo_workbench',
 ]
 

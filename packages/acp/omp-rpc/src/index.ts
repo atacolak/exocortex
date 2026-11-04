@@ -147,10 +147,6 @@ function attachmentSummary(attachment: OmpAttachment): string {
   return `attached OMP RPC v${String(version)} (${catalog})${transport}`
 }
 
-function sessionIsBlank(session: { snapshotEvents(): readonly { readonly type: string }[] }): boolean {
-  return !session.snapshotEvents().some(event => event.type === 'user/message' || event.type === 'assistant/message')
-}
-
 async function existingFile(path: string): Promise<boolean> {
   const info = await stat(path).catch(() => undefined)
   return info?.isFile() === true
@@ -242,7 +238,12 @@ export function apply(ctx: Context, config: OmpRpcConfig): void {
     }
   }
 
-  const rememberBinding = async (agent: Agent, attachment: OmpAttachment, profile?: string): Promise<void> => {
+  const rememberBinding = async (
+    agent: Agent,
+    attachment: OmpAttachment,
+    profile?: string,
+    hydratedTurns?: number,
+  ): Promise<void> => {
     if (attachment.session.path === undefined) {
       await forgetBinding(agent.id)
       return
@@ -253,6 +254,7 @@ export function apply(ctx: Context, config: OmpRpcConfig): void {
         path: attachment.session.path,
         cwd: attachment.cwd,
         ...profile === undefined ? {} : { profile },
+        ...hydratedTurns === undefined ? {} : { hydratedTurns },
         updatedAt: new Date().toISOString(),
       })
     } catch (error: unknown) {
@@ -328,14 +330,20 @@ export function apply(ctx: Context, config: OmpRpcConfig): void {
       cwd,
       ...profile === undefined ? {} : { preset: profile },
     }))
-    const hydrated = sessionIsBlank(agent.session)
-      ? await hydrateOmpSession(agent.session, transcript.path)
-      : 0
-    await rememberBinding(agent, attachment, profile)
+    const binding = await readBinding(agent.id)
+    const hydration = await hydrateOmpSession(
+      agent.session,
+      transcript.path,
+      200,
+      binding?.hydratedTurns ?? 0,
+      !attachment.session.streaming,
+    )
+    bridge.seedDelivered(agent.id)
+    await rememberBinding(agent, attachment, profile, hydration.turns)
     await pinOpenedSession(agent, profile)
     return {
       transcript,
-      hydrated,
+      hydrated: hydration.appended,
       summary: `resumed OMP session ${transcript.id.slice(0, 8)}${profile === undefined ? '' : ` as ${profile}`} (${attachmentSummary(attachment)})`,
     }
   }
@@ -538,13 +546,22 @@ export function apply(ctx: Context, config: OmpRpcConfig): void {
       cwd: live.cwd,
       ...profile === undefined ? {} : { preset: profile },
     }))
-    if (transcriptPath !== undefined && sessionIsBlank(agent.session)) {
-      await hydrateOmpSession(agent.session, transcriptPath).catch((error: unknown) => {
+    let hydratedTurns: number | undefined
+    if (transcriptPath !== undefined) {
+      try {
+        hydratedTurns = (await hydrateOmpSession(
+          agent.session,
+          transcriptPath,
+          200,
+          bound?.binding.hydratedTurns ?? 0,
+          !attachment.session.streaming,
+        )).turns
+      } catch (error: unknown) {
         warn(`cannot hydrate adopted session "${agent.id}"`, error)
-        return 0
-      })
+      }
+      bridge.seedDelivered(agent.id)
     }
-    await rememberBinding(agent, attachment, profile)
+    await rememberBinding(agent, attachment, profile, hydratedTurns)
     await attachWorkspace(agent.id, live.cwd, created)
   }
 

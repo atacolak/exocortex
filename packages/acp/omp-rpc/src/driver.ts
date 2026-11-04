@@ -107,8 +107,11 @@ export interface OmpPromptOutcome {
 export interface OmpUnsolicitedWake {
   /** The exact waking input text OMP received. */
   readonly text: string
-  /** Trigger-card attribution for that input. */
-  readonly source: OmpTriggerSource
+  /**
+   * Trigger-card attribution for that input; absent when a human typed the
+   * prompt in the terminal, which becomes an ordinary user message instead.
+   */
+  readonly source?: OmpTriggerSource
 }
 
 /** The trigger-card source a waking message maps onto, or undefined for real user prose. */
@@ -121,15 +124,6 @@ export function ompTriggerSource(text: string): OmpTriggerSource | undefined {
     return { kind: 'agent-message', form: 'relay' }
   }
   return undefined
-}
-
-/** Attribute an OMP-initiated run, defaulting to a generic background wake. */
-export function ompWakeSource(text: string): OmpTriggerSource {
-  return ompTriggerSource(text) ?? {
-    kind: 'omp-wake',
-    form: 'notice',
-    summary: boundContextSummary(firstMeaningfulLine(text)),
-  }
 }
 
 function firstMeaningfulLine(text: string): string {
@@ -440,6 +434,12 @@ export interface OmpAgentDriverOptions {
   /** Ask the harness to continue the turn after an intermediate cycle. */
   readonly onContinue?: () => void
   /**
+   * Whether OMP reports an in-flight run at attach time. The driver then opens
+   * the unsolicited prompt immediately instead of waiting for an `agent_start`
+   * frame it has already missed, so the running turn is adopted, not dropped.
+   */
+  readonly streaming?: boolean
+  /**
    * Admit one OMP-initiated run into the harness as a visible turn. Called at
    * most once per run, with the waking input and its trigger-card source.
    */
@@ -448,6 +448,7 @@ export interface OmpAgentDriverOptions {
 
 export class OmpAgentDriver {
   private sent: Set<string> | undefined
+  private readonly external = new Set<string>()
   private highWaterMark = 0
   private prompt: PromptState | undefined
   private startingPrompt = false
@@ -465,6 +466,7 @@ export class OmpAgentDriver {
     this.onContinue = options.onContinue
     this.onUnsolicitedWake = options.onUnsolicitedWake
     this.stopFrames = client.onFrame((frame) => { this.observe(frame) })
+    if (options.streaming === true) this.openUnsolicitedPrompt()
   }
 
   /** Whether OMP is currently serving a prompt that accepts live steering. */
@@ -479,7 +481,7 @@ export class OmpAgentDriver {
    * @param messages - the harness request history carrying the new messages.
    */
   async steerImmediate(messages: readonly RequestMessage[]): Promise<void> {
-    const turns = pureUserTurns(messages).filter(turn => !this.sent?.has(turn.key))
+    const turns = this.unclaimedTurns(pureUserTurns(messages).filter(turn => !this.sent?.has(turn.key)))
     if (turns.length === 0) return
     this.markSent(turns)
     const sent = this.sent as Set<string>
@@ -528,7 +530,11 @@ export class OmpAgentDriver {
       state.channel.close()
       return
     }
-    const state = this.prompt
+    let state = this.prompt
+    if (state === undefined && !this.startingPrompt && isCycleFrame(frame)) {
+      this.openUnsolicitedPrompt()
+      state = this.prompt
+    }
     if (state === undefined || state.closed) return
     if (state.unsolicited) this.noteWakingInput(state, frame)
     if (isCycleFrame(frame)) state.channel.push(frame as OmpAgentEvent)
@@ -558,7 +564,7 @@ export class OmpAgentDriver {
 
   private noteWakingInput(state: PromptState, frame: OmpRpcFrame): void {
     if (state.wake === undefined || state.wake.fired) return
-    if (frame.type === 'tool_execution_start') {
+    if (frame.type === 'tool_execution_start' || frame.type === 'message_update') {
       this.fireWake(state, BACKGROUND_WAKE)
       return
     }
@@ -573,7 +579,28 @@ export class OmpAgentDriver {
     if (role !== 'user' && role !== 'custom') return
     const text = messageText(message)
     if (text === undefined) return
-    this.fireWake(state, { text, source: ompWakeSource(text) })
+    const source = ompTriggerSource(text)
+    if (source === undefined && role === 'user') this.markExternalUserMessage(text)
+    this.fireWake(state, source === undefined ? { text } : { text, source })
+  }
+
+  /**
+   * Mark every user message the attached session already holds as delivered,
+   * so attaching to an existing OMP session never replays historical prompts.
+   * Only messages appended after the seed are forwarded as prompts or steers.
+   * @param messages - the session's existing conversation, in order.
+   */
+  seedDelivered(messages: readonly RequestMessage[]): void {
+    this.sent = new Set(pureUserTurns(messages).map(turn => turn.key))
+  }
+
+  /**
+   * Record a prompt a human typed in the terminal as already delivered to OMP,
+   * so the harness turn it wakes never sends the same text back.
+   * @param text - the exact user message text OMP received.
+   */
+  markExternalUserMessage(text: string): void {
+    this.external.add(text)
   }
 
   private fireWake(state: PromptState, wake: OmpUnsolicitedWake): void {
@@ -764,7 +791,7 @@ export class OmpAgentDriver {
   }
 
   private pendingTurns(messages: readonly RequestMessage[]): OmpUserTurn[] {
-    const all = pureUserTurns(messages)
+    const all = this.unclaimedTurns(pureUserTurns(messages))
     if (this.sent === undefined) {
       if (this.transcript === 'latest' && all.length > 1) {
         const latest = all.at(-1) as OmpUserTurn
@@ -774,6 +801,16 @@ export class OmpAgentDriver {
       return all
     }
     return all.filter(turn => !this.sent?.has(turn.key))
+  }
+
+  private unclaimedTurns(turns: readonly OmpUserTurn[]): OmpUserTurn[] {
+    if (this.external.size === 0) return [...turns]
+    const claimed = new Set<number>()
+    for (let index = turns.length - 1; index >= 0; index -= 1) {
+      const turn = turns[index] as OmpUserTurn
+      if (this.external.delete(turn.text)) claimed.add(index)
+    }
+    return turns.filter((_, index) => !claimed.has(index))
   }
 
   private markSent(turns: readonly OmpUserTurn[]): void {

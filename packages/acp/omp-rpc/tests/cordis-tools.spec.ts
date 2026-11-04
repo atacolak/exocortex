@@ -30,6 +30,7 @@ describe('DEFAULT_OMP_HOST_TOOLS', () => {
       'cordis_stop',
       'cordis_undefine',
       'plugin_manager',
+      'plugin_steward',
       'exo_workbench',
     ])
   })

@@ -3,6 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentStepStream } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-commands'
 import { createToolResultMessage, createUserMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
+import type { RequestMessage } from '@deepseek-ai/dsh-llm'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import type { TodoItem } from '@deepseek-ai/dsh-tool-todo'
@@ -56,10 +57,19 @@ export interface OmpAttachment {
   /** Launched process this bridge owns; absent when attaching to a live socket. */
   readonly launched?: LaunchedOmp
   readonly catalog: CatalogSyncOutcome
-  /** Session identity and transcript path OMP reports as active. */
-  readonly session: { readonly id: string; readonly path?: string }
+  /** Session identity, transcript path, and in-flight-run state OMP reports as active. */
+  readonly session: { readonly id: string; readonly path?: string; readonly streaming: boolean }
   /** Working directory the OMP process was launched in. */
   readonly cwd: string
+}
+
+/** Every user message one harness session currently holds, in log order. */
+function sessionUserMessages(session: Agent['session']): Extract<RequestMessage, { role: 'user' }>[] {
+  const messages: Extract<RequestMessage, { role: 'user' }>[] = []
+  for (const event of session.snapshotEvents()) {
+    if (event.type === 'user/message') messages.push(event.data)
+  }
+  return messages
 }
 
 async function activeSessionOf(client: OmpRpcClient): Promise<OmpAttachment['session']> {
@@ -73,6 +83,7 @@ async function activeSessionOf(client: OmpRpcClient): Promise<OmpAttachment['ses
   }
   return {
     id: record.sessionId,
+    streaming: record.isStreaming === true,
     ...typeof record.sessionFile === 'string' && record.sessionFile.length > 0
       ? { path: record.sessionFile }
       : {},
@@ -363,14 +374,21 @@ export class OmpBridge {
       const pendingTools: OmpToolEvent[] = []
       const driver = new OmpAgentDriver(client, {
         transcript: options.mode === 'fork' && options.forkPath === undefined ? 'replay' : 'latest',
+        streaming: session.streaming,
         resolveImages: refs => this.readImages(refs),
         onTool: (events) => { pendingTools.push(...events) },
         onContinue: () => { this.continueTurn(agent) },
         onUnsolicitedWake: ({ text, source }) => {
-          agent.followup(createUserMessage({ content: [{ type: 'text', text }], source }))
+          const content = [{ type: 'text' as const, text }]
+          agent.followup(source === undefined
+            ? createUserMessage({ content, source: { kind: 'user' } })
+            : createUserMessage({ content, source }))
         },
       })
       const disposeCommands = await this.registerCommands(agent, client)
+      if (options.socketPath !== undefined || options.resumePath !== undefined) {
+        driver.seedDelivered(sessionUserMessages(agent.session))
+      }
       const socket = connection
       const live: LiveAttachment = {
         agent,
@@ -404,6 +422,21 @@ export class OmpBridge {
       await launched?.close()
       throw error
     }
+  }
+
+  /**
+   * Mark every user message one attached session already holds as delivered,
+   * so re-opening or re-attaching never replays historical prompts into a live
+   * OMP session. Call after hydration appends the mirrored turns.
+   * @param id - harness session identity.
+   * @returns number of user messages now marked delivered, or undefined without an attachment.
+   */
+  seedDelivered(id: SessionId): number | undefined {
+    const live = this.attachments.get(id)
+    if (live === undefined) return undefined
+    const messages = sessionUserMessages(live.agent.session)
+    live.driver.seedDelivered(messages)
+    return messages.length
   }
 
   /**

@@ -6,10 +6,13 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import CommandRuntime from '@deepseek-ai/dsh-commands'
 import { Context } from '@deepseek-ai/cordis'
 import { createScope } from '@deepseek-ai/dsh-scope'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import SessionStore, { Session, SessionId } from '@deepseek-ai/dsh-session'
 import type { SubprocessHandle, SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import { afterEach, describe, expect, it, onTestFinished } from 'vitest'
 import { OmpBindings } from '../src/bindings.ts'
+import type { OmpAgentDriver } from '../src/driver.ts'
 import { ompSocketPath } from '../src/socket.ts'
 import {
   OmpBridge,
@@ -366,10 +369,12 @@ describe('OmpBridge live socket attachment', () => {
     return { ctx, bridge }
   }
 
-  async function published(ompSessionId = 'omp-live-1'): Promise<{ directory: string; server: FakeSessionServer }> {
+  async function published(ompSessionId = 'omp-live-1'): Promise<{ directory: string; server: FakeSessionServer; frames: Record<string, unknown>[] }> {
     const directory = await mkdtemp(join(tmpdir(), 'omp-socket-'))
     directories.add(directory)
+    const frames: Record<string, unknown>[] = []
     const server = await fakeSessionServer(ompSocketPath(directory, ompSessionId), (frame) => {
+      frames.push(frame)
       if (frame.type === 'get_state') return { sessionId: ompSessionId, sessionFile: `/transcripts/${ompSessionId}.jsonl` }
       if (frame.type === 'get_available_models') return { models: [] }
       if (frame.type === 'get_available_commands') return { commands: [] }
@@ -383,7 +388,7 @@ describe('OmpBridge live socket attachment', () => {
       cwd: '/work',
       startedAt: Date.now(),
     }))
-    return { directory, server }
+    return { directory, server, frames }
   }
 
   it('attaches a live session socket without launching a process', async () => {
@@ -441,5 +446,32 @@ describe('OmpBridge live socket attachment', () => {
     await expect(bridge.attach(second, options)).rejects.toThrow(/already attached to harness session "socket-c"/)
     expect(bridge.attached(first.id)).toBe(true)
     expect(bridge.attached(second.id)).toBe(false)
+  })
+
+  it('never replays a historical unanswered user message into an attached socket', async () => {
+    const { ctx, bridge } = await socketBridge()
+    const { directory, frames } = await published('omp-live-stale')
+    const agent = await scopedAgent(ctx, 'socket-stale')
+    const stale = createUserMessage({ content: [{ type: 'text', text: 'want Option B in Wave 2' }] })
+    agent.session.append('user/message', stale, { surfaceOp: 'append' })
+
+    await bridge.attach(agent, {
+      mode: 'attach',
+      sessionDir: directory,
+      socketPath: ompSocketPath(directory, 'omp-live-stale'),
+      sessionId: 'omp-live-stale',
+      cwd: '/work',
+    })
+
+    const live = (bridge as unknown as { attachments: Map<string, { driver: OmpAgentDriver }> }).attachments.get(agent.id)
+    expect(live).toBeDefined()
+    const chunks: StreamChunk[] = []
+    for await (const chunk of live?.driver.stream(
+      { provider: 'omp', model: 'omp', messages: [stale] },
+      new AbortController().signal,
+    ) ?? []) chunks.push(chunk)
+
+    expect(chunks).toEqual([{ type: 'finish', reason: { kind: 'stop' } }])
+    expect(frames.filter(frame => frame.type === 'prompt' || frame.type === 'steer')).toEqual([])
   })
 })

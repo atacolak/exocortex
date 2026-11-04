@@ -377,16 +377,22 @@ export async function readOmpTranscriptTitle(path: string): Promise<string | und
   return newest?.title
 }
 
+/** One turn a real OMP transcript recorded, carrying its absolute 1-based index. */
+export interface OmpTranscriptTurn {
+  /** Position of this turn in OMP's own conversation order. */
+  readonly turn: number
+  /** Structural, message, and tool events the turn recorded. */
+  readonly events: readonly OmpHydrationEvent[]
+}
+
 /**
- * Rebuild the harness session events a real OMP transcript recorded, so an
- * opened or resumed session shows the same user, assistant, and tool bubbles
- * instead of one summarized seed message. Turn and step boundaries make those
- * bubbles visible to projections that require them.
+ * Rebuild every turn a real OMP transcript recorded, each carrying the
+ * absolute 1-based index OMP's own conversation order assigns it, so a
+ * partially mirrored session can append only the turns it is missing.
  * @param path - transcript path.
- * @param limit - maximum events selected from the newest complete turns; the newest turn is always included.
- * @returns ordered events ready to append to a blank harness session.
+ * @returns ordered turns with their structural, message, and tool events.
  */
-export async function ompHydrationEvents(path: string, limit = 200): Promise<OmpHydrationEvent[]> {
+export async function ompTranscriptTurns(path: string): Promise<OmpTranscriptTurn[]> {
   const text = await readFile(path, 'utf8')
   const turns: OmpHydrationEvent[][] = []
   let current: OmpHydrationEvent[] | undefined
@@ -513,53 +519,139 @@ export async function ompHydrationEvents(path: string, limit = 200): Promise<Omp
     }
   }
   closeTurn()
+  return turns.map((events, index) => ({ turn: index + 1, events }))
+}
 
-  const selected: OmpHydrationEvent[][] = []
+function newestTurns(turns: readonly OmpTranscriptTurn[], limit: number): OmpTranscriptTurn[] {
+  const selected: OmpTranscriptTurn[] = []
   let total = 0
   for (let index = turns.length - 1; index >= 0; index -= 1) {
-    const events = turns[index] as OmpHydrationEvent[]
-    if (selected.length > 0 && total + events.length > limit) break
-    selected.unshift(events)
-    total += events.length
+    const entry = turns[index] as OmpTranscriptTurn
+    if (selected.length > 0 && total + entry.events.length > limit) break
+    selected.unshift(entry)
+    total += entry.events.length
   }
-  return selected.flatMap((events, index) => {
-    const turn = index + 1
-    return events.map((event): OmpHydrationEvent => {
-      switch (event.type) {
-        case 'turn/start':
-          return { type: 'turn/start', data: { ...event.data, turn } }
-        case 'turn/end':
-          return { type: 'turn/end', data: { ...event.data, turn } }
-        case 'step/start':
-          return { type: 'step/start', data: { ...event.data, turn } }
-        case 'step/end':
-          return { type: 'step/end', data: { ...event.data, turn } }
-        case 'assistant/message':
-          return { type: 'assistant/message', data: { ...event.data, turn } }
-        case 'tool/call':
-          return { type: 'tool/call', data: { ...event.data, turn } }
-        case 'tool/result':
-          return { type: 'tool/result', data: { ...event.data, turn } }
-        case 'user/message':
-          return event
-      }
-    })
+  return selected
+}
+
+function oldestTurns(turns: readonly OmpTranscriptTurn[], limit: number): OmpTranscriptTurn[] {
+  const selected: OmpTranscriptTurn[] = []
+  let total = 0
+  for (const entry of turns) {
+    if (selected.length > 0 && total + entry.events.length > limit) break
+    selected.push(entry)
+    total += entry.events.length
+  }
+  return selected
+}
+
+function renumberTurn(events: readonly OmpHydrationEvent[], turn: number): OmpHydrationEvent[] {
+  return events.map((event): OmpHydrationEvent => {
+    switch (event.type) {
+      case 'turn/start':
+        return { type: 'turn/start', data: { ...event.data, turn } }
+      case 'turn/end':
+        return { type: 'turn/end', data: { ...event.data, turn } }
+      case 'step/start':
+        return { type: 'step/start', data: { ...event.data, turn } }
+      case 'step/end':
+        return { type: 'step/end', data: { ...event.data, turn } }
+      case 'assistant/message':
+        return { type: 'assistant/message', data: { ...event.data, turn } }
+      case 'tool/call':
+        return { type: 'tool/call', data: { ...event.data, turn } }
+      case 'tool/result':
+        return { type: 'tool/result', data: { ...event.data, turn } }
+      case 'user/message':
+        return event
+    }
   })
 }
 
 /**
- * Append a transcript's recorded title and surface events to a blank harness session.
- * @param session - live session receiving the events.
+ * Rebuild the harness session events a real OMP transcript recorded, so an
+ * opened or resumed session shows the same user, assistant, and tool bubbles
+ * instead of one summarized seed message. Turn and step boundaries make those
+ * bubbles visible to projections that require them.
  * @param path - transcript path.
  * @param limit - maximum events selected from the newest complete turns; the newest turn is always included.
- * @returns number of appended events.
+ * @returns ordered events ready to append to a blank harness session.
  */
-export async function hydrateOmpSession(session: Session, path: string, limit = 200): Promise<number> {
-  const title = await readOmpTranscriptTitle(path)
-  const events = await ompHydrationEvents(path, limit)
-  if (title !== undefined) {
-    session.append('session/title', { title, messageSeqs: [], source: { kind: 'user' } })
+export async function ompHydrationEvents(path: string, limit = 200): Promise<OmpHydrationEvent[]> {
+  return newestTurns(await ompTranscriptTurns(path), limit)
+    .flatMap((entry, index) => renumberTurn(entry.events, index + 1))
+}
+
+/** Turns one harness session already projects, from its structural events. */
+export function projectedTurnCount(
+  session: { snapshotEvents(): readonly { readonly type: string; readonly data?: unknown }[] },
+): number {
+  let turns = 0
+  let users = 0
+  for (const event of session.snapshotEvents()) {
+    if (event.type === 'user/message') users += 1
+    if (event.type !== 'turn/start') continue
+    const turn = recordOf(event.data)?.turn
+    if (typeof turn === 'number' && turn > turns) turns = turn
   }
+  return turns > 0 ? turns : users
+}
+
+function projectedTitle(
+  session: { snapshotEvents(): readonly { readonly type: string; readonly data?: unknown }[] },
+): string | undefined {
+  let title: string | undefined
+  for (const event of session.snapshotEvents()) {
+    if (event.type !== 'session/title') continue
+    const value = recordOf(event.data)?.title
+    if (typeof value === 'string') title = value
+  }
+  return title
+}
+
+/** What one hydration pass appended to a harness session. */
+export interface OmpHydrationOutcome {
+  /** Events appended to the harness session. */
+  readonly appended: number
+  /** Contiguous turn count the session now holds through. */
+  readonly turns: number
+}
+
+/**
+ * Append a transcript's recorded title and surface events to a harness
+ * session, filling only the turns the session does not already project.
+ *
+ * A blank session receives the newest complete turns the event limit admits.
+ * An already-mirrored session receives the turns OMP recorded after it, in
+ * transcript order and renumbered contiguously after the turns it holds, so a
+ * live terminal run that kept working while the Harness was detached catches
+ * up without duplicating bubbles.
+ * @param session - live session receiving the events.
+ * @param path - transcript path.
+ * @param limit - maximum events selected by one pass; at least one turn is always included.
+ * @param hydratedTurns - turn count a previous hydration recorded, when the binding still has it.
+ * @param includeNewestTurn - false leaves the last transcript turn out because OMP is still streaming it.
+ * @returns the appended event count and the contiguous turn count the session now holds.
+ */
+export async function hydrateOmpSession(
+  session: Session,
+  path: string,
+  limit = 200,
+  hydratedTurns = 0,
+  includeNewestTurn = true,
+): Promise<OmpHydrationOutcome> {
+  const existing = Math.max(projectedTurnCount(session), hydratedTurns)
+  const pending = (await ompTranscriptTurns(path)).filter(entry => entry.turn > existing)
+  const selectable = includeNewestTurn ? pending : pending.slice(0, -1)
+  const selected = existing === 0 && hydratedTurns === 0
+    ? newestTurns(selectable, limit).map((entry, index) => renumberTurn(entry.events, index + 1))
+    : oldestTurns(selectable, limit).map((entry, index) => renumberTurn(entry.events, existing + index + 1))
+  const title = await readOmpTranscriptTitle(path)
+  const appendedTitle = title !== undefined && title !== projectedTitle(session) ? title : undefined
+  if (appendedTitle !== undefined) {
+    session.append('session/title', { title: appendedTitle, messageSeqs: [], source: { kind: 'user' } })
+  }
+  const events = selected.flat()
   for (const event of events) {
     switch (event.type) {
       case 'turn/start':
@@ -588,5 +680,5 @@ export async function hydrateOmpSession(session: Session, path: string, limit = 
         break
     }
   }
-  return events.length + (title === undefined ? 0 : 1)
+  return { appended: events.length + (appendedTitle === undefined ? 0 : 1), turns: existing + selected.length }
 }
