@@ -83,6 +83,7 @@ export * from './bindings.ts'
 export * from './bridge.ts'
 export * from './catalog.ts'
 export * from './client.ts'
+export * from './daemon.ts'
 export * from './cordis-tools.ts'
 export * from './driver.ts'
 export * from './host-tools.ts'
@@ -144,6 +145,14 @@ export interface OmpRpcConfig {
   readonly asker?: OmpUiAsker
   /** Receives non-interactive OMP extension UI surfaces. */
   readonly onSurface?: (request: OmpExtensionUiRequest) => void
+  /**
+   * Start sessions this Bridge creates behind a detached keeper and reach OMP
+   * over its published socket; defaults to true. Disable only where OMP is
+   * modeled by an in-memory subprocess provider without a real socket daemon.
+   */
+  readonly detachedDaemon?: boolean
+  /** Inactivity a detached keeper tolerates before ending OMP's request stream; defaults to one hour. */
+  readonly daemonIdleTimeoutMs?: number
 }
 
 export const Config: Schema<OmpRpcConfig> = Schema.object({
@@ -161,6 +170,8 @@ export const Config: Schema<OmpRpcConfig> = Schema.object({
   watchIntervalMs: Schema.natural(),
   asker: Schema.any(),
   onSurface: Schema.any(),
+  detachedDaemon: Schema.boolean(),
+  daemonIdleTimeoutMs: Schema.natural(),
 })
 
 function attachmentSummary(attachment: OmpAttachment): string {
@@ -217,6 +228,11 @@ export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
       }
     })()
   }
+  const runDirectory = resolveOmpRunDirectory(
+    config.watchRunDir === false ? undefined : config.watchRunDir,
+    config.home,
+  )
+  const ompPublicationDir = join(config.home ?? homedir(), '.omp', 'run')
   const bridge = new OmpBridge({
     ctx,
     subprocess: ctx.subprocess,
@@ -224,6 +240,10 @@ export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
     ...hcomExtension.length === 0 ? {} : { hcomExtension },
     ...config.asker === undefined ? {} : { asker: config.asker },
     ...config.onSurface === undefined ? {} : { onSurface: config.onSurface },
+    detachedDaemon: config.detachedDaemon ?? true,
+    ...config.daemonIdleTimeoutMs === undefined ? {} : { daemonIdleTimeoutMs: config.daemonIdleTimeoutMs },
+    runDirectory,
+    publicationDir: ompPublicationDir,
     onCompactionCursor: advanceOmpHydrationCursor,
   })
   ctx.effect(() => () => bridge.dispose(), 'omp-rpc bridge')
@@ -259,12 +279,7 @@ export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
   }
 
   const serializeOpen = createOmpSessionLock()
-  const runDirectory = resolveOmpRunDirectory(
-    config.watchRunDir === false ? undefined : config.watchRunDir,
-    config.home,
-  )
   const watchDir = config.watchRunDir === false ? undefined : runDirectory
-  const ompPublicationDir = join(config.home ?? homedir(), '.omp', 'run')
 
   const recordBranchFork = (sourceSessionId: SessionId, childSessionId: SessionId): void => {
     void (async () => {
