@@ -78,6 +78,7 @@ function mountBar(shell: SessionInputShell, over?: { running?: boolean; disabled
     useFileUploads: bindSnapshotSelector(createSnapshotStore({})),
     retryFileUpload: undefined,
     removeAttachment: () => {},
+    replaceAttachment: undefined,
     // Every id resolves so the bar's registry prune never drops a test image.
     resolveDraftAttachments: ids => ids.map(id => ({
       kind: 'image' as const, id,

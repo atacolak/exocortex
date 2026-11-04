@@ -309,6 +309,7 @@ function mount(
           useFileUploads={bindSnapshotSelector(createSnapshotStore({}))}
           retryFileUpload={undefined}
           removeAttachment={() => {}}
+          replaceAttachment={undefined}
           resolveDraftAttachments={() => []}
           toggleCommandMenu={vi.fn()}
           useBusyEnter={bindSnapshotSelector(createSnapshotStore<'queue' | 'steer'>('queue'))}

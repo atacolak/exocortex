@@ -7,7 +7,7 @@
  */
 import { describe, expect, it, vi } from 'vitest'
 import { createHeadlessEditor } from '@lexical/headless'
-import type { LexicalEditor } from 'lexical'
+import type { ElementNode, LexicalEditor } from 'lexical'
 import {
   $createLineBreakNode, $createParagraphNode, $createTextNode, $getRoot, $getSelection,
   $isElementNode, $isRangeSelection, $isTextNode, IS_CODE,
@@ -47,7 +47,7 @@ function type(editor: LexicalEditor, text: string): void {
 }
 
 function deltas(editor: LexicalEditor): { text: string; format: number; pill: boolean }[] {
-  return editor.getEditorState().read(() => $getRoot().getFirstChild()!.getChildren().map(child => ({
+  return editor.getEditorState().read(() => $getRoot().getFirstChild<ElementNode>()!.getChildren().map(child => ({
     text: child.getTextContent(),
     format: $isTextNode(child) ? child.getFormat() : 0,
     pill: $isInlineCodeNode(child),
@@ -77,13 +77,13 @@ describe('inline backtick pair', () => {
     seed(editor, '', 0)
     type(editor, '`x`')
     editor.update(() => {
-      const pill = $getRoot().getFirstChild()!.getFirstChild()
+      const pill = $getRoot().getFirstChild<ElementNode>()!.getFirstChild()
       if (!$isInlineCodeNode(pill)) throw new Error('expected a pill')
       pill.select(0, 0)
     }, { discrete: true })
     await vi.waitFor(() => {
       const state = editor.getEditorState().read(() => {
-        const pill = $getRoot().getFirstChild()!.getFirstChild()
+        const pill = $getRoot().getFirstChild<ElementNode>()!.getFirstChild()
         return {
           revealed: $isInlineCodeNode(pill) && pill.isRevealed(),
           text: pill?.getTextContent(),
@@ -92,14 +92,14 @@ describe('inline backtick pair', () => {
       expect(state).toEqual({ revealed: true, text: '`x`' })
     })
     editor.update(() => {
-      const paragraph = $getRoot().getFirstChild()!
+      const paragraph = $getRoot().getFirstChild<ElementNode>()!
       const pill = paragraph.getLastChild()
       if (!$isInlineCodeNode(pill)) throw new Error('expected a pill')
       pill.selectEnd()
     }, { discrete: true })
     await vi.waitFor(() => {
       const state = editor.getEditorState().read(() => {
-        const pill = $getRoot().getFirstChild()!.getFirstChild()
+        const pill = $getRoot().getFirstChild<ElementNode>()!.getFirstChild()
         return {
           revealed: $isInlineCodeNode(pill) && pill.isRevealed(),
           text: pill?.getTextContent(),

@@ -190,6 +190,7 @@
   padding: 0;
   border: 0;
   border-radius: 999px;
+  corner-shape: round;
   background: color-mix(in srgb, var(--dsw-alias-surface-overlay, #ffffff) 8%, transparent);
   color: var(--dsw-alias-label-secondary);
   cursor: pointer;
@@ -202,13 +203,21 @@
   position: absolute;
   inset: -6px;
   border-radius: 999px;
+  corner-shape: round;
 }
 
-.expand:hover,
 .expand:focus-visible {
   opacity: 1;
   background: var(--dsw-alias-interactive-bg-hover);
   outline: none;
+}
+
+@media (hover: hover) {
+  .expand:hover {
+    opacity: 1;
+    background: var(--dsw-alias-interactive-bg-hover);
+    outline: none;
+  }
 }
 
 /* The button overlays the first lines: reserve its column while it is shown

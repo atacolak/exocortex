@@ -207,14 +207,19 @@
   cursor: pointer;
 }
 
-.crumbSeg:hover .crumbEdit,
 .crumbSeg:focus-within .crumbEdit {
   display: inline-grid;
 }
 
-.crumbEdit:hover {
-  background: var(--dsw-alias-interactive-bg-hover);
-  color: var(--dsw-alias-label-primary);
+@media (hover: hover) {
+  .crumbSeg:hover .crumbEdit {
+    display: inline-grid;
+  }
+
+  .crumbEdit:hover {
+    background: var(--dsw-alias-interactive-bg-hover);
+    color: var(--dsw-alias-label-primary);
+  }
 }
 
 .crumbTitleInput {
@@ -225,10 +230,12 @@
   max-width: 100%;
   margin: -3px -8px;
   padding: 2px 8px;
-  border: 1px solid var(--dsw-alias-border-l2);
+  border: 0.5px solid var(--dsw-alias-border-l2);
   border-radius: var(--dsw-radius-md);
   outline: none;
   background: var(--dsw-specific-input-major);
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
   font-size: 14px;
   font-weight: 500;
   line-height: 20px;

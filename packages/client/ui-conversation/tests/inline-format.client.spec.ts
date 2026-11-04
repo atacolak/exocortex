@@ -7,7 +7,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import { createHeadlessEditor } from '@lexical/headless'
-import type { LexicalEditor } from 'lexical'
+import type { ElementNode, LexicalEditor } from 'lexical'
 import {
   $createParagraphNode, $createTextNode, $getRoot, $getSelection, $isRangeSelection, $isTextNode,
   IS_BOLD, IS_ITALIC,
@@ -36,7 +36,7 @@ function seed(editor: LexicalEditor, text: string, caret: number): void {
 
 /** The paragraph's text runs with their format bits. */
 function runs(editor: LexicalEditor): { text: string; format: number }[] {
-  return editor.getEditorState().read(() => $getRoot().getFirstChild()!.getChildren().map(child => ({
+  return editor.getEditorState().read(() => $getRoot().getFirstChild<ElementNode>()!.getChildren().map(child => ({
     text: child.getTextContent(),
     format: $isTextNode(child) ? child.getFormat() : 0,
   })))
