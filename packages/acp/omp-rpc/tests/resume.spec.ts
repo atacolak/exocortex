@@ -4,7 +4,7 @@ import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
-import { SESSION_FORMAT_VERSION, Session, SessionId } from '@deepseek-ai/dsh-session'
+import { SESSION_FORMAT_VERSION, Session, SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { isCompactCheckpointSource } from '@deepseek-ai/dsh-compaction/checkpoint'
 import { afterEach, describe, expect, it, onTestFinished } from 'vitest'
 import {
@@ -62,15 +62,19 @@ function turnUserTexts(turns: readonly OmpTranscriptTurn[]): (string | undefined
     .at(0))
 }
 
+function isSessionUserMessage(event: SessionEvent): event is SessionEvent<'user/message'> {
+  return event.type === 'user/message' && !isCompactCheckpointSource(event.data.source)
+}
+
 function sessionUserTexts(session: Session): (string | undefined)[] {
   return session.snapshotEvents()
-    .filter(event => event.type === 'user/message' && !isCompactCheckpointSource(event.data.source))
+    .filter(isSessionUserMessage)
     .map(event => firstText(event.data.content))
 }
 
 function sessionUserTimes(session: Session): number[] {
   return session.snapshotEvents()
-    .filter(event => event.type === 'user/message' && !isCompactCheckpointSource(event.data.source))
+    .filter(isSessionUserMessage)
     .map(event => event.time)
 }
 

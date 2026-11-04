@@ -11,7 +11,7 @@ import type {
   ContentBlock, FinishReason, GenerateOptions, Message, RequestMessage, TokenUsage, ToolSchema,
 } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { CHECKPOINT_PREAMBLE, SUMMARY_OPEN_TAG } from '@deepseek-ai/dsh-compaction/checkpoint'
+import { SUMMARY_OPEN_TAG } from '@deepseek-ai/dsh-compaction/checkpoint'
 
 interface SummaryConfig {
   readonly summarizationProvider: string

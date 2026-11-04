@@ -14,7 +14,7 @@ import { afterEach, describe, expect, it, onTestFinished } from 'vitest'
 import { bindingFactsOf, OmpBindings, rememberOmpBinding } from '../src/bindings.ts'
 import { OmpBridge } from '../src/bridge.ts'
 import { openOmpTranscript, planOmpWake } from '../src/open.ts'
-import { hydrateOmpSession } from '../src/resume.ts'
+import { hydrateOmpSession, type OmpHydrationCursor, type OmpHydrationOutcome } from '../src/resume.ts'
 import {
   clearOmpSessionArtifacts,
   ompSocketPath,
@@ -90,6 +90,14 @@ async function transcriptOf(lines: readonly unknown[]): Promise<string> {
   const path = join(directory, 'transcript.jsonl')
   await writeFile(path, `${lines.map(line => JSON.stringify(line)).join('\n')}\n`)
   return path
+}
+
+function cursorOf(outcome: OmpHydrationOutcome): OmpHydrationCursor {
+  return {
+    hydratedTurns: outcome.hydratedTurns,
+    ...outcome.hydratedLeafEntryId === undefined ? {} : { hydratedLeafEntryId: outcome.hydratedLeafEntryId },
+    ...outcome.hydratedByteOffset === undefined ? {} : { hydratedByteOffset: outcome.hydratedByteOffset },
+  }
 }
 
 interface BridgeFixture {
@@ -418,18 +426,10 @@ describe('idle OMP unload', () => {
     await appendLine(transcriptPath, compactionLine({
       id: 101, parent: entryId(2), turn: 1, tokensBefore: 120_000, tokensAfter: 18_000, method: 'idle-maintenance',
     }))
-    const woke = await hydrateOmpSession(agent.session, transcriptPath, Number.POSITIVE_INFINITY, {
-      hydratedTurns: first.hydratedTurns,
-      hydratedLeafEntryId: first.hydratedLeafEntryId,
-      hydratedByteOffset: first.hydratedByteOffset,
-    })
+    const woke = await hydrateOmpSession(agent.session, transcriptPath, Number.POSITIVE_INFINITY, cursorOf(first))
     expect(woke.appended).toBeGreaterThan(0)
     expect(summaries(agent.session).map(event => event.data.method)).toEqual(['idle-maintenance'])
-    const settled = await hydrateOmpSession(agent.session, transcriptPath, Number.POSITIVE_INFINITY, {
-      hydratedTurns: woke.hydratedTurns,
-      hydratedLeafEntryId: woke.hydratedLeafEntryId,
-      hydratedByteOffset: woke.hydratedByteOffset,
-    })
+    const settled = await hydrateOmpSession(agent.session, transcriptPath, Number.POSITIVE_INFINITY, cursorOf(woke))
     expect(settled.appended).toBe(0)
     expect(summaries(agent.session)).toHaveLength(1)
 
@@ -497,7 +497,7 @@ describe('stale OMP publication cleanup', () => {
     await writeFile(ompSocketPath(directory, sessionId), 'not-a-socket')
     await writeFile(join(directory, `${sessionId}.sock.bind.lock`), 'locked')
 
-    const state = await probeOmpSocketSession(directory, sessionId, 200)
+    const state = await probeOmpSocketSession(directory, sessionId)
     expect(state.kind).toBe('hung')
     const plan = planOmpWake(state)
     expect(plan.kind).toBe('hung')
