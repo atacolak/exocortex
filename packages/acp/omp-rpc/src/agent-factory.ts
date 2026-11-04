@@ -322,6 +322,7 @@ export class OmpSessionAgent implements Agent {
   readonly model: AgentModel
   readonly inbox: NativeInbox
   readonly ctx: Context
+  /** Per-agent scope carrying the services this agent's turns run against. */
   readonly scope: ReturnType<typeof createScope>
   private readonly dispatch: ReturnType<typeof agentEvents>
   private phase: Phase | undefined
@@ -431,6 +432,12 @@ export class OmpSessionAgent implements Agent {
       }
     }
     this.inbox.append('next-step', message)
+  }
+
+  forgetOmpDriver(driver: OmpAgentDriver): void {
+    if (this.driver !== driver) return
+    this.driver = undefined
+    this.attachPromise = undefined
   }
 
   projectExternalWake(wake: OmpExternalWake): void {

@@ -202,6 +202,46 @@ function mergeBindingCursor(existing: OmpBinding | undefined, next: OmpBinding):
 }
 
 /**
+ * Facts one live attachment contributes to a Harness session's binding.
+ * @param request - attachment session identity, transcript path, cwd, and preset profile.
+ * @returns the binding facts, or nothing when the attachment reported no transcript path.
+ */
+export function bindingFactsOf(request: {
+  readonly ompSessionId: string
+  readonly path: string | undefined
+  readonly cwd: string
+  readonly profile?: string
+}): OmpBinding | undefined {
+  if (request.path === undefined) return undefined
+  return {
+    ompSessionId: request.ompSessionId,
+    path: request.path,
+    cwd: request.cwd,
+    ...request.profile === undefined ? {} : { profile: request.profile },
+    updatedAt: new Date().toISOString(),
+  }
+}
+
+/**
+ * Persist what one attachment reported without destroying a binding it cannot describe.
+ *
+ * A resumed process occasionally reports no transcript path. The existing
+ * binding then still names the right transcript and hydration cursor, and
+ * dropping either replays every turn on the next open, so absent facts leave
+ * the entry untouched.
+ * @param request - binding store, Harness session identity, and facts to persist.
+ * @returns the binding key that was written, or undefined when nothing was.
+ */
+export async function rememberOmpBinding(request: {
+  readonly bindings: OmpBindings
+  readonly id: SessionId
+  readonly facts: OmpBinding | undefined
+}): Promise<SessionId | undefined> {
+  if (request.facts === undefined) return undefined
+  return await request.bindings.set(request.id, request.facts)
+}
+
+/**
  * Read and write the Harness-session to OMP-transcript map in one JSON file.
  *
  * Writes are serialized and replace the file atomically, so a crash leaves the

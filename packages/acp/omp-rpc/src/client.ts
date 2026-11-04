@@ -47,19 +47,43 @@ function decodeChunkData(data: unknown): Buffer {
 export class OmpRpcClient {
   private readonly pending = new Map<string, PendingRequest>()
   private readonly listeners = new Set<(frame: OmpRpcFrame) => void>()
+  private readonly closeListeners = new Set<() => void>()
   private readonly output: OmpRpcIo['output']
   private readonly handshake = Promise.withResolvers<OmpRpcReadyFrame>()
   private buffered = ''
   private chunks: PendingChunks | undefined
   private protocolVersion = 1
   private readyResolved = false
+  private terminated = false
 
   constructor(io: OmpRpcIo) {
     this.output = io.output
     io.input.setEncoding('utf8')
     io.input.on('data', (chunk: string) => { this.consume(chunk) })
-    io.input.on('end', () => { this.abandon('OMP RPC connection closed') })
-    io.input.on('close', () => { this.abandon('OMP RPC connection closed') })
+    io.input.on('end', () => { this.terminate() })
+    io.input.on('close', () => { this.terminate() })
+  }
+
+  /** Whether the byte path already closed, so no later command can be served. */
+  get closed(): boolean {
+    return this.terminated
+  }
+
+  /**
+   * Observe the byte path closing, once.
+   *
+   * A process that unloads idle or exits abnormally writes no terminal frame,
+   * so the close is the only evidence its session is gone.
+   * @param listener - called once when the path closes; registering on an already closed path calls it immediately.
+   * @returns a function that stops delivery to this listener.
+   */
+  onClose(listener: () => void): () => void {
+    if (this.terminated) {
+      listener()
+      return () => {}
+    }
+    this.closeListeners.add(listener)
+    return () => { this.closeListeners.delete(listener) }
   }
 
   /** The ready frame this process announced, once it arrives. */
@@ -119,6 +143,16 @@ export class OmpRpcClient {
     const pending = [...this.pending.values()]
     this.pending.clear()
     for (const request of pending) request.reject(new Error(message))
+  }
+
+  /** Reject every outstanding command, then tell close observers exactly once. */
+  private terminate(): void {
+    if (this.terminated) return
+    this.terminated = true
+    this.abandon('OMP RPC connection closed')
+    const listeners = [...this.closeListeners]
+    this.closeListeners.clear()
+    for (const listener of listeners) listener()
   }
 
   private write(frame: object): void {

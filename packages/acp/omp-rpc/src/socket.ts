@@ -1,4 +1,4 @@
-import { lstat, readdir, readFile } from 'node:fs/promises'
+import { readdir, readFile, rm, stat } from 'node:fs/promises'
 import { connect } from 'node:net'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -64,7 +64,15 @@ export function ompSocketPath(runDir: string, sessionId: string): string {
   return join(runDir, `${sessionId}.sock`)
 }
 
-function processAlive(pid: number): boolean {
+/**
+ * Whether an OMP process the run directory recorded still exists.
+ *
+ * `process.kill(pid, 0)` proves existence without signalling, and `EPERM`
+ * means the process exists under another user, so only `ESRCH` reads as dead.
+ * @param pid - process id recorded in a session sidecar.
+ * @returns true while the process is alive.
+ */
+export function ompProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0)
     return true
@@ -80,6 +88,91 @@ function recordOf(value: unknown): Record<string, unknown> | undefined {
 }
 
 /**
+ * How one published OMP session stands right now.
+ *
+ * OMP deletes its `<sessionId>.json` sidecar first when it unloads cleanly, so
+ * three states must stay apart: nothing published, a publication whose process
+ * died without running its exit hook, and a live publication serving a socket.
+ */
+export type OmpSocketState =
+  | { readonly kind: 'live'; readonly session: OmpSocketSession }
+  /** No sidecar: a clean unload, an offline session, or a publication already collected. */
+  | { readonly kind: 'absent' }
+  /** Sidecar recorded a pid that no longer exists; the artifacts are stale. */
+  | { readonly kind: 'stale'; readonly pid: number }
+  /** Sidecar recorded a live pid that publishes no attachable socket. */
+  | { readonly kind: 'hung'; readonly pid: number; readonly reason: string }
+
+/** Every artifact OMP publishes for one session, in the order it removes them. */
+function ompSessionArtifacts(runDir: string, sessionId: string): string[] {
+  return [
+    join(runDir, `${sessionId}.json`),
+    ompSocketPath(runDir, sessionId),
+    join(runDir, `${sessionId}.sock.bind.lock`),
+  ]
+}
+
+/**
+ * Read one session's publication state without mutating the run directory.
+ *
+ * The sidecar alone is not attachment evidence: a process killed with `SIGKILL`
+ * skips the exit hook that removes the socket, the bind lock, and the sidecar,
+ * so the recorded pid decides whether the artifacts are stale.
+ * @param runDir - OMP run directory.
+ * @param sessionId - OMP session identity to inspect.
+ * @returns the publication state that decides attach, resume, or refusal.
+ */
+export async function probeOmpSocketSession(runDir: string, sessionId: string): Promise<OmpSocketState> {
+  const sidecarPath = join(runDir, `${sessionId}.json`)
+  const raw = await readFile(sidecarPath, 'utf8').catch(() => undefined)
+  if (raw === undefined) return { kind: 'absent' }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return { kind: 'absent' }
+  }
+  const record = recordOf(parsed)
+  if (record === undefined) return { kind: 'absent' }
+  const pid = record.pid
+  const cwd = record.cwd
+  if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) return { kind: 'absent' }
+  if (typeof cwd !== 'string' || cwd.length === 0) return { kind: 'absent' }
+  if (record.sessionId !== sessionId) return { kind: 'absent' }
+  if (!ompProcessAlive(pid)) return { kind: 'stale', pid }
+  const socketPath = ompSocketPath(runDir, sessionId)
+  const info = await stat(socketPath).catch(() => undefined)
+  if (info?.isSocket() !== true) {
+    return { kind: 'hung', pid, reason: `process ${String(pid)} publishes no attach socket at ${socketPath}` }
+  }
+  return {
+    kind: 'live',
+    session: {
+      sessionId,
+      pid,
+      cwd,
+      socketPath,
+      sidecarPath,
+      ...typeof record.sessionFile !== 'string' ? {} : { sessionFile: record.sessionFile },
+      ...typeof record.agent !== 'string' ? {} : { agent: record.agent },
+    },
+  }
+}
+
+/**
+ * Remove the artifacts a dead OMP process left behind.
+ *
+ * OMP unlinks the sidecar first, then the socket, then the bind lock; keeping
+ * that order means a partially cleaned publication never looks attachable.
+ * Only a process already proven dead may reach this call.
+ * @param runDir - OMP run directory.
+ * @param sessionId - OMP session whose artifacts are stale.
+ */
+export async function clearOmpSessionArtifacts(runDir: string, sessionId: string): Promise<void> {
+  for (const path of ompSessionArtifacts(runDir, sessionId)) await rm(path, { force: true })
+}
+
+/**
  * Read one session's discovery sidecar and prove its socket is still live.
  *
  * A process that exits without running its exit hook leaves the socket and
@@ -90,35 +183,8 @@ function recordOf(value: unknown): Record<string, unknown> | undefined {
  * @returns the live publication, or undefined when nothing is attachable.
  */
 export async function readOmpSocketSession(runDir: string, sessionId: string): Promise<OmpSocketSession | undefined> {
-  const sidecarPath = join(runDir, `${sessionId}.json`)
-  const raw = await readFile(sidecarPath, 'utf8').catch(() => undefined)
-  if (raw === undefined) return undefined
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(raw)
-  } catch {
-    return undefined
-  }
-  const record = recordOf(parsed)
-  if (record === undefined) return undefined
-  const pid = record.pid
-  const cwd = record.cwd
-  if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) return undefined
-  if (typeof cwd !== 'string' || cwd.length === 0) return undefined
-  if (record.sessionId !== sessionId) return undefined
-  if (!processAlive(pid)) return undefined
-  const socketPath = ompSocketPath(runDir, sessionId)
-  const info = await lstat(socketPath).catch(() => undefined)
-  if (info?.isSocket() !== true) return undefined
-  return {
-    sessionId,
-    pid,
-    cwd,
-    socketPath,
-    sidecarPath,
-    ...typeof record.sessionFile !== 'string' ? {} : { sessionFile: record.sessionFile },
-    ...typeof record.agent !== 'string' ? {} : { agent: record.agent },
-  }
+  const state = await probeOmpSocketSession(runDir, sessionId)
+  return state.kind === 'live' ? state.session : undefined
 }
 
 /**

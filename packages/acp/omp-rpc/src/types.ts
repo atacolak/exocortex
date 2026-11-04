@@ -243,7 +243,7 @@ export interface OmpWakeSource {
 
 /** Durable attribution for a settled OMP background task delivered as a notice. */
 export interface OmpSubagentSettledSource {
-  readonly kind: 'subagent-settled'
+  readonly kind: 'omp-subagent-settled'
   /** A one-line account shown without expanding the trigger row (`notice` context form). */
   readonly form: 'notice'
   /** One-line account of how the background task ended. */
@@ -252,7 +252,7 @@ export interface OmpSubagentSettledSource {
 
 /** Durable attribution for one OMP peer message relayed into the run. */
 export interface OmpAgentMessageSource {
-  readonly kind: 'agent-message'
+  readonly kind: 'omp-agent-message'
   /** Content another Agent addressed to this one (`relay` context form). */
   readonly form: 'relay'
 }
@@ -263,7 +263,7 @@ export type OmpTriggerSource = OmpSubagentSettledSource | OmpAgentMessageSource 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
     'omp-wake': OmpWakeSource
-    'subagent-settled': OmpSubagentSettledSource
-    'agent-message': OmpAgentMessageSource
+    'omp-subagent-settled': OmpSubagentSettledSource
+    'omp-agent-message': OmpAgentMessageSource
   }
 }

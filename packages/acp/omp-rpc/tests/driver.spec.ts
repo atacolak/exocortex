@@ -524,7 +524,7 @@ describe('OmpAgentDriver unsolicited wakes', () => {
     expect(wakes).toEqual([{
       text: notice,
       source: {
-        kind: 'subagent-settled',
+        kind: 'omp-subagent-settled',
         form: 'notice',
         summary: 'Background job abc has completed. Resume your work.',
       },
@@ -543,7 +543,7 @@ describe('OmpAgentDriver unsolicited wakes', () => {
 
     expect(wakes).toEqual([{
       text: mail,
-      source: { kind: 'agent-message', form: 'relay' },
+      source: { kind: 'omp-agent-message', form: 'relay' },
     }])
     driver.close()
   })
@@ -600,7 +600,7 @@ describe('OmpAgentDriver unsolicited wakes', () => {
     const chunks: StreamChunk[] = []
     for await (const chunk of driver.stream(request([]), new AbortController().signal)) chunks.push(chunk)
 
-    expect(wakes).toEqual([{ text: mail, source: { kind: 'agent-message', form: 'relay' } }])
+    expect(wakes).toEqual([{ text: mail, source: { kind: 'omp-agent-message', form: 'relay' } }])
     expect(chunks).toEqual([
       { type: 'block-start', index: 0, blockType: 'text' },
       { type: 'text-delta', index: 0, text: 'ack' },

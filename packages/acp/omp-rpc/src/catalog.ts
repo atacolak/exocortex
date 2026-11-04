@@ -15,6 +15,7 @@ export interface OmpModelSelection {
   readonly reasoningEffort?: string
 }
 
+/** Thinking levels OMP accepts for a model selection, in increasing depth. */
 export const OMP_THINKING_LEVELS: Record<string, true> = {
   off: true, minimal: true, low: true, medium: true, high: true, xhigh: true, max: true,
 }

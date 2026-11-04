@@ -4717,6 +4717,26 @@ describe('ChatView', () => {
     expect(view.getByRole('heading', { name: '压缩摘要' })).toBeTruthy()
   })
 
+  it('renders a manual compaction boundary with its method and token reduction', () => {
+    const h = makeHarness({
+      nodes: [command({
+        commandId: 'cmd-compact' as CommandNode['commandId'],
+        name: 'compact',
+        outcome: { kind: 'success', text: 'Compacted 16 history items.', sourceEventSeq: 7 },
+      }), compaction({
+        method: 'snapcompact',
+        shadowedTokenCount: 182_000,
+        tokensAfter: 24_000,
+      })],
+    })
+    const view = render(<h.ChatView {...h.props} />)
+    const row = view.getByRole('button', { name: /compact/ })
+    expect(row.getAttribute('data-compaction-method')).toBe('snapcompact')
+    expect(view.getByText('182K → 24K（-158K）')).toBeTruthy()
+    fireEvent.click(row)
+    expect(view.getByRole('heading', { name: '压缩摘要' })).toBeTruthy()
+  })
+
   it('keeps /compact no-history and error settlements on the generic command row', () => {
     const noHistory = makeHarness({
       nodes: [command({

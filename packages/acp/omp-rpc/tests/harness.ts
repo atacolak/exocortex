@@ -62,6 +62,8 @@ export interface FakeSessionServer {
   readonly connections: number
   /** Sockets currently attached. */
   readonly open: number
+  /** Push one unsolicited frame to every attached client, as a lifecycle event does. */
+  readonly broadcast: (frame: Record<string, unknown>) => void
   /** Stop listening and destroy every client. */
   readonly close: () => Promise<void>
 }
@@ -113,6 +115,9 @@ export async function fakeSessionServer(
     server,
     get connections() { return connections },
     get open() { return sockets.size },
+    broadcast: (frame) => {
+      for (const socket of sockets) socket.write(`${JSON.stringify(frame)}\n`)
+    },
     close: async () => {
       for (const socket of sockets) socket.destroy()
       const closed = Promise.withResolvers<undefined>()

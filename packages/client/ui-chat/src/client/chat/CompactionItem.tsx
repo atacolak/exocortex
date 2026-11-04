@@ -11,6 +11,7 @@ import {
 import type { ChatViewSlotProps } from '../contract/slots.ts'
 import { markdownLabels } from '../markdown-labels.ts'
 import type { CompactionSummaryNode } from '../contract/snapshot.ts'
+import { formatTokens } from './token-format.ts'
 import css from './MessageItem.module.css'
 
 interface CompactionItemProps {
@@ -38,13 +39,28 @@ export const CompactionItem = memo(function CompactionItem({
   const labels = useMemo(() => markdownLabels(t), [t])
   const expandable = node.summary !== null
   const open = expandable && expanded
-  const summary = node.shadowedItemCount !== null && node.shadowedTokenCount !== null
+  const method = node.method ?? null
+  const tokensAfter = node.tokensAfter ?? null
+  const reduction = node.shadowedTokenCount !== null && tokensAfter !== null
+    ? node.shadowedTokenCount > tokensAfter
+      ? t('message.compaction.reductionSaved', {
+        before: formatTokens(node.shadowedTokenCount, t),
+        after: formatTokens(tokensAfter, t),
+        saved: formatTokens(node.shadowedTokenCount - tokensAfter, t),
+      })
+      : t('message.compaction.reduction', {
+        before: formatTokens(node.shadowedTokenCount, t),
+        after: formatTokens(tokensAfter, t),
+      })
+    : null
+  const counts = node.shadowedItemCount !== null && node.shadowedTokenCount !== null
     ? t('message.compaction.completed', {
       items: node.shadowedItemCount,
       tokens: node.shadowedTokenCount,
     })
-    : fallbackSummary
-      ?? (expandable ? t('message.compaction.expand') : t('message.compaction.unavailable'))
+    : null
+  const summary = reduction ?? counts ?? fallbackSummary
+    ?? (expandable ? t('message.compaction.expand') : t('message.compaction.unavailable'))
   return (
     <div className={css.compactionRow}>
       <button
@@ -52,6 +68,7 @@ export const CompactionItem = memo(function CompactionItem({
         className={css.compactionButton}
         disabled={!expandable}
         aria-expanded={expandable ? open : undefined}
+        data-compaction-method={method ?? undefined}
         onClick={() => { setExpanded(value => !value) }}
       >
         <span className={css.compactionLeading} aria-hidden>
@@ -66,6 +83,7 @@ export const CompactionItem = memo(function CompactionItem({
           </span>
         </span>
         <span className={css.compactionTitle}>{title ?? t('message.compaction')}</span>
+        {method !== null && <span className={css.compactionMethod}>{method}</span>}
         <span className={css.compactionSep} aria-hidden />
         <span className={css.compactionSummary}>{summary}</span>
       </button>
