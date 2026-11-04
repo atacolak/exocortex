@@ -191,6 +191,7 @@ function mount(
   const inputActions = wiring.actions
   const stop = vi.fn()
   const open = vi.fn()
+  const renameSession = vi.fn<ConversationSessionHeaderSlotProps['renameSession']>(async () => {})
   const slotCalls: string[] = []
   const lineageOwners: ConversationHeaderLineageOwnerProps[] = []
   const viewTabs = options.viewTabs ?? [
@@ -248,6 +249,7 @@ function mount(
           actions={store.actions}
           renderSlot={renderSlot as never}
           open={open}
+          renameSession={renameSession}
           selectView={(view) => { store.actions.setView(view) }}
           t={t}
         />
@@ -400,6 +402,7 @@ function mount(
   const view = render(<ConversationMainPanel {...props} />)
   return {
     view, store, wiring, sink, retargetWorkspace, session, conversation, slotCalls, lineageOwners, seatOwners, open,
+    renameSession,
     pickerOwner: () => pickerOwner,
     setPinned,
     actionsOwner: () => {
@@ -505,6 +508,55 @@ describe('ConversationRoot resident composer', () => {
     expect(b.view.queryByRole('button', { name: 'Child' })).toBeNull()
     expect(b.view.getByText('Child').tagName).toBe('SPAN')
     expect(b.view.queryByText('Root')).toBeNull()
+  })
+
+  it('renames the current Session inline from the title, saving on Enter', async () => {
+    const b = mount(sessionSnapshotOf())
+    fireEvent.click(b.view.getByText('Child'))
+    const input = b.view.getByRole('textbox', { name: '重命名会话' }) as HTMLInputElement
+    expect(input.value).toBe('Child')
+    fireEvent.change(input, { target: { value: '  Renamed session  ' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await vi.waitFor(() => { expect(b.renameSession).toHaveBeenCalledWith(SID, 'Renamed session') })
+    await vi.waitFor(() => { expect(b.view.queryByRole('textbox', { name: '重命名会话' })).toBeNull() })
+  })
+
+  it('opens inline rename from the hover affordance and saves on blur', async () => {
+    const b = mount(sessionSnapshotOf())
+    fireEvent.click(b.view.getByRole('button', { name: '重命名会话' }))
+    const input = b.view.getByRole('textbox', { name: '重命名会话' })
+    fireEvent.change(input, { target: { value: 'Blurred save' } })
+    fireEvent.blur(input)
+    await vi.waitFor(() => { expect(b.renameSession).toHaveBeenCalledWith(SID, 'Blurred save') })
+    await vi.waitFor(() => { expect(b.view.queryByRole('textbox', { name: '重命名会话' })).toBeNull() })
+  })
+
+  it('keeps an empty or Escape-cancelled inline rename off the remote', () => {
+    const b = mount(sessionSnapshotOf())
+    fireEvent.click(b.view.getByText('Child'))
+    const input = b.view.getByRole('textbox', { name: '重命名会话' })
+    fireEvent.change(input, { target: { value: '   ' } })
+    fireEvent.blur(input)
+    expect(b.renameSession).not.toHaveBeenCalled()
+    expect(b.view.getByText('Child')).toBeTruthy()
+
+    fireEvent.click(b.view.getByText('Child'))
+    const second = b.view.getByRole('textbox', { name: '重命名会话' })
+    fireEvent.change(second, { target: { value: 'Discarded' } })
+    fireEvent.keyDown(second, { key: 'Escape' })
+    expect(b.renameSession).not.toHaveBeenCalled()
+    expect(b.view.getByText('Child')).toBeTruthy()
+  })
+
+  it('keeps the inline editor open with the host failure when the rename is rejected', async () => {
+    const b = mount(sessionSnapshotOf())
+    b.renameSession.mockRejectedValueOnce(new Error('host refused the title'))
+    fireEvent.click(b.view.getByText('Child'))
+    const input = b.view.getByRole('textbox', { name: '重命名会话' })
+    fireEvent.change(input, { target: { value: 'Rejected title' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await vi.waitFor(() => { expect(b.view.getByRole('alert').textContent).toBe('host refused the title') })
+    expect(b.view.getByRole('textbox', { name: '重命名会话' })).toBe(input)
   })
 
   it('shows hierarchy only for subagents and opens their ordinary owner', () => {

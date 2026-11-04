@@ -433,6 +433,7 @@ function makeHarness(
     read: () => savedScroll,
   }
   const forkAt = vi.fn()
+  const retryTurn = vi.fn()
   // Rows and the harness must observe the same chat-store instance.
   const chat = createChatStore().create()
   const transcriptView = createSnapshotStore<TranscriptViewMode>('compact')
@@ -550,6 +551,7 @@ function makeHarness(
     loadImage: vi.fn(() => Promise.reject(new Error('not used'))),
     chatScroll,
     forkAt,
+    retryTurn,
     // Absent-service default; mention tests override with a real resolver.
     fileMentions: () => undefined,
     t,
@@ -577,7 +579,7 @@ function makeHarness(
     setConnection: (state: ConnectionState) => { connection.set(state) },
     openFile, openUserFile, loadOlder, loadThrough, openView,
     setOutline: (value: unknown) => { outlineValue = value },
-    chatScroll, forkAt, toolOwners,
+    chatScroll, forkAt, retryTurn, toolOwners,
     setPerformanceUsage: (mode: 'compact' | 'detailed') => { performanceUsage.set(mode) },
     setGrouped: (value: ConversationGroupedView<ProcessGroupData> | undefined) => {
       grouped = value
@@ -2049,7 +2051,8 @@ describe('ChatView', () => {
     })
     // The Turn Tail belongs to the closed Turn, independently of a later
     // steering bubble's placement in the Chat list.
-    const branchButtons = view.getAllByRole('button', { name: '在新对话中分支' })
+    fireEvent.click(view.getByRole('button', { name: '更多操作' }))
+    const branchButtons = view.getAllByRole('menuitem', { name: '在新对话中分支' })
     expect(branchButtons).toHaveLength(1)
     expect(branchButtons[0]!.getAttribute('aria-disabled')).toBeNull()
     fireEvent.click(branchButtons[0]!)
@@ -2670,7 +2673,10 @@ describe('ChatView', () => {
     const view = render(<h.ChatView {...h.props} />)
     // Branch renders only under assistant answers; user bubbles keep copy alone.
     expect(view.getAllByRole('button', { name: '复制' })).toHaveLength(4)
-    const branchButtons = view.getAllByRole('button', { name: '在新对话中分支' })
+    const moreButtons = view.getAllByRole('button', { name: '更多操作' })
+    expect(moreButtons).toHaveLength(2)
+    for (const more of moreButtons) fireEvent.click(more)
+    const branchButtons = view.getAllByRole('menuitem', { name: '在新对话中分支' })
     expect(branchButtons).toHaveLength(2)
     expect(branchButtons.map(button => button.getAttribute('aria-disabled'))).toEqual([null, null])
   })
@@ -3644,12 +3650,40 @@ describe('ChatView', () => {
       turnEnds: new Map([[1, 3]]),
     })
     const view = render(<h.ChatView {...h.props} />)
-    // The user bubble offers no branch; the settled answer's is live.
-    const buttons = view.getAllByRole('button', { name: '在新对话中分支' })
-    expect(buttons).toHaveLength(1)
-    expect(buttons[0]!.getAttribute('aria-disabled')).toBeNull()
-    fireEvent.click(buttons[0]!)
+    // The user bubble offers no more menu; the settled answer's Branch is live inside it.
+    const tails = view.getAllByRole('button', { name: '更多操作' })
+    expect(tails).toHaveLength(1)
+    fireEvent.click(tails[0]!)
+    const branch = view.getByRole('menuitem', { name: '在新对话中分支' })
+    expect(branch.getAttribute('aria-disabled')).toBeNull()
+    fireEvent.click(branch)
     expect(h.forkAt.mock.calls).toEqual([[3]])
+  })
+
+  it('tucks Retry and Branch into one more menu and never beside Copy', () => {
+    const h = makeHarness({
+      nodes: [user(1, 'question'), assistant(2, 'answer')],
+      turnEnds: new Map([[1, 3]]),
+    })
+    const view = render(<h.ChatView {...h.props} />)
+    const tail = view.container.querySelector<HTMLElement>('[data-turn-tail="1"]')!
+    expect(within(tail).getAllByRole('button', { name: '复制' })).toHaveLength(1)
+    expect(within(tail).queryByRole('button', { name: '在新对话中分支' })).toBeNull()
+    fireEvent.click(within(tail).getByRole('button', { name: '更多操作' }))
+    expect(view.getByRole('menuitem', { name: '重试' })).toBeTruthy()
+    expect(view.getByRole('menuitem', { name: '在新对话中分支' })).toBeTruthy()
+    fireEvent.click(view.getByRole('menuitem', { name: '重试' }))
+    expect(h.retryTurn).toHaveBeenCalledWith(1)
+    expect(h.forkAt).not.toHaveBeenCalled()
+  })
+
+  it('offers a one-click Retry on the failure banner of a broken turn', () => {
+    const h = makeHarness({ nodes: [user(1, 'try'), turnError(2, 'AUTH')] })
+    const view = render(<h.ChatView {...h.props} />)
+    const banner = view.container.querySelector<HTMLElement>('[data-turn-error="1"]')!
+    expect(within(banner).getByRole('status').textContent).toContain('本轮运行失败')
+    fireEvent.click(within(banner).getByRole('button', { name: '重试' }))
+    expect(h.retryTurn).toHaveBeenCalledWith(1)
   })
 
   it('disables fork when the indexed Turn has a later steering Node', () => {
@@ -3669,15 +3703,13 @@ describe('ChatView', () => {
     const view = render(<h.ChatView {...h.props} />)
     expect(view.getByText('change direction')).toBeTruthy()
     expect(chat.locations.getTurn(1)).toContain(later.key)
-    const branch = view.getByRole('button', { name: '在新对话中分支' })
+    fireEvent.click(view.getByRole('button', { name: '更多操作' }))
+    const branch = view.getByRole('menuitem', { name: '在新对话中分支' })
     expect(branch.getAttribute('aria-disabled')).toBe('true')
-    fireEvent.pointerDown(branch, { pointerType: 'touch' })
     fireEvent.click(branch)
     expect(h.forkAt).not.toHaveBeenCalled()
-    expect(view.getByRole('tooltip', { hidden: true }).textContent).toBe(h.props.t('message.branchUnavailable'))
-    fireEvent.pointerDown(branch, { pointerType: 'touch' })
-    fireEvent.click(branch)
-    expect(view.queryByRole('tooltip', { hidden: true })).toBeNull()
+    const reason = document.getElementById(branch.getAttribute('aria-describedby')!)!
+    expect(reason.textContent).toBe(h.props.t('message.branchUnavailable'))
   })
 
   it('keeps final content actions but disables branch when Tool and interrupted Think follow it', () => {
@@ -3691,10 +3723,10 @@ describe('ChatView', () => {
     })
     const view = render(<h.ChatView {...h.props} />)
     expect(view.getAllByRole('button', { name: '复制' })).toHaveLength(2)
-    const buttons = view.getAllByRole('button', { name: '在新对话中分支' })
-    expect(buttons).toHaveLength(1)
-    expect(buttons[0]!.getAttribute('aria-disabled')).toBe('true')
-    fireEvent.click(buttons[0]!)
+    fireEvent.click(view.getByRole('button', { name: '更多操作' }))
+    const branch = view.getByRole('menuitem', { name: '在新对话中分支' })
+    expect(branch.getAttribute('aria-disabled')).toBe('true')
+    fireEvent.click(branch)
     expect(h.forkAt).not.toHaveBeenCalled()
   })
 
@@ -3705,7 +3737,8 @@ describe('ChatView', () => {
     Object.assign(h.props, { useAccess })
     const view = render(<h.ChatView {...h.props} />)
     expect(view.getAllByRole('button', { name: '复制' }).length).toBeGreaterThan(0)
-    expect(view.queryByRole('button', { name: '在新对话中分支' })).toBeNull()
+    fireEvent.click(view.getByRole('button', { name: '更多操作' }))
+    expect(view.queryByRole('menuitem', { name: '在新对话中分支' })).toBeNull()
     expect(useAccess).toHaveBeenCalledWith('session/fork')
   })
 

@@ -424,6 +424,7 @@ function mount(fixture: Awaited<ReturnType<typeof bench>>) {
         useEntryPins={selector => selector([])}
         useEntryActions={selector => selector(false)}
         setPinned={vi.fn()}
+        renameSession={vi.fn(async () => {})}
         {...standardProps}
         SessionProvider={({ children }) => children}
         useStore={bindSnapshotSelector(conversation)}

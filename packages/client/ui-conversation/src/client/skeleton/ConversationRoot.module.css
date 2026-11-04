@@ -90,10 +90,11 @@
    keeps the cluster from becoming a scroll container that focus could scroll. */
 .titleCluster {
   display: flex;
-  flex: 1;
+  flex: 1 1 auto;
   align-items: center;
   gap: 10px;
   min-width: 0;
+  max-width: none;
   --title-cluster-fade: 20px;
   margin: -4px calc(-1 * var(--title-cluster-fade)) -4px -4px;
   padding: 4px var(--title-cluster-fade) 4px 4px;
@@ -119,9 +120,11 @@
 
 .crumbs {
   display: flex;
+  flex: 1 1 auto;
   align-items: center;
   gap: 4px;
   min-width: 0;
+  max-width: none;
   overflow: hidden;
   white-space: nowrap;
 }
@@ -130,6 +133,14 @@
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  min-width: 0;
+  position: relative;
+}
+
+/* Only the viewed Session's own title grows; ancestors keep their compact cap
+   and truncate first. */
+.crumbSeg:last-child {
+  flex: 1 1 auto;
   min-width: 0;
 }
 
@@ -168,9 +179,89 @@
 }
 
 .crumbCurrent {
+  display: inline-block;
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-weight: 500;
   color: var(--dsw-alias-label-primary);
   cursor: default;
+}
+
+/* The pencil stays out of the drag row until the title is hovered or focused;
+   the title itself is clickable, so touch never needs it. */
+.crumbEdit {
+  display: none;
+  flex: none;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: var(--dsw-radius-sm);
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  cursor: pointer;
+}
+
+.crumbSeg:hover .crumbEdit,
+.crumbSeg:focus-within .crumbEdit {
+  display: inline-grid;
+}
+
+.crumbEdit:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+.crumbTitleInput {
+  box-sizing: border-box;
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  margin: -3px -8px;
+  padding: 2px 8px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-md);
+  outline: none;
+  background: var(--dsw-specific-input-major);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 20px;
+  color: var(--dsw-alias-label-primary);
+}
+
+.crumbTitleInput.crumbSubagent {
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.crumbTitleInput:focus {
+  border-color: var(--dsw-alias-state-business-primary);
+}
+
+.crumbTitleInput:disabled {
+  color: var(--dsw-alias-label-dimmed);
+}
+
+.crumbRenameError {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 2;
+  max-width: 320px;
+  padding: 4px 8px;
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-bg-base);
+  box-shadow: var(--dsw-shadow-lv3);
+  font-size: 12px;
+  line-height: 18px;
+  white-space: normal;
+  color: var(--dsw-alias-state-error-primary);
 }
 
 .headerActions {

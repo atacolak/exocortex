@@ -492,6 +492,13 @@ export interface ConversationSessionHeaderInjected {
   setPinned: (id: string, pinned: boolean) => void
   /** Select a Session through the Session Controller. */
   open: (sessionId: SessionId) => void
+  /**
+   * Rename a Session through the same Remote RPC the sidebar rename uses.
+   * @param sessionId - Session to rename.
+   * @param title - trimmed, non-empty display title.
+   * @throws when the Host rejects the rename.
+   */
+  renameSession: (sessionId: SessionId, title: string) => Promise<void>
   /** Select and activate one registered Conversation View. */
   selectView: (view: string) => void
 }
