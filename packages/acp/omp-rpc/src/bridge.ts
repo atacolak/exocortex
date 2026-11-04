@@ -90,6 +90,22 @@ async function activeSessionOf(client: OmpRpcClient): Promise<OmpAttachment['ses
   }
 }
 
+/** Environment variable that overrides the OMP executable launched by the bridge. */
+export const OMP_BIN_ENV = 'OMP_BIN'
+
+/**
+ * Resolve the OMP executable launched by the bridge.
+ * @param ompBin - configured executable; omitted follows `$OMP_BIN`, then `omp` on PATH.
+ * @param env - environment carrying the `$OMP_BIN` override.
+ * @returns executable name or absolute path.
+ */
+export function resolveOmpExecutable(
+  ompBin?: string,
+  env: Record<string, string | undefined> = process.env,
+): string {
+  return ompBin ?? env[OMP_BIN_ENV] ?? 'omp'
+}
+
 /** Collaborators shared by every attachment in one bridge plugin. */
 export interface OmpBridgeOptions {
   readonly ctx: Context

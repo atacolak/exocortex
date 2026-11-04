@@ -1,5 +1,5 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, onTestFinished } from 'vitest'
 import {
@@ -7,6 +7,7 @@ import {
   ompRunDirectory,
   ompSocketPath,
   readOmpSocketSession,
+  resolveOmpRunDirectory,
   scanOmpRunDirectory,
   watchOmpRunDirectory,
 } from '../src/socket.ts'
@@ -68,6 +69,19 @@ describe('OMP run directory', () => {
   it('publishes one socket per run directory', () => {
     expect(ompRunDirectory('/home/x')).toBe(join('/home/x', '.omp', 'run'))
     expect(ompSocketPath('/run', 'abc')).toBe(join('/run', 'abc.sock'))
+  })
+
+  it('prefers an explicit run directory over OMP_RUN_DIR', () => {
+    expect(resolveOmpRunDirectory('/explicit/run', '/home/x', { OMP_RUN_DIR: '/env/run' })).toBe('/explicit/run')
+  })
+
+  it('follows OMP_RUN_DIR when no run directory is configured', () => {
+    expect(resolveOmpRunDirectory(undefined, '/home/x', { OMP_RUN_DIR: '/env/run' })).toBe('/env/run')
+  })
+
+  it('falls back to the OMP run root under the owning home', () => {
+    expect(resolveOmpRunDirectory(undefined, '/home/x', {})).toBe(join('/home/x', '.omp', 'run'))
+    expect(resolveOmpRunDirectory(undefined, undefined, {})).toBe(ompRunDirectory(homedir()))
   })
 
   it('reads a live session sidecar', async () => {

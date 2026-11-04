@@ -27,6 +27,7 @@ import {
   OmpBridge,
   planOmpAttach,
   registerAgentCommand,
+  resolveOmpExecutable,
   type OmpAttachOptions,
   type OmpAttachPlan,
   type OmpAttachment,
@@ -55,8 +56,8 @@ import {
   type OmpTranscriptMatch,
 } from './resume.ts'
 import {
-  ompRunDirectory,
   readOmpSocketSession,
+  resolveOmpRunDirectory,
   watchOmpRunDirectory,
   type OmpSocketSession,
 } from './socket.ts'
@@ -86,7 +87,7 @@ export const inject = ['commands', 'subprocess', 'tools']
 
 /** Plugin configuration for the OMP bridge. */
 export interface OmpRpcConfig {
-  /** OMP executable name or absolute path. */
+  /** OMP executable name or absolute path; defaults to `$OMP_BIN`, then `omp` on PATH. */
   readonly executable?: string
   /** Root directory holding every OMP transcript; defaults to the OMP sessions root. */
   readonly sessionDir?: string
@@ -108,7 +109,8 @@ export interface OmpRpcConfig {
   readonly bindingsFile?: string
   /**
    * Directory of live OMP session publications to adopt; defaults to
-   * `<home>/.omp/run`. Pass `false` to disable adoption (deterministic tests).
+   * `$OMP_RUN_DIR`, then `<home>/.omp/run`. Pass `false` to disable adoption
+   * (deterministic tests).
    */
   readonly watchRunDir?: string | false
   /** Adoption poll period in milliseconds; defaults to 1500. */
@@ -170,7 +172,7 @@ export function apply(ctx: Context, config: OmpRpcConfig): void {
   const bridge = new OmpBridge({
     ctx,
     subprocess: ctx.subprocess,
-    executable: config.executable ?? 'omp',
+    executable: resolveOmpExecutable(config.executable),
     ...hcomExtension.length === 0 ? {} : { hcomExtension },
     ...config.asker === undefined ? {} : { asker: config.asker },
     ...config.onSurface === undefined ? {} : { onSurface: config.onSurface },
@@ -205,9 +207,11 @@ export function apply(ctx: Context, config: OmpRpcConfig): void {
   }
 
   const bindings = new OmpBindings(config.bindingsFile ?? defaultOmpBindingsFile())
-  const watchDir = config.watchRunDir === false
-    ? undefined
-    : config.watchRunDir ?? ompRunDirectory(config.home ?? homedir())
+  const runDirectory = resolveOmpRunDirectory(
+    config.watchRunDir === false ? undefined : config.watchRunDir,
+    config.home,
+  )
+  const watchDir = config.watchRunDir === false ? undefined : runDirectory
 
   const warn = (message: string, error?: unknown): void => {
     ctx.logger.warn(`[omp-rpc] ${message}${error === undefined ? '' : `: ${error instanceof Error ? error.message : String(error)}`}`)
@@ -294,8 +298,6 @@ export function apply(ctx: Context, config: OmpRpcConfig): void {
     }
   }
 
-  const runDirectory = ompRunDirectory(config.home ?? homedir())
-
   const liveSocketOf = async (ompSessionId: string | undefined): Promise<OmpSocketSession | undefined> => {
     if (ompSessionId === undefined) return undefined
     return await readOmpSocketSession(runDirectory, ompSessionId)
@@ -308,7 +310,7 @@ export function apply(ctx: Context, config: OmpRpcConfig): void {
     readonly profile?: string
   }): Promise<OmpTranscriptOpened> => {
     const { agent, transcript, cwd, profile } = request
-    const executable = await ctx.subprocess.resolveExecutable(config.executable ?? 'omp', undefined)
+    const executable = await ctx.subprocess.resolveExecutable(resolveOmpExecutable(config.executable), undefined)
     const lease = await probeOmpSessionLease(ctx.subprocess, executable, transcript.id, cwd)
     const busy = lease.held.includes(transcript.id) || lease.unknown.includes(transcript.id)
     const live = busy ? await liveSocketOf(transcript.id) : undefined
@@ -418,7 +420,7 @@ export function apply(ctx: Context, config: OmpRpcConfig): void {
     if (pending !== undefined) return pending
     const request = (async () => {
       try {
-        const executable = await ctx.subprocess.resolveExecutable(config.executable ?? 'omp', undefined)
+        const executable = await ctx.subprocess.resolveExecutable(resolveOmpExecutable(config.executable), undefined)
         const skills = await listOmpSkills(ctx.subprocess, executable, cwd)
         skillListings.set(cwd, { at: Date.now(), skills })
         return skills

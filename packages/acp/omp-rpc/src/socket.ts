@@ -1,5 +1,6 @@
 import { lstat, readdir, readFile } from 'node:fs/promises'
 import { connect } from 'node:net'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { OmpRpcClient } from './client.ts'
 
@@ -26,6 +27,9 @@ export interface OmpSocketConnection {
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 5_000
 
+/** Environment variable that overrides the run directory OMP publishes sockets under. */
+export const OMP_RUN_DIR_ENV = 'OMP_RUN_DIR'
+
 /**
  * Runtime directory where OMP publishes one socket and sidecar per session.
  * @param home - user home owning the OMP configuration root.
@@ -33,6 +37,21 @@ const DEFAULT_CONNECT_TIMEOUT_MS = 5_000
  */
 export function ompRunDirectory(home: string): string {
   return join(home, '.omp', 'run')
+}
+
+/**
+ * Resolve the directory OMP publishes live session sockets under.
+ * @param runDir - explicit run directory; omitted follows `$OMP_RUN_DIR`, then `<home>/.omp/run`.
+ * @param home - user home owning the OMP configuration root; defaults to the process home.
+ * @param env - environment carrying the `$OMP_RUN_DIR` override.
+ * @returns absolute run directory.
+ */
+export function resolveOmpRunDirectory(
+  runDir?: string,
+  home?: string,
+  env: Record<string, string | undefined> = process.env,
+): string {
+  return runDir ?? env[OMP_RUN_DIR_ENV] ?? ompRunDirectory(home ?? homedir())
 }
 
 /**

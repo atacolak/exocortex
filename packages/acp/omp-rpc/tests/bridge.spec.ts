@@ -20,8 +20,23 @@ import {
   ompLaunchEnvironment,
   ompTodoItems,
   planOmpAttach,
+  resolveOmpExecutable,
 } from '../src/bridge.ts'
 import { fakeSessionServer, tick, type FakeSessionServer } from './harness.ts'
+
+describe('OMP executable resolution', () => {
+  it('prefers the configured executable over OMP_BIN', () => {
+    expect(resolveOmpExecutable('/opt/omp', { OMP_BIN: '/env/omp' })).toBe('/opt/omp')
+  })
+
+  it('follows OMP_BIN when no executable is configured', () => {
+    expect(resolveOmpExecutable(undefined, { OMP_BIN: '/env/omp' })).toBe('/env/omp')
+  })
+
+  it('defaults to omp on PATH', () => {
+    expect(resolveOmpExecutable(undefined, {})).toBe('omp')
+  })
+})
 
 describe('omp commands', () => {
   it('starts a fresh transcript when attach names none', () => {
