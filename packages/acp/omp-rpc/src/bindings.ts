@@ -25,6 +25,10 @@ export interface OmpBinding {
    * session, so a later attachment appends only the tail OMP recorded since.
    */
   readonly hydratedTurns?: number
+  /** Canonical transcript entry id the last hydration consumed. */
+  readonly hydratedLeafEntryId?: string
+  /** Transcript byte size the last hydration consumed. */
+  readonly hydratedByteOffset?: number
   /** ISO timestamp of the last successful attachment. */
   readonly updatedAt: string
 }
@@ -63,6 +67,24 @@ interface OmpBindingsFile {
 
 const BINDINGS_VERSION = 1
 
+const HARNESS_SESSION_UUID = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+const BARE_HARNESS_SESSION_UUID = new RegExp(`^${HARNESS_SESSION_UUID}$`, 'i')
+const PREFIXED_HARNESS_SESSION_UUID = new RegExp(`^session-(${HARNESS_SESSION_UUID})$`, 'i')
+
+/**
+ * Canonicalize one Harness session id so a bare OMP UUID and its
+ * `session-`-prefixed twin resolve to the same bindings key.
+ * @param sessionId - Harness session identity from any client or router.
+ * @returns the prefixed, lowercase form for UUID identities; other ids unchanged.
+ */
+export function canonicalOmpHarnessSessionId(sessionId: SessionId): SessionId {
+  const value = String(sessionId)
+  const prefixed = PREFIXED_HARNESS_SESSION_UUID.exec(value)
+  if (prefixed !== null) return SessionId(`session-${(prefixed[1] as string).toLowerCase()}`)
+  if (BARE_HARNESS_SESSION_UUID.test(value)) return SessionId(`session-${value.toLowerCase()}`)
+  return sessionId
+}
+
 /**
  * Resolve the default bindings file under the Harness home.
  * @param home - explicit Harness home; omitted follows `$DSH_HOME`, then `~/.dsh`.
@@ -86,12 +108,24 @@ function bindingOf(value: unknown): OmpBinding | undefined {
     && (typeof record.hydratedTurns !== 'number' || !Number.isSafeInteger(record.hydratedTurns) || record.hydratedTurns < 0)) {
     return undefined
   }
+  if (record.hydratedLeafEntryId !== undefined
+    && (typeof record.hydratedLeafEntryId !== 'string' || record.hydratedLeafEntryId.length === 0)) {
+    return undefined
+  }
+  if (record.hydratedByteOffset !== undefined
+    && (typeof record.hydratedByteOffset !== 'number'
+      || !Number.isSafeInteger(record.hydratedByteOffset)
+      || record.hydratedByteOffset < 0)) {
+    return undefined
+  }
   return {
     ompSessionId: record.ompSessionId,
     path: record.path,
     cwd: record.cwd,
     ...record.profile === undefined ? {} : { profile: record.profile },
     ...record.hydratedTurns === undefined ? {} : { hydratedTurns: record.hydratedTurns },
+    ...record.hydratedLeafEntryId === undefined ? {} : { hydratedLeafEntryId: record.hydratedLeafEntryId },
+    ...record.hydratedByteOffset === undefined ? {} : { hydratedByteOffset: record.hydratedByteOffset },
     updatedAt: record.updatedAt,
   }
 }
@@ -130,7 +164,7 @@ function bindingsFileOf(text: string, path: string): OmpBindingsFile {
   for (const [id, value] of Object.entries(record.sessions)) {
     const binding = bindingOf(value)
     if (binding === undefined) throw new OmpBindingsError(`OMP bindings file has an invalid entry "${id}": ${path}`)
-    sessions[id] = binding
+    sessions[String(canonicalOmpHarnessSessionId(SessionId(id)))] = binding
   }
   const forks: Record<string, OmpForkBinding> = {}
   if (record.forks !== undefined) {
@@ -140,10 +174,26 @@ function bindingsFileOf(text: string, path: string): OmpBindingsFile {
     for (const [id, value] of Object.entries(record.forks)) {
       const fork = forkBindingOf(value)
       if (fork === undefined) throw new OmpBindingsError(`OMP bindings file has an invalid fork entry "${id}": ${path}`)
-      forks[id] = fork
+      forks[String(canonicalOmpHarnessSessionId(SessionId(id)))] = fork
     }
   }
   return { version: BINDINGS_VERSION, sessions, forks }
+}
+
+function mergeBindingCursor(existing: OmpBinding | undefined, next: OmpBinding): OmpBinding {
+  if (existing === undefined || existing.ompSessionId !== next.ompSessionId) return next
+  return {
+    ...next,
+    ...next.hydratedTurns === undefined && existing.hydratedTurns !== undefined
+      ? { hydratedTurns: existing.hydratedTurns }
+      : {},
+    ...next.hydratedLeafEntryId === undefined && existing.hydratedLeafEntryId !== undefined
+      ? { hydratedLeafEntryId: existing.hydratedLeafEntryId }
+      : {},
+    ...next.hydratedByteOffset === undefined && existing.hydratedByteOffset !== undefined
+      ? { hydratedByteOffset: existing.hydratedByteOffset }
+      : {},
+  }
 }
 
 /**
@@ -168,7 +218,7 @@ export class OmpBindings {
    */
   async get(id: SessionId): Promise<OmpBinding | undefined> {
     await this.tail
-    return (await this.load()).sessions[id]
+    return (await this.load()).sessions[String(canonicalOmpHarnessSessionId(id))]
   }
 
   /**
@@ -186,20 +236,60 @@ export class OmpBindings {
   }
 
   /**
+   * Find the single Harness session bound to one OMP session identity.
+   * @param ompSessionId - session id recorded by the OMP transcript header.
+   * @returns the canonical Harness session identity and its binding, or undefined when unbound.
+   */
+  async findByOmpSessionId(ompSessionId: string): Promise<{ readonly sessionId: SessionId; readonly binding: OmpBinding } | undefined> {
+    await this.tail
+    const sessions = (await this.load()).sessions
+    for (const [sessionId, binding] of Object.entries(sessions)) {
+      if (binding.ompSessionId === ompSessionId) return { sessionId: SessionId(sessionId), binding }
+    }
+    return undefined
+  }
+
+  /**
    * Record or replace one session binding.
+   *
+   * One OMP session owns exactly one Harness key: an existing binding for the
+   * same `ompSessionId` stays canonical, absorbs the new facts, and every
+   * duplicate key is removed. Cursor fields the new binding leaves undefined
+   * survive, so a plain reattach never erases hydration progress.
    * @param id - Harness session identity.
    * @param binding - OMP transcript facts to persist.
+   * @returns the canonical Harness session identity the binding was stored under.
    */
-  async set(id: SessionId, binding: OmpBinding): Promise<void> {
-    await this.enqueue(async () => {
+  async set(id: SessionId, binding: OmpBinding): Promise<SessionId> {
+    return await this.enqueue(async () => {
       const state = await this.load()
+      const requested = String(canonicalOmpHarnessSessionId(id))
+      let target = requested
+      let existing: OmpBinding | undefined
+      for (const [key, entry] of Object.entries(state.sessions)) {
+        if (entry.ompSessionId !== binding.ompSessionId) continue
+        target = String(canonicalOmpHarnessSessionId(SessionId(key)))
+        existing = entry
+        break
+      }
+      const sessions: Record<string, OmpBinding> = {}
+      for (const [key, entry] of Object.entries(state.sessions)) {
+        if (entry.ompSessionId === binding.ompSessionId
+          && String(canonicalOmpHarnessSessionId(SessionId(key))) !== target) {
+          continue
+        }
+        if (key === target) continue
+        sessions[key] = entry
+      }
+      sessions[target] = mergeBindingCursor(existing ?? state.sessions[requested], binding)
       const next: OmpBindingsFile = {
         version: BINDINGS_VERSION,
-        sessions: { ...state.sessions, [id]: binding },
+        sessions,
         forks: state.forks,
       }
       await this.write(next)
       this.state = next
+      return SessionId(target)
     })
   }
 
@@ -210,9 +300,10 @@ export class OmpBindings {
   async delete(id: SessionId): Promise<void> {
     await this.enqueue(async () => {
       const state = await this.load()
-      if (state.sessions[id] === undefined) return
+      const key = String(canonicalOmpHarnessSessionId(id))
+      if (state.sessions[key] === undefined) return
       const sessions = { ...state.sessions }
-      delete sessions[id]
+      delete sessions[key]
       const next: OmpBindingsFile = { version: BINDINGS_VERSION, sessions, forks: state.forks }
       await this.write(next)
       this.state = next
@@ -226,7 +317,7 @@ export class OmpBindings {
    */
   async getFork(id: SessionId): Promise<OmpForkBinding | undefined> {
     await this.tail
-    return (await this.load()).forks[id]
+    return (await this.load()).forks[String(canonicalOmpHarnessSessionId(id))]
   }
 
   /**
@@ -240,7 +331,7 @@ export class OmpBindings {
       const next: OmpBindingsFile = {
         version: BINDINGS_VERSION,
         sessions: state.sessions,
-        forks: { ...state.forks, [id]: fork },
+        forks: { ...state.forks, [String(canonicalOmpHarnessSessionId(id))]: fork },
       }
       await this.write(next)
       this.state = next
@@ -254,9 +345,10 @@ export class OmpBindings {
   async deleteFork(id: SessionId): Promise<void> {
     await this.enqueue(async () => {
       const state = await this.load()
-      if (state.forks[id] === undefined) return
+      const key = String(canonicalOmpHarnessSessionId(id))
+      if (state.forks[key] === undefined) return
       const forks = { ...state.forks }
-      delete forks[id]
+      delete forks[key]
       const next: OmpBindingsFile = { version: BINDINGS_VERSION, sessions: state.sessions, forks }
       await this.write(next)
       this.state = next

@@ -1,5 +1,6 @@
-import { appendFile, mkdtemp, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { existsSync } from 'node:fs'
+import { appendFile, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
@@ -8,14 +9,72 @@ import { afterEach, describe, expect, it, onTestFinished } from 'vitest'
 import {
   hydrateOmpSession,
   ompHydrationEvents,
+  ompTranscriptTurns,
   readOmpTranscriptTitle,
+  type OmpTranscriptTurn,
 } from '../src/resume.ts'
 
 const roots: string[] = []
 
+const SESSION_UUID = '01a0c88e-7521-7000-bb6a-67527d2b6806'
+
+const REAL_TRANSCRIPT = join(homedir(), '.omp', 'agent', 'sessions', '-workspace',
+  '2026-10-25T08-26-39-017Z_01a1722b-3e29-7000-b9d5-b05807bbe4b8.jsonl')
+
 function firstText(blocks: readonly { readonly type: string; readonly text?: string }[]): string | undefined {
   const block = blocks[0]
   return block?.type === 'text' ? block.text : undefined
+}
+
+function entryId(n: number): string {
+  return n.toString(16).padStart(8, '0')
+}
+
+function sessionLine(): unknown {
+  return { type: 'session', version: 3, id: SESSION_UUID, cwd: '/work' }
+}
+
+function userEntry(id: string, parent: string, text: string): unknown {
+  return { type: 'message', id, parentId: parent, message: { role: 'user', content: [{ type: 'text', text }] } }
+}
+
+function assistantEntry(id: string, parent: string, text: string): unknown {
+  return { type: 'message', id, parentId: parent, message: { role: 'assistant', content: [{ type: 'text', text }] } }
+}
+
+function turnEntries(from: number, to: number): unknown[] {
+  const lines: unknown[] = []
+  for (let turn = from; turn <= to; turn += 1) {
+    const parent = turn === 1 ? SESSION_UUID : entryId(turn * 2 - 2)
+    lines.push(userEntry(entryId(turn * 2 - 1), parent, `turn ${String(turn)}`))
+    lines.push(assistantEntry(entryId(turn * 2), entryId(turn * 2 - 1), `reply ${String(turn)}`))
+  }
+  return lines
+}
+
+function turnUserTexts(turns: readonly OmpTranscriptTurn[]): (string | undefined)[] {
+  return turns.map(turn => turn.events
+    .filter(event => event.type === 'user/message')
+    .map(event => firstText(event.data.content))
+    .at(0))
+}
+
+function sessionUserTexts(session: Session): (string | undefined)[] {
+  return session.snapshotEvents()
+    .filter(event => event.type === 'user/message')
+    .map(event => firstText(event.data.content))
+}
+
+function sessionUserTimes(session: Session): number[] {
+  return session.snapshotEvents()
+    .filter(event => event.type === 'user/message')
+    .map(event => event.time)
+}
+
+function sessionTurnNumbers(session: Session): number[] {
+  return session.snapshotEvents()
+    .filter(event => event.type === 'turn/start')
+    .map(event => event.data.turn)
 }
 
 async function transcript(lines: readonly unknown[]): Promise<string> {
@@ -549,4 +608,302 @@ describe('ompHydrationEvents trigger cards', () => {
       { kind: 'user' },
     ])
   })
+})
+
+describe('ompTranscriptTurns canonical branch', () => {
+  it('walks parentId from the active leaf and ignores an abandoned retry branch', async () => {
+    const path = await transcript([
+      sessionLine(),
+      userEntry(entryId(1), SESSION_UUID, 'one'),
+      assistantEntry(entryId(2), entryId(1), 'one reply'),
+      userEntry(entryId(3), entryId(2), 'two'),
+      assistantEntry(entryId(4), entryId(3), 'two reply'),
+      userEntry(entryId(5), entryId(2), 'abandoned retry'),
+      assistantEntry(entryId(6), entryId(5), 'abandoned reply'),
+      userEntry(entryId(7), entryId(4), 'three'),
+      assistantEntry(entryId(8), entryId(7), 'three reply'),
+    ])
+
+    const turns = await ompTranscriptTurns(path)
+
+    expect(turns.map(turn => turn.turn)).toEqual([1, 2, 3])
+    expect(turnUserTexts(turns)).toEqual(['one', 'two', 'three'])
+    expect(turns.map(turn => turn.userEntryId)).toEqual([entryId(1), entryId(3), entryId(7)])
+    expect(turns.map(turn => turn.leafEntryId)).toEqual([entryId(2), entryId(4), entryId(8)])
+  })
+
+  it('bridges a dangling parentId to the preceding root chain without throwing', async () => {
+    const path = await transcript([
+      sessionLine(),
+      userEntry(entryId(1), SESSION_UUID, 'one'),
+      assistantEntry(entryId(2), entryId(1), 'one reply'),
+      userEntry(entryId(3), entryId(2), 'abandoned retry'),
+      assistantEntry(entryId(4), entryId(3), 'abandoned reply'),
+      userEntry(entryId(5), entryId(2), 'two'),
+      assistantEntry(entryId(6), entryId(5), 'two reply'),
+      userEntry(entryId(7), 'deadbeef', 'three'),
+      assistantEntry(entryId(8), entryId(7), 'three reply'),
+    ])
+
+    const turns = await ompTranscriptTurns(path)
+
+    expect(turnUserTexts(turns)).toEqual(['one', 'two', 'three'])
+    expect(turns.map(turn => turn.leafEntryId)).toEqual([entryId(2), entryId(6), entryId(8)])
+  })
+
+  it('walks through compaction and branch summary nodes and keeps pre-compaction turns', async () => {
+    const path = await transcript([
+      sessionLine(),
+      userEntry(entryId(1), SESSION_UUID, 'one'),
+      assistantEntry(entryId(2), entryId(1), 'one reply'),
+      {
+        type: 'compaction',
+        id: entryId(3),
+        parentId: entryId(2),
+        firstKeptEntryId: entryId(1),
+        tokensBefore: 10,
+        tokensAfter: 4,
+        summary: 'summary',
+        shortSummary: 'short',
+      },
+      { type: 'branch_summary', id: entryId(4), parentId: entryId(3), fromId: entryId(2), summary: 'branch' },
+      userEntry(entryId(5), entryId(4), 'two'),
+      assistantEntry(entryId(6), entryId(5), 'two reply'),
+    ])
+
+    const turns = await ompTranscriptTurns(path)
+
+    expect(turnUserTexts(turns)).toEqual(['one', 'two'])
+    expect(turns.map(turn => turn.userEntryId)).toEqual([entryId(1), entryId(5)])
+    expect(turns.map(turn => turn.leafEntryId)).toEqual([entryId(4), entryId(6)])
+  })
+
+  it('drops synthetic continue prompts and memory injections from hydrated turns', async () => {
+    const path = await transcript([
+      sessionLine(),
+      userEntry(entryId(1), SESSION_UUID, 'one'),
+      assistantEntry(entryId(2), entryId(1), 'one reply'),
+      userEntry(entryId(3), entryId(2), 'omp:continue'),
+      assistantEntry(entryId(4), entryId(3), 'continued'),
+      userEntry(entryId(5), entryId(4), '<memories>\nRelevant memories'),
+      assistantEntry(entryId(6), entryId(5), 'recalled'),
+      userEntry(entryId(7), entryId(6), 'two'),
+      assistantEntry(entryId(8), entryId(7), 'two reply'),
+    ])
+
+    const turns = await ompTranscriptTurns(path)
+
+    expect(turnUserTexts(turns)).toEqual(['one', 'two'])
+    expect(turns.map(turn => turn.userEntryId)).toEqual([entryId(1), entryId(7)])
+  })
+
+  it('hydrates every active-branch turn by default instead of the newest 200', async () => {
+    const path = await transcript([sessionLine(), ...turnEntries(1, 250)])
+
+    const events = await ompHydrationEvents(path)
+    const session = Session.create(SessionId('hydrate-all-turns'))
+    const outcome = await hydrateOmpSession(session, path)
+
+    expect(events.filter(event => event.type === 'turn/start')).toHaveLength(250)
+    expect(outcome.turns).toBe(250)
+    expect(outcome.appended).toBe(events.length)
+    expect(sessionTurnNumbers(session)).toHaveLength(250)
+  })
+
+  it('keeps hydrated timestamps non-decreasing when OMP recorded a backwards clock', async () => {
+    const path = await transcript([
+      sessionLine(),
+      { ...userEntry(entryId(1), SESSION_UUID, 'one'), timestamp: '2026-11-04T10:00:00.000Z' },
+      { ...assistantEntry(entryId(2), entryId(1), 'one reply'), timestamp: '2026-11-04T09:00:00.000Z' },
+      { ...userEntry(entryId(3), entryId(2), 'two'), timestamp: '2026-11-04T11:00:00.000Z' },
+      { ...assistantEntry(entryId(4), entryId(3), 'two reply'), timestamp: '2026-11-04T12:00:00.000Z' },
+    ])
+
+    const times = (await ompHydrationEvents(path))
+      .flatMap(event => event.time === undefined ? [] : [event.time])
+
+    expect(times).toEqual([...times].sort((left, right) => left - right))
+    expect(times[0]).toBe(Date.parse('2026-11-04T10:00:00.000Z'))
+    expect(times).toContain(Date.parse('2026-11-04T12:00:00.000Z'))
+
+    const session = Session.create(SessionId('hydrate-backwards-clock'))
+    await hydrateOmpSession(session, path)
+
+    expect(sessionUserTimes(session)).toEqual([
+      Date.parse('2026-11-04T10:00:00.000Z'),
+      Date.parse('2026-11-04T11:00:00.000Z'),
+    ])
+  })
+})
+
+describe('hydrateOmpSession canonical cursor', () => {
+  it('appends nothing when a legacy hydratedTurns count predates the turns the session already holds', async () => {
+    const full = await transcript([sessionLine(), ...turnEntries(1, 70)])
+    const tail = await transcript([sessionLine(), ...turnEntries(9, 70)])
+    const session = Session.create(SessionId('legacy-splice'))
+    const seeded = await hydrateOmpSession(session, tail)
+    const before = session.snapshotEvents().length
+    const textsBefore = sessionUserTexts(session)
+
+    const outcome = await hydrateOmpSession(session, full, Number.POSITIVE_INFINITY, { hydratedTurns: 62 })
+
+    expect(seeded.turns).toBe(62)
+    expect(outcome.appended).toBe(0)
+    expect(outcome.turns).toBe(62)
+    expect(session.snapshotEvents().length).toBe(before)
+    expect(sessionUserTexts(session)).toEqual(textsBefore)
+    expect(textsBefore[0]).toBe('turn 9')
+  })
+
+  it('appends only the turns recorded after the saved cursor leaf', async () => {
+    const path = await transcript([sessionLine(), ...turnEntries(1, 3)])
+    const session = Session.create(SessionId('cursor-tail'))
+    const first = await hydrateOmpSession(session, path)
+    expect(first.turns).toBe(3)
+    expect(first.hydratedLeafEntryId).toBe(entryId(6))
+    expect(first.hydratedByteOffset).toBe((await stat(path)).size)
+
+    await appendFile(path, [
+      userEntry(entryId(7), entryId(6), 'turn 4'),
+      assistantEntry(entryId(8), entryId(7), 'reply 4'),
+    ].map(line => JSON.stringify(line)).join('\n') + '\n')
+
+    const second = await hydrateOmpSession(session, path, Number.POSITIVE_INFINITY, {
+      hydratedTurns: first.turns,
+      hydratedLeafEntryId: first.hydratedLeafEntryId,
+      hydratedByteOffset: first.hydratedByteOffset,
+    })
+
+    expect(second.appended).toBeGreaterThan(0)
+    expect(second.turns).toBe(4)
+    expect(second.hydratedLeafEntryId).toBe(entryId(8))
+    expect(second.hydratedByteOffset).toBe((await stat(path)).size)
+    expect(sessionUserTexts(session)).toEqual(['turn 1', 'turn 2', 'turn 3', 'turn 4'])
+    expect(sessionTurnNumbers(session)).toEqual([1, 2, 3, 4])
+  })
+
+  it('returns without re-parsing when the byte offset still matches the file size', async () => {
+    const path = await transcript([sessionLine(), ...turnEntries(1, 2)])
+    const session = Session.create(SessionId('cursor-fast-path'))
+    const first = await hydrateOmpSession(session, path)
+    const size = (await stat(path)).size
+    const before = session.snapshotEvents().length
+    await writeFile(path, 'x'.repeat(size))
+
+    const again = await hydrateOmpSession(session, path, Number.POSITIVE_INFINITY, {
+      hydratedTurns: first.turns,
+      hydratedLeafEntryId: first.hydratedLeafEntryId,
+      hydratedByteOffset: first.hydratedByteOffset,
+    })
+
+    expect(again.appended).toBe(0)
+    expect(again.turns).toBe(2)
+    expect(again.hydratedLeafEntryId).toBe(first.hydratedLeafEntryId)
+    expect(again.hydratedByteOffset).toBe(size)
+    expect(session.snapshotEvents().length).toBe(before)
+  })
+
+  it('follows the active retry branch when tail-syncing offline turns', async () => {
+    const path = await transcript([sessionLine(), ...turnEntries(1, 3)])
+    const session = Session.create(SessionId('cursor-retry-fork'))
+    const first = await hydrateOmpSession(session, path)
+    await appendFile(path, [
+      userEntry(entryId(7), entryId(4), 'abandoned turn 4'),
+      assistantEntry(entryId(8), entryId(7), 'abandoned reply'),
+      userEntry(entryId(9), entryId(6), 'turn 4'),
+      assistantEntry(entryId(10), entryId(9), 'reply 4'),
+    ].map(line => JSON.stringify(line)).join('\n') + '\n')
+
+    const second = await hydrateOmpSession(session, path, Number.POSITIVE_INFINITY, {
+      hydratedTurns: first.turns,
+      hydratedLeafEntryId: first.hydratedLeafEntryId,
+      hydratedByteOffset: first.hydratedByteOffset,
+    })
+
+    expect(second.turns).toBe(4)
+    expect(second.hydratedLeafEntryId).toBe(entryId(10))
+    expect(sessionUserTexts(session)).toEqual(['turn 1', 'turn 2', 'turn 3', 'turn 4'])
+    expect(sessionTurnNumbers(session)).toEqual([1, 2, 3, 4])
+  })
+})
+
+describe.skipIf(!existsSync(REAL_TRANSCRIPT))('real OMP transcript hydration', () => {
+  it('hydrates the whole active branch in canonical order and survives a cold reload', async () => {
+    const records = (await readFile(REAL_TRANSCRIPT, 'utf8'))
+      .split('\n')
+      .filter(line => line.trim().length > 0)
+      .flatMap((line): Record<string, unknown>[] => {
+        try {
+          return [JSON.parse(line) as Record<string, unknown>]
+        } catch {
+          return []
+        }
+      })
+    const lineById = new Map<string, number>()
+    for (const [index, record] of records.entries()) {
+      const id = record.id
+      if (typeof id === 'string') lineById.set(id, index)
+    }
+    const orphanLine = records.findIndex(record => typeof record.parentId === 'string' && !lineById.has(record.parentId))
+    expect(orphanLine).toBeGreaterThan(0)
+
+    const turns = await ompTranscriptTurns(REAL_TRANSCRIPT)
+    const userEntryIds = turns.map(turn => turn.userEntryId)
+    const userLines = userEntryIds.map(id => id === undefined ? -1 : lineById.get(id) ?? -1)
+
+    expect(turns.length).toBeGreaterThan(400)
+    expect(turns.map(turn => turn.turn)).toEqual(turns.map((_, index) => index + 1))
+    expect(new Set(userEntryIds).size).toBe(turns.length)
+    expect(new Set(turns.map(turn => turn.leafEntryId)).size).toBe(turns.length)
+    expect(userLines[0]).toBeGreaterThan(0)
+    expect(userLines[0]).toBeLessThan(orphanLine)
+    expect(userLines).toEqual([...userLines].sort((left, right) => left - right))
+
+    const session = Session.create(SessionId('real-transcript'))
+    const outcome = await hydrateOmpSession(session, REAL_TRANSCRIPT)
+    const users = sessionUserTexts(session)
+
+    expect(outcome.turns).toBe(turns.length)
+    expect(users).toHaveLength(turns.length)
+    expect(users.filter(text => text?.trimStart().startsWith('omp:continue'))).toEqual([])
+    expect(users.filter(text => text?.trimStart().startsWith('<memories>')
+      || text?.trimStart().startsWith('<system-reminder>'))).toEqual([])
+
+    const recordedUserTimes = turns.map(turn => turn.events.find(event => event.type === 'user/message')?.time)
+    expect(recordedUserTimes.every(time => time !== undefined)).toBe(true)
+    expect(sessionUserTimes(session)).toEqual(recordedUserTimes)
+
+    const root = await mkdtemp(join(tmpdir(), 'dsh-real-hydrate-log-'))
+    onTestFinished(() => rm(root, { recursive: true, force: true }))
+    const ctx = new Context()
+    onTestFinished(() => ctx.fiber.dispose())
+    await ctx.plugin(JsonlSessionPersistence, { root, compression: 'none' })
+    const handle = await ctx.sessionPersistence.create({
+      version: SESSION_FORMAT_VERSION,
+      id: session.id,
+      createdAt: 1,
+      cwd: '/work',
+      isSeeded: false,
+    })
+    try {
+      await handle.append(session.snapshotEvents())
+    } finally {
+      await handle.close()
+    }
+
+    const reopened = await ctx.sessionPersistence.open(session.id, 'read')
+    try {
+      const stored = await reopened.read()
+      expect(stored.events.filter(event => event.type === 'turn/start')).toHaveLength(turns.length)
+      expect(stored.events.filter(event => event.type === 'user/message')).toHaveLength(turns.length)
+      expect(stored.events.filter(event => event.type === 'turn/start').map(event => event.data.turn))
+        .toEqual(turns.map(turn => turn.turn))
+      expect(stored.events.filter(event => event.type === 'user/message').map(event => event.time))
+        .toEqual(recordedUserTimes)
+      const storedTimes = stored.events.map(event => event.time)
+      expect(storedTimes).toEqual([...storedTimes].sort((left, right) => left - right))
+    } finally {
+      await reopened.close()
+    }
+  }, 120_000)
 })

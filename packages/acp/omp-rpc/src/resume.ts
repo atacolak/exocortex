@@ -16,7 +16,7 @@ import {
   type ContentBlock,
   type MessageSourceMap,
 } from '@deepseek-ai/dsh-llm'
-import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
+import type { Session, SessionAppendTiming, SessionEvent } from '@deepseek-ai/dsh-session'
 import { normalizeSessionTitle } from '@deepseek-ai/dsh-session-title'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import { ompTriggerSource } from './driver.ts'
@@ -225,14 +225,14 @@ export async function probeOmpSessionLease(
 
 /** One harness session event reconstructed from a recorded OMP transcript. */
 export type OmpHydrationEvent =
-  | { readonly type: 'turn/start'; readonly data: SessionEvent<'turn/start'>['data'] }
-  | { readonly type: 'turn/end'; readonly data: SessionEvent<'turn/end'>['data'] }
-  | { readonly type: 'step/start'; readonly data: SessionEvent<'step/start'>['data'] }
-  | { readonly type: 'step/end'; readonly data: SessionEvent<'step/end'>['data'] }
-  | { readonly type: 'user/message'; readonly data: SessionEvent<'user/message'>['data'] }
-  | { readonly type: 'assistant/message'; readonly data: SessionEvent<'assistant/message'>['data'] }
-  | { readonly type: 'tool/call'; readonly data: SessionEvent<'tool/call'>['data'] }
-  | { readonly type: 'tool/result'; readonly data: SessionEvent<'tool/result'>['data'] }
+  | { readonly type: 'turn/start'; readonly data: SessionEvent<'turn/start'>['data']; readonly time?: number }
+  | { readonly type: 'turn/end'; readonly data: SessionEvent<'turn/end'>['data']; readonly time?: number }
+  | { readonly type: 'step/start'; readonly data: SessionEvent<'step/start'>['data']; readonly time?: number }
+  | { readonly type: 'step/end'; readonly data: SessionEvent<'step/end'>['data']; readonly time?: number }
+  | { readonly type: 'user/message'; readonly data: SessionEvent<'user/message'>['data']; readonly time?: number }
+  | { readonly type: 'assistant/message'; readonly data: SessionEvent<'assistant/message'>['data']; readonly time?: number }
+  | { readonly type: 'tool/call'; readonly data: SessionEvent<'tool/call'>['data']; readonly time?: number }
+  | { readonly type: 'tool/result'; readonly data: SessionEvent<'tool/result'>['data']; readonly time?: number }
 
 interface TranscriptContentPart {
   readonly type?: unknown
@@ -255,6 +255,9 @@ interface TranscriptMessage {
 
 interface TranscriptMessageEntry {
   readonly type?: unknown
+  readonly id?: unknown
+  readonly parentId?: unknown
+  readonly timestamp?: unknown
   readonly customType?: unknown
   readonly message?: TranscriptMessage
   readonly data?: unknown
@@ -381,8 +384,110 @@ export async function readOmpTranscriptTitle(path: string): Promise<string | und
 export interface OmpTranscriptTurn {
   /** Position of this turn in OMP's own conversation order. */
   readonly turn: number
+  /** Transcript entry id that opened this turn with a real user message. */
+  readonly userEntryId?: string
+  /** Transcript entry id at which this turn's hydrated history ends. */
+  readonly leafEntryId?: string
   /** Structural, message, and tool events the turn recorded. */
   readonly events: readonly OmpHydrationEvent[]
+}
+
+function entryIdOf(entry: TranscriptMessageEntry): string | undefined {
+  return typeof entry.id === 'string' && entry.id.length > 0 ? entry.id : undefined
+}
+
+function isSyntheticPrompt(blocks: readonly ContentBlock[]): boolean {
+  const text = blocks.map(block => block.type === 'text' ? block.text : '').join('\n').trimStart()
+  if (/^omp[:-]continue(?:\b|$)/i.test(text)) return true
+  return /^<(?:memories|system-reminder)(?:[\s>]|$)/i.test(text)
+}
+
+function timed(event: OmpHydrationEvent, time: number | undefined): OmpHydrationEvent {
+  if (time === undefined) return event
+  return { ...event, time }
+}
+
+/**
+ * Order a transcript's records along the active conversation branch.
+ *
+ * OMP writes a tree: every entry names the entry it continues, and a branch or
+ * compaction starts a new child. The newest entry therefore marks the active
+ * leaf; walking its parents yields the messages a reader saw, while abandoned
+ * siblings stay out. A dangling parent (an entry OMP pruned) leaves no path to
+ * the root, so the branch is rebuilt from the newest root forward and the
+ * active tail appended, which keeps orphans off the root chain.
+ * @param records - every parsed transcript record in file order.
+ * @returns records along the active branch in chronological order.
+ */
+function activeTranscriptBranch(records: readonly TranscriptMessageEntry[]): TranscriptMessageEntry[] {
+  const graph = records.some(record => typeof record.id === 'string'
+    && (typeof record.parentId === 'string' || record.parentId === null))
+  let last = -1
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    if (entryIdOf(records[index] as TranscriptMessageEntry) !== undefined) {
+      last = index
+      break
+    }
+  }
+  if (!graph || last === -1) return [...records]
+
+  const byId = new Map<string, number>()
+  for (const [index, record] of records.entries()) {
+    const id = entryIdOf(record)
+    if (id !== undefined && !byId.has(id)) byId.set(id, index)
+  }
+  const sessionId = records.find(record => record.type === 'session')?.id
+  const tail: number[] = []
+  const visited = new Set<number>()
+  let cursor: unknown = records[last]?.id
+  let dangling = false
+  while (typeof cursor === 'string' && cursor !== sessionId) {
+    const at = byId.get(cursor)
+    if (at === undefined) {
+      dangling = true
+      break
+    }
+    if (visited.has(at)) break
+    visited.add(at)
+    tail.push(at)
+    cursor = records[at]?.parentId
+  }
+  const tailRecords = tail.reverse().flatMap(index => {
+    const record = records[index]
+    return record === undefined ? [] : [record]
+  })
+  if (!dangling) return tailRecords
+
+  const children = new Map<string, number[]>()
+  const roots: number[] = []
+  for (const [index, record] of records.entries()) {
+    if (record.type === 'session') continue
+    const id = entryIdOf(record)
+    if (id === undefined) continue
+    if (typeof record.parentId !== 'string' || record.parentId === sessionId) {
+      roots.push(index)
+      continue
+    }
+    const siblings = children.get(record.parentId) ?? []
+    siblings.push(index)
+    children.set(record.parentId, siblings)
+  }
+  const root = roots.at(-1)
+  if (root === undefined) return tailRecords
+
+  const forward: TranscriptMessageEntry[] = []
+  const walked = new Set<number>()
+  let index: number | undefined = root
+  while (index !== undefined && !walked.has(index)) {
+    walked.add(index)
+    const record = records[index]
+    if (record === undefined) break
+    forward.push(record)
+    const id = entryIdOf(record)
+    const kids = id === undefined ? undefined : children.get(id)
+    index = kids?.at(-1)
+  }
+  return [...forward, ...tailRecords.filter(record => !forward.includes(record))]
 }
 
 /**
@@ -394,93 +499,129 @@ export interface OmpTranscriptTurn {
  */
 export async function ompTranscriptTurns(path: string): Promise<OmpTranscriptTurn[]> {
   const text = await readFile(path, 'utf8')
-  const turns: OmpHydrationEvent[][] = []
-  let current: OmpHydrationEvent[] | undefined
-  let turn = 0
-  let step = 0
-  let stepHasAssistant = false
-
-  const closeTurn = (): void => {
-    if (current === undefined) return
-    current.push({ type: 'step/end', data: { turn, step } })
-    current.push({ type: 'turn/end', data: { turn, reason: { kind: 'completed' } } })
-    turns.push(current)
-    current = undefined
-    stepHasAssistant = false
-  }
-  const openTurn = (): OmpHydrationEvent[] => {
-    turn += 1
-    step = 1
-    stepHasAssistant = false
-    const events: OmpHydrationEvent[] = [
-      { type: 'turn/start', data: { turn } },
-      { type: 'step/start', data: { turn, step } },
-    ]
-    current = events
-    return events
-  }
-  const openStep = (events: OmpHydrationEvent[]): void => {
-    events.push({ type: 'step/end', data: { turn, step } })
-    step += 1
-    stepHasAssistant = false
-    events.push({ type: 'step/start', data: { turn, step } })
-  }
-
-  const messages: TranscriptMessage[] = []
-  const toolStarts = new Map<string, { readonly args: unknown; readonly intent: unknown }>()
+  const records: TranscriptMessageEntry[] = []
   for (const line of text.split('\n')) {
     if (line.trim().length === 0) continue
-    let entry: TranscriptMessageEntry
     try {
-      entry = JSON.parse(line) as TranscriptMessageEntry
+      records.push(JSON.parse(line) as TranscriptMessageEntry)
     } catch {
       continue
     }
-    if (entry.type === 'custom' && entry.customType === 'tool_execution_start') {
-      const data = recordOf(entry.data)
-      if (typeof data.toolCallId === 'string' && data.toolCallId.length > 0) {
-        toolStarts.set(data.toolCallId, { args: data.args, intent: data.intent })
-      }
-      continue
+  }
+  const ordered = activeTranscriptBranch(records)
+
+  const toolStarts = new Map<string, { readonly args: unknown; readonly intent: unknown }>()
+  for (const entry of ordered) {
+    if (entry.type !== 'custom' || entry.customType !== 'tool_execution_start') continue
+    const data = recordOf(entry.data)
+    if (typeof data.toolCallId === 'string' && data.toolCallId.length > 0) {
+      toolStarts.set(data.toolCallId, { args: data.args, intent: data.intent })
     }
-    if (entry.type !== 'message' || entry.message === undefined) continue
-    messages.push(entry.message)
   }
 
-  const resultsBeforeNextMessage = (index: number): ReadonlySet<string> => {
+  const resultsBefore = (position: number): ReadonlySet<string> => {
     const ids = new Set<string>()
-    for (let cursor = index + 1; cursor < messages.length; cursor += 1) {
-      const next = messages[cursor] as TranscriptMessage
-      if (next.role === 'user' || next.role === 'assistant') break
-      if (next.role === 'toolResult' && typeof next.toolCallId === 'string' && next.toolCallId.length > 0) {
-        ids.add(next.toolCallId)
-      }
+    for (let cursor = position + 1; cursor < ordered.length; cursor += 1) {
+      const entry = ordered[cursor]
+      if (entry === undefined || entry.type !== 'message' || entry.message === undefined) continue
+      const role = entry.message.role
+      if (role === 'user' || role === 'assistant') break
+      const callId = entry.message.toolCallId
+      if (role === 'toolResult' && typeof callId === 'string' && callId.length > 0) ids.add(callId)
     }
     return ids
   }
 
+  const drafts: { userEntryId?: string; leafEntryId?: string; events: OmpHydrationEvent[] }[] = []
+  let current: OmpHydrationEvent[] | undefined
+  let draft: { userEntryId?: string; leafEntryId?: string; events: OmpHydrationEvent[] } | undefined
+  let turn = 0
+  let step = 0
+  let stepHasAssistant = false
+  let suppressed = false
+  let lastTime: number | undefined
   const openCalls = new Set<string>()
-  for (const [index, message] of messages.entries()) {
+
+  const closeTurn = (): void => {
+    if (current === undefined || draft === undefined) return
+    current.push(timed({ type: 'step/end', data: { turn, step } }, lastTime))
+    current.push(timed({ type: 'turn/end', data: { turn, reason: { kind: 'completed' } } }, lastTime))
+    drafts.push(draft)
+    current = undefined
+    draft = undefined
+    stepHasAssistant = false
+  }
+  const openTurn = (time: number | undefined, userEntryId: string | undefined): OmpHydrationEvent[] => {
+    turn += 1
+    step = 1
+    stepHasAssistant = false
+    const events: OmpHydrationEvent[] = [
+      timed({ type: 'turn/start', data: { turn } }, time),
+      timed({ type: 'step/start', data: { turn, step } }, time),
+    ]
+    current = events
+    draft = {
+      events,
+      ...userEntryId === undefined ? {} : { userEntryId, leafEntryId: userEntryId },
+    }
+    openCalls.clear()
+    return events
+  }
+  const openStep = (events: OmpHydrationEvent[], time: number | undefined): void => {
+    events.push(timed({ type: 'step/end', data: { turn, step } }, lastTime))
+    step += 1
+    stepHasAssistant = false
+    events.push(timed({ type: 'step/start', data: { turn, step } }, time))
+  }
+
+  for (const [position, entry] of ordered.entries()) {
+    const id = entryIdOf(entry)
+    const recorded = typeof entry.timestamp === 'string' ? Date.parse(entry.timestamp) : Number.NaN
+    const time = Number.isFinite(recorded) ? Math.max(lastTime ?? recorded, recorded) : lastTime
+    if (entry.type !== 'message' || entry.message === undefined) {
+      if (draft !== undefined && id !== undefined) draft.leafEntryId = id
+      continue
+    }
+    const message = entry.message
     if (message.role === 'user') {
       const content = textBlocks(message.content)
-      if (content.length === 0) continue
+      if (content.length === 0) {
+        if (draft !== undefined && id !== undefined) draft.leafEntryId = id
+        continue
+      }
+      if (isSyntheticPrompt(content)) {
+        suppressed = true
+        if (draft !== undefined && id !== undefined) draft.leafEntryId = id
+        continue
+      }
+      suppressed = false
       closeTurn()
-      openTurn().push({
+      current = openTurn(time, id)
+      current.push(timed({
         type: 'user/message',
         data: createUserMessage({ content, source: userMessageSource(content) }),
-      })
+      }, time))
+      lastTime = time ?? lastTime
+      continue
+    }
+    if (suppressed) {
+      if (draft !== undefined && id !== undefined) draft.leafEntryId = id
+      lastTime = time ?? lastTime
       continue
     }
     if (message.role === 'assistant') {
-      const results = resultsBeforeNextMessage(index)
+      const results = resultsBefore(position)
       const content = assistantBlocks(message.content, toolStarts)
         .filter(block => block.type !== 'tool-call' || results.has(block.id))
-      if (content.length === 0) continue
-      const events = current ?? openTurn()
-      if (stepHasAssistant) openStep(events)
+      if (content.length === 0) {
+        if (draft !== undefined && id !== undefined) draft.leafEntryId = id
+        continue
+      }
+      if (current === undefined) continue
+      if (stepHasAssistant) openStep(current, time)
       const provider = typeof message.provider === 'string' && message.provider.length > 0 ? message.provider : 'omp'
       const model = typeof message.model === 'string' && message.model.length > 0 ? message.model : 'omp'
-      events.push({
+      current.push(timed({
         type: 'assistant/message',
         data: {
           turn,
@@ -488,23 +629,25 @@ export async function ompTranscriptTurns(path: string): Promise<OmpTranscriptTur
           message: createAssistantMessage({ content, source: { provider, model } }),
           stream: [],
         },
-      })
+      }, time))
       stepHasAssistant = true
       for (const block of content) {
         if (block.type !== 'tool-call') continue
-        events.push({
+        current.push(timed({
           type: 'tool/call',
           data: { turn, step, callId: block.id, name: block.name, arguments: block.arguments },
-        })
+        }, time))
         openCalls.add(block.id)
       }
+      lastTime = time ?? lastTime
+      if (draft !== undefined && id !== undefined) draft.leafEntryId = id
       continue
     }
     if (message.role === 'toolResult' && typeof message.toolCallId === 'string' && message.toolCallId.length > 0) {
       const callId = ToolCallId(message.toolCallId)
       if (current === undefined || !openCalls.delete(callId)) continue
       const content = textBlocks(message.content)
-      current.push({
+      current.push(timed({
         type: 'tool/result',
         data: {
           turn,
@@ -515,11 +658,20 @@ export async function ompTranscriptTurns(path: string): Promise<OmpTranscriptTur
             isError: message.isError === true,
           }),
         },
-      })
+      }, time))
+      lastTime = time ?? lastTime
+      if (draft !== undefined && id !== undefined) draft.leafEntryId = id
+      continue
     }
+    if (draft !== undefined && id !== undefined) draft.leafEntryId = id
   }
   closeTurn()
-  return turns.map((events, index) => ({ turn: index + 1, events }))
+  return drafts.map((entry, index) => ({
+    turn: index + 1,
+    ...entry.userEntryId === undefined ? {} : { userEntryId: entry.userEntryId },
+    ...entry.leafEntryId === undefined ? {} : { leafEntryId: entry.leafEntryId },
+    events: entry.events,
+  }))
 }
 
 function newestTurns(turns: readonly OmpTranscriptTurn[], limit: number): OmpTranscriptTurn[] {
@@ -549,19 +701,19 @@ function renumberTurn(events: readonly OmpHydrationEvent[], turn: number): OmpHy
   return events.map((event): OmpHydrationEvent => {
     switch (event.type) {
       case 'turn/start':
-        return { type: 'turn/start', data: { ...event.data, turn } }
+        return { ...event, data: { ...event.data, turn } }
       case 'turn/end':
-        return { type: 'turn/end', data: { ...event.data, turn } }
+        return { ...event, data: { ...event.data, turn } }
       case 'step/start':
-        return { type: 'step/start', data: { ...event.data, turn } }
+        return { ...event, data: { ...event.data, turn } }
       case 'step/end':
-        return { type: 'step/end', data: { ...event.data, turn } }
+        return { ...event, data: { ...event.data, turn } }
       case 'assistant/message':
-        return { type: 'assistant/message', data: { ...event.data, turn } }
+        return { ...event, data: { ...event.data, turn } }
       case 'tool/call':
-        return { type: 'tool/call', data: { ...event.data, turn } }
+        return { ...event, data: { ...event.data, turn } }
       case 'tool/result':
-        return { type: 'tool/result', data: { ...event.data, turn } }
+        return { ...event, data: { ...event.data, turn } }
       case 'user/message':
         return event
     }
@@ -577,7 +729,7 @@ function renumberTurn(events: readonly OmpHydrationEvent[], turn: number): OmpHy
  * @param limit - maximum events selected from the newest complete turns; the newest turn is always included.
  * @returns ordered events ready to append to a blank harness session.
  */
-export async function ompHydrationEvents(path: string, limit = 200): Promise<OmpHydrationEvent[]> {
+export async function ompHydrationEvents(path: string, limit = Number.POSITIVE_INFINITY): Promise<OmpHydrationEvent[]> {
   return newestTurns(await ompTranscriptTurns(path), limit)
     .flatMap((entry, index) => renumberTurn(entry.events, index + 1))
 }
@@ -609,76 +761,165 @@ function projectedTitle(
   return title
 }
 
+/** High-water cursor a previous hydration persisted for one binding. */
+export interface OmpHydrationCursor {
+  /** Turn count the previous hydration recorded. */
+  readonly hydratedTurns?: number
+  /** Canonical transcript entry id the previous hydration consumed. */
+  readonly hydratedLeafEntryId?: string
+  /** Transcript byte size the previous hydration consumed. */
+  readonly hydratedByteOffset?: number
+}
+
 /** What one hydration pass appended to a harness session. */
 export interface OmpHydrationOutcome {
   /** Events appended to the harness session. */
   readonly appended: number
   /** Contiguous turn count the session now holds through. */
   readonly turns: number
+  /** Turn count to persist as the binding's hydration high-water mark. */
+  readonly hydratedTurns: number
+  /** Transcript entry id the session's projected history now reaches. */
+  readonly hydratedLeafEntryId?: string
+  /** Transcript byte size the hydration read. */
+  readonly hydratedByteOffset?: number
 }
 
 /**
  * Append a transcript's recorded title and surface events to a harness
  * session, filling only the turns the session does not already project.
  *
- * A blank session receives the newest complete turns the event limit admits.
- * An already-mirrored session receives the turns OMP recorded after it, in
- * transcript order and renumbered contiguously after the turns it holds, so a
- * live terminal run that kept working while the Harness was detached catches
- * up without duplicating bubbles.
+ * A blank session receives every active-branch turn the event limit admits.
+ * An already-mirrored session receives only the turns the active branch
+ * recorded after the cursor leaf it already holds, renumbered contiguously
+ * after the turns it holds, so a live terminal run that kept working while the
+ * Harness was detached catches up without duplicating bubbles. Without a leaf
+ * cursor the newest projected user message anchors the same comparison, so a
+ * legacy turn count can never splice older turns under newer ones. Recorded
+ * event times are stamped onto the log as-is, clamped non-decreasing from the
+ * session's last event, so a cold reload keeps the transcript's chronology.
  * @param session - live session receiving the events.
  * @param path - transcript path.
  * @param limit - maximum events selected by one pass; at least one turn is always included.
- * @param hydratedTurns - turn count a previous hydration recorded, when the binding still has it.
+ * @param cursorOrHydratedTurns - saved cursor, or the legacy turn count a previous hydration recorded.
  * @param includeNewestTurn - false leaves the last transcript turn out because OMP is still streaming it.
- * @returns the appended event count and the contiguous turn count the session now holds.
+ * @returns the appended event count, the contiguous turn count, and the cursor to persist.
  */
 export async function hydrateOmpSession(
   session: Session,
   path: string,
-  limit = 200,
-  hydratedTurns = 0,
+  limit = Number.POSITIVE_INFINITY,
+  cursorOrHydratedTurns: number | OmpHydrationCursor = 0,
   includeNewestTurn = true,
 ): Promise<OmpHydrationOutcome> {
-  const existing = Math.max(projectedTurnCount(session), hydratedTurns)
-  const pending = (await ompTranscriptTurns(path)).filter(entry => entry.turn > existing)
-  const selectable = includeNewestTurn ? pending : pending.slice(0, -1)
-  const selected = existing === 0 && hydratedTurns === 0
-    ? newestTurns(selectable, limit).map((entry, index) => renumberTurn(entry.events, index + 1))
-    : oldestTurns(selectable, limit).map((entry, index) => renumberTurn(entry.events, existing + index + 1))
+  const cursor: OmpHydrationCursor = typeof cursorOrHydratedTurns === 'number'
+    ? { hydratedTurns: cursorOrHydratedTurns }
+    : cursorOrHydratedTurns
+  const projected = projectedTurnCount(session)
+  const recorded = cursor.hydratedTurns ?? 0
+  const info = await stat(path).catch(() => undefined)
+  const byteOffset = info !== undefined && info.isFile() ? info.size : undefined
+
+  if (projected > 0 && includeNewestTurn
+    && cursor.hydratedLeafEntryId !== undefined
+    && cursor.hydratedByteOffset !== undefined
+    && byteOffset === cursor.hydratedByteOffset) {
+    return {
+      appended: 0,
+      turns: projected,
+      hydratedTurns: projected,
+      hydratedLeafEntryId: cursor.hydratedLeafEntryId,
+      hydratedByteOffset: cursor.hydratedByteOffset,
+    }
+  }
+
+  const turns = await ompTranscriptTurns(path)
+  const base = projected > 0 ? projected : recorded
+  let matched = cursor.hydratedLeafEntryId === undefined
+    ? -1
+    : turns.findIndex(entry => entry.leafEntryId === cursor.hydratedLeafEntryId)
+  if (matched === -1 && projected > 0) {
+    const snapshot = session.snapshotEvents()
+    let newestUser: typeof snapshot[number] | undefined
+    for (let index = snapshot.length - 1; index >= 0; index -= 1) {
+      const event = snapshot[index]
+      if (event?.type === 'user/message') {
+        newestUser = event
+        break
+      }
+    }
+    const block = newestUser?.type === 'user/message' ? newestUser.data.content[0] : undefined
+    const marker = block?.type === 'text' ? block.text : undefined
+    if (marker !== undefined) {
+      for (let index = turns.length - 1; index >= 0; index -= 1) {
+        const userEvent = turns[index]?.events.find(event => event.type === 'user/message')
+        const userBlock = userEvent?.type === 'user/message' ? userEvent.data.content[0] : undefined
+        if (userBlock?.type === 'text' && userBlock.text === marker) {
+          matched = index
+          break
+        }
+      }
+    }
+  }
+  if (matched === -1) matched = projected > 0 ? turns.length - 1 : recorded - 1
+
+  const pending = turns.slice(matched + 1)
+  const admissible = includeNewestTurn ? pending : pending.slice(0, -1)
+  const admitted = base === 0 ? newestTurns(admissible, limit) : oldestTurns(admissible, limit)
+  const selected = admitted.map((entry, index) => renumberTurn(entry.events, base + index + 1))
   const title = await readOmpTranscriptTitle(path)
   const appendedTitle = title !== undefined && title !== projectedTitle(session) ? title : undefined
-  if (appendedTitle !== undefined) {
-    session.append('session/title', { title: appendedTitle, messageSeqs: [], source: { kind: 'user' } })
-  }
   const events = selected.flat()
+  let floorTime = -Number.MAX_SAFE_INTEGER
+  const lastProjectedTime = session.snapshotEvents().at(-1)?.time
+  if (lastProjectedTime !== undefined) floorTime = lastProjectedTime
+  const timingOf = (event: OmpHydrationEvent): SessionAppendTiming => {
+    if (event.time === undefined) return floorTime === -Number.MAX_SAFE_INTEGER ? {} : { time: floorTime }
+    const time = Math.max(floorTime, Math.trunc(event.time))
+    floorTime = time
+    return { time }
+  }
+  if (appendedTitle !== undefined) {
+    const titleTime = floorTime === -Number.MAX_SAFE_INTEGER
+      ? events.find(event => event.time !== undefined)?.time
+      : floorTime
+    session.append('session/title', { title: appendedTitle, messageSeqs: [], source: { kind: 'user' } },
+      titleTime === undefined ? {} : { time: titleTime })
+  }
   for (const event of events) {
     switch (event.type) {
       case 'turn/start':
-        session.append('turn/start', event.data)
+        session.append('turn/start', event.data, timingOf(event))
         break
       case 'turn/end':
-        session.append('turn/end', event.data)
+        session.append('turn/end', event.data, timingOf(event))
         break
       case 'step/start':
-        session.append('step/start', event.data)
+        session.append('step/start', event.data, timingOf(event))
         break
       case 'step/end':
-        session.append('step/end', event.data)
+        session.append('step/end', event.data, timingOf(event))
         break
       case 'user/message':
-        session.append('user/message', event.data, { surfaceOp: 'append' })
+        session.append('user/message', event.data, { surfaceOp: 'append', ...timingOf(event) })
         break
       case 'assistant/message':
-        session.append('assistant/message', event.data, { surfaceOp: 'append' })
+        session.append('assistant/message', event.data, { surfaceOp: 'append', ...timingOf(event) })
         break
       case 'tool/call':
-        session.append('tool/call', event.data)
+        session.append('tool/call', event.data, timingOf(event))
         break
       case 'tool/result':
-        session.append('tool/result', event.data, { surfaceOp: 'append' })
+        session.append('tool/result', event.data, { surfaceOp: 'append', ...timingOf(event) })
         break
     }
   }
-  return { appended: events.length + (appendedTitle === undefined ? 0 : 1), turns: existing + selected.length }
+  const newestTurn = admitted.at(-1)
+  return {
+    appended: events.length + (appendedTitle === undefined ? 0 : 1),
+    turns: base + selected.length,
+    hydratedTurns: base + selected.length,
+    ...newestTurn?.leafEntryId === undefined ? {} : { hydratedLeafEntryId: newestTurn.leafEntryId },
+    ...byteOffset === undefined ? {} : { hydratedByteOffset: byteOffset },
+  }
 }

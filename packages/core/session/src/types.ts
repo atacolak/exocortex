@@ -486,6 +486,16 @@ export type SurfaceIntent<T extends SurfaceEventType = SurfaceEventType> = {
 })
 
 /**
+ * Recorded event epoch-ms timestamp when hydrating an external transcript;
+ * defaults to `Date.now()`. Kept out of {@link SurfaceIntent} because it
+ * describes log timing, not surface placement.
+ */
+export interface SessionAppendTiming {
+  /** Explicit event epoch-ms timestamp; non-negative safe integer. */
+  readonly time?: number
+}
+
+/**
  * One immutable entry in the session log.
  *
  * A proper discriminated union over `type` (not independent `type`/`data`
