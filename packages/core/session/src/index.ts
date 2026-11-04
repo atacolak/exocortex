@@ -15,7 +15,7 @@ import type { Scoped } from '@deepseek-ai/dsh-scope'
 import type { Message } from '@deepseek-ai/dsh-llm'
 import { SESSION_FORMAT_VERSION, SessionLogOffset, SessionSeq } from './types.ts'
 import type { TypertLookup } from '@deepseek-ai/dsh-typert-protocol'
-import type { CreateSessionOptions, EpochHeader, PluginRecord, PluginRecordMap, PluginRecordType, PrepareSessionOptions, RequestContext, SessionEvent, SessionEventMap, SessionEventType, SessionHeader, SessionId, SessionSeedEventState, SurfaceIntent, SurfaceEventType } from './types.ts'
+import type { CreateSessionOptions, EpochHeader, PluginRecord, PluginRecordMap, PluginRecordType, PrepareSessionOptions, RequestContext, SessionAppendTiming, SessionEvent, SessionEventMap, SessionEventType, SessionHeader, SessionId, SessionSeedEventState, SurfaceIntent, SurfaceEventType } from './types.ts'
 import { SurfaceManager, validateSessionEventData, validateSurfaceMetadata } from './surface.ts'
 import type { SessionSurface, SessionMessageProjection } from './surface.ts'
 import { foldRequestHeader } from './request-header.ts'
@@ -782,12 +782,15 @@ export class Session {
    *   history) and
    *   rejected by the compiler for non-surface types like `turn/start` or
    *   `assistant/attempt`. Assistant messages embed their exact provider
-   *   stream and cannot cite top-level source events.
+   *   stream and cannot cite top-level source events. `time` optionally
+   *   records the event's own epoch-ms timestamp instead of `Date.now()`,
+   *   used when hydrating an externally recorded transcript.
    * @returns the logged event — its assigned `seq`/`time` plus the SNAPSHOT of
    *   `data` that entered the log, so reading `event.data` back sees the logged
    *   value, never the caller's still-mutable input.
    * @throws if a store-owned Session is unentered or its creation announcement
-   *   has not completed, or if `data` or surface
+   *   has not completed, if `opts.time` is not a non-negative safe integer, or
+   *   if `data` or surface
    *   metadata is not losslessly JSON-serializable
    *   (BigInt, function, symbol, undefined, negative zero, non-finite number,
    *   circular reference, sparse array, or an exotic object such as
@@ -806,10 +809,14 @@ export class Session {
   append<T extends SessionEventType>(
     type: T,
     data: SessionEventMap[T],
-    ...opts: T extends SurfaceEventType ? [opts: SurfaceIntent<T>] : []
+    ...opts: T extends SurfaceEventType ? [opts: SurfaceIntent<T> & SessionAppendTiming] : [opts?: SessionAppendTiming]
   ): SessionEvent<T> {
     this.publicationEntry()
-    const surfaceOpts: SurfaceIntent | undefined = opts[0]
+    const surfaceOpts = opts[0] as SurfaceIntent | undefined
+    const recordedTime = (opts[0] as SessionAppendTiming | undefined)?.time
+    if (recordedTime !== undefined && (!Number.isSafeInteger(recordedTime) || recordedTime < 0)) {
+      throw new Error('session event time must be a non-negative safe integer')
+    }
     const surfaceMetadata = {
       ...surfaceOpts?.sourceEventSeqs === undefined ? {} : { sourceEventSeqs: surfaceOpts.sourceEventSeqs },
       ...surfaceOpts?.surfaceOp === undefined ? {} : { surfaceOp: surfaceOpts.surfaceOp },
@@ -827,7 +834,7 @@ export class Session {
     const event = deepFreeze({
       type,
       seq: SessionSeq(this.log.length),
-      time: Date.now(),
+      time: recordedTime ?? Date.now(),
       data: dataSnapshot,
       ...(surfaceMetadataSnapshot as { surfaceOp?: unknown; sourceEventSeqs?: unknown }),
     } as unknown as SessionEvent<T>)

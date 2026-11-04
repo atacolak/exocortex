@@ -65,6 +65,12 @@ function sessionUserTexts(session: Session): (string | undefined)[] {
     .map(event => firstText(event.data.content))
 }
 
+function sessionUserTimes(session: Session): number[] {
+  return session.snapshotEvents()
+    .filter(event => event.type === 'user/message')
+    .map(event => event.time)
+}
+
 function sessionTurnNumbers(session: Session): number[] {
   return session.snapshotEvents()
     .filter(event => event.type === 'turn/start')
@@ -719,6 +725,14 @@ describe('ompTranscriptTurns canonical branch', () => {
     expect(times).toEqual([...times].sort((left, right) => left - right))
     expect(times[0]).toBe(Date.parse('2026-11-04T10:00:00.000Z'))
     expect(times).toContain(Date.parse('2026-11-04T12:00:00.000Z'))
+
+    const session = Session.create(SessionId('hydrate-backwards-clock'))
+    await hydrateOmpSession(session, path)
+
+    expect(sessionUserTimes(session)).toEqual([
+      Date.parse('2026-11-04T10:00:00.000Z'),
+      Date.parse('2026-11-04T11:00:00.000Z'),
+    ])
   })
 })
 
@@ -855,6 +869,10 @@ describe.skipIf(!existsSync(REAL_TRANSCRIPT))('real OMP transcript hydration', (
     expect(users.filter(text => text?.trimStart().startsWith('<memories>')
       || text?.trimStart().startsWith('<system-reminder>'))).toEqual([])
 
+    const recordedUserTimes = turns.map(turn => turn.events.find(event => event.type === 'user/message')?.time)
+    expect(recordedUserTimes.every(time => time !== undefined)).toBe(true)
+    expect(sessionUserTimes(session)).toEqual(recordedUserTimes)
+
     const root = await mkdtemp(join(tmpdir(), 'dsh-real-hydrate-log-'))
     onTestFinished(() => rm(root, { recursive: true, force: true }))
     const ctx = new Context()
@@ -880,6 +898,10 @@ describe.skipIf(!existsSync(REAL_TRANSCRIPT))('real OMP transcript hydration', (
       expect(stored.events.filter(event => event.type === 'user/message')).toHaveLength(turns.length)
       expect(stored.events.filter(event => event.type === 'turn/start').map(event => event.data.turn))
         .toEqual(turns.map(turn => turn.turn))
+      expect(stored.events.filter(event => event.type === 'user/message').map(event => event.time))
+        .toEqual(recordedUserTimes)
+      const storedTimes = stored.events.map(event => event.time)
+      expect(storedTimes).toEqual([...storedTimes].sort((left, right) => left - right))
     } finally {
       await reopened.close()
     }

@@ -16,7 +16,7 @@ import {
   type ContentBlock,
   type MessageSourceMap,
 } from '@deepseek-ai/dsh-llm'
-import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
+import type { Session, SessionAppendTiming, SessionEvent } from '@deepseek-ai/dsh-session'
 import { normalizeSessionTitle } from '@deepseek-ai/dsh-session-title'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import { ompTriggerSource } from './driver.ts'
@@ -795,7 +795,9 @@ export interface OmpHydrationOutcome {
  * after the turns it holds, so a live terminal run that kept working while the
  * Harness was detached catches up without duplicating bubbles. Without a leaf
  * cursor the newest projected user message anchors the same comparison, so a
- * legacy turn count can never splice older turns under newer ones.
+ * legacy turn count can never splice older turns under newer ones. Recorded
+ * event times are stamped onto the log as-is, clamped non-decreasing from the
+ * session's last event, so a cold reload keeps the transcript's chronology.
  * @param session - live session receiving the events.
  * @param path - transcript path.
  * @param limit - maximum events selected by one pass; at least one turn is always included.
@@ -867,35 +869,48 @@ export async function hydrateOmpSession(
   const selected = admitted.map((entry, index) => renumberTurn(entry.events, base + index + 1))
   const title = await readOmpTranscriptTitle(path)
   const appendedTitle = title !== undefined && title !== projectedTitle(session) ? title : undefined
-  if (appendedTitle !== undefined) {
-    session.append('session/title', { title: appendedTitle, messageSeqs: [], source: { kind: 'user' } })
-  }
   const events = selected.flat()
+  let floorTime = -Number.MAX_SAFE_INTEGER
+  const lastProjectedTime = session.snapshotEvents().at(-1)?.time
+  if (lastProjectedTime !== undefined) floorTime = lastProjectedTime
+  const timingOf = (event: OmpHydrationEvent): SessionAppendTiming => {
+    if (event.time === undefined) return floorTime === -Number.MAX_SAFE_INTEGER ? {} : { time: floorTime }
+    const time = Math.max(floorTime, Math.trunc(event.time))
+    floorTime = time
+    return { time }
+  }
+  if (appendedTitle !== undefined) {
+    const titleTime = floorTime === -Number.MAX_SAFE_INTEGER
+      ? events.find(event => event.time !== undefined)?.time
+      : floorTime
+    session.append('session/title', { title: appendedTitle, messageSeqs: [], source: { kind: 'user' } },
+      titleTime === undefined ? {} : { time: titleTime })
+  }
   for (const event of events) {
     switch (event.type) {
       case 'turn/start':
-        session.append('turn/start', event.data)
+        session.append('turn/start', event.data, timingOf(event))
         break
       case 'turn/end':
-        session.append('turn/end', event.data)
+        session.append('turn/end', event.data, timingOf(event))
         break
       case 'step/start':
-        session.append('step/start', event.data)
+        session.append('step/start', event.data, timingOf(event))
         break
       case 'step/end':
-        session.append('step/end', event.data)
+        session.append('step/end', event.data, timingOf(event))
         break
       case 'user/message':
-        session.append('user/message', event.data, { surfaceOp: 'append' })
+        session.append('user/message', event.data, { surfaceOp: 'append', ...timingOf(event) })
         break
       case 'assistant/message':
-        session.append('assistant/message', event.data, { surfaceOp: 'append' })
+        session.append('assistant/message', event.data, { surfaceOp: 'append', ...timingOf(event) })
         break
       case 'tool/call':
-        session.append('tool/call', event.data)
+        session.append('tool/call', event.data, timingOf(event))
         break
       case 'tool/result':
-        session.append('tool/result', event.data, { surfaceOp: 'append' })
+        session.append('tool/result', event.data, { surfaceOp: 'append', ...timingOf(event) })
         break
     }
   }
