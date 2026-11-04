@@ -474,4 +474,48 @@ describe('OmpBridge live socket attachment', () => {
     expect(chunks).toEqual([{ type: 'finish', reason: { kind: 'stop' } }])
     expect(frames.filter(frame => frame.type === 'prompt' || frame.type === 'steer')).toEqual([])
   })
+
+  it('advertises a live tool call in an assistant message before projecting it', async () => {
+    const { ctx, bridge } = await socketBridge()
+    const { directory } = await published('omp-live-tool')
+    const agent = await scopedAgent(ctx, 'socket-tool')
+    await bridge.attach(agent, {
+      mode: 'attach',
+      sessionDir: directory,
+      socketPath: ompSocketPath(directory, 'omp-live-tool'),
+      sessionId: 'omp-live-tool',
+      cwd: '/work',
+    })
+
+    agent.session.append('turn/start', { turn: 3 })
+    agent.session.append('step/start', { turn: 3, step: 1 })
+    agent.session.append('assistant/message', {
+      turn: 3,
+      step: 1,
+      message: { id: 'empty-assistant', role: 'assistant', content: [], source: { kind: 'model', provider: 'cpa', model: 'gemini' } } as never,
+      stream: [],
+    }, { surfaceOp: 'append' })
+
+    const live = (bridge as unknown as {
+      attachments: Map<string, { agent: Agent; cursor: { turn: number; step: number } }>
+      projectTool(live: unknown, event: unknown): void
+    }).attachments.get(agent.id)
+    expect(live).toBeDefined()
+    const project = (bridge as unknown as { projectTool(live: unknown, event: unknown): void }).projectTool.bind(bridge)
+    live!.cursor.turn = 3
+    live!.cursor.step = 1
+    project(live, { kind: 'start', toolCallId: 'call_live_1', toolName: 'bash', arguments: { command: 'uptime' } })
+    project(live, { kind: 'start', toolCallId: 'call_live_1', toolName: 'bash', arguments: { command: 'uptime' } })
+
+    const events = agent.session.snapshotEvents()
+    const callIndex = events.findIndex(event => event.type === 'tool/call')
+    expect(callIndex).toBeGreaterThan(0)
+    const call = events[callIndex]
+    expect(call?.type === 'tool/call' && call.data.arguments).toBe('{"command":"uptime"}')
+    const advertised = events.slice(0, callIndex).reverse().find(event => event.type === 'assistant/message')
+    expect(advertised?.type === 'assistant/message' && advertised.data.message.content).toEqual([
+      { type: 'tool-call', id: 'call_live_1', name: 'bash', arguments: '{"command":"uptime"}' },
+    ])
+    expect(events.filter(event => event.type === 'assistant/message')).toHaveLength(2)
+  })
 })

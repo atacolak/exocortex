@@ -2,7 +2,7 @@ import { mkdir, stat } from 'node:fs/promises'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentStepStream } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-commands'
-import { createToolResultMessage, createUserMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
+import { createAssistantMessage, createToolResultMessage, createUserMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { RequestMessage } from '@deepseek-ai/dsh-llm'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
@@ -636,12 +636,24 @@ export class OmpBridge {
     const cursor = live.cursor
     const callId = ToolCallId(event.toolCallId)
     if (event.kind === 'start') {
+      const args = JSON.stringify(event.arguments)
+      if (!this.advertisesCall(live, callId)) {
+        cursor.agent.session.append('assistant/message', {
+          turn: cursor.turn,
+          step: cursor.step,
+          message: createAssistantMessage({
+            content: [{ type: 'tool-call', id: callId, name: event.toolName, arguments: args }],
+            source: this.assistantSource(live),
+          }),
+          stream: [],
+        }, { surfaceOp: 'append' })
+      }
       cursor.agent.session.append('tool/call', {
         turn: cursor.turn,
         step: cursor.step,
         callId,
         name: event.toolName,
-        arguments: JSON.stringify(event.arguments),
+        arguments: args,
       })
       return
     }
@@ -654,6 +666,42 @@ export class OmpBridge {
       message: createToolResultMessage({ callId, content, isError: event.isError }),
     }, { surfaceOp: 'append' })
     if (event.toolName === 'todo' && !event.isError) void this.publishTodos(live)
+  }
+
+  /**
+   * Whether the current step already advertises one tool call in an assistant
+   * message content block, which the session format requires before `tool/call`.
+   * @param live - attachment whose session log receives projections.
+   * @param callId - OMP tool call identity.
+   * @returns true when this step's assistant messages carry the block.
+   */
+  private advertisesCall(live: LiveAttachment, callId: ToolCallId): boolean {
+    const events = live.agent.session.snapshotEvents()
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index]
+      if (event === undefined) continue
+      if (event.type === 'step/start' || event.type === 'turn/start') return false
+      if (event.type !== 'assistant/message') continue
+      if (event.data.message.content.some(block => block.type === 'tool-call' && block.id === callId)) return true
+    }
+    return false
+  }
+
+  /**
+   * Model attribution for a synthetic assistant message, copied from the newest
+   * projected assistant turn so the bubble names the model that produced it.
+   * @param live - attachment whose session log supplies the attribution.
+   * @returns the newest model source, or OMP's own placeholder.
+   */
+  private assistantSource(live: LiveAttachment): { provider: string; model: string } {
+    const events = live.agent.session.snapshotEvents()
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index]
+      if (event?.type !== 'assistant/message') continue
+      const source = event.data.message.source
+      return source.kind === 'model' ? { provider: source.provider, model: source.model } : { provider: 'omp', model: 'omp' }
+    }
+    return { provider: 'omp', model: 'omp' }
   }
 
   private async publishTodos(live: LiveAttachment): Promise<void> {
