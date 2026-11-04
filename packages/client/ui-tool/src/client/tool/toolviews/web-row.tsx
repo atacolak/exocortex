@@ -15,7 +15,7 @@ const WEB_TITLE_KEYS = {
 } as const
 
 /** Lets users expand a completed web search or fetch result. */
-export function WebRow({ toolName, block, useContextMenu, sessionId, inspect, useDisclosure, t }: WebRowProps) {
+export function WebRow({ toolName, block, useContextMenu, sessionId, inspect, useDisclosure, renderToolRow, t }: WebRowProps) {
   const { getTriggerProps } = useContextMenu()
   const href = webFetchHref(block)
   const model = toolRowModel(toolName, block)
@@ -23,7 +23,9 @@ export function WebRow({ toolName, block, useContextMenu, sessionId, inspect, us
   const icon = toolName === 'web_fetch' ? <IconBrowseOutlineRegular size={14} /> : <IconGlobeOutlineRegular size={14} />
   return (
     <ToolRow
-      urlContextMenuProps={getTriggerProps(href === undefined ? undefined : { kind: 'url', value: { sessionId, url: href } })}
+      renderToolRow={renderToolRow}
+      urlContextMenuProps=
+{getTriggerProps(href === undefined ? undefined : { kind: 'url', value: { sessionId, url: href } })}
       useDisclosure={useDisclosure}
       t={t}
       variant={model.variant}

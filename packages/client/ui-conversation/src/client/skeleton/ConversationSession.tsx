@@ -101,7 +101,7 @@ function equalBreadcrumbs(left: readonly Breadcrumb[], right: readonly Breadcrum
     })
 }
 
-interface SessionTitleProps {
+interface NeutralTitleProps {
   readonly sessionId: SessionId
   readonly title: string
   readonly subagent: boolean
@@ -110,11 +110,11 @@ interface SessionTitleProps {
 }
 
 /**
- * The current Session title as plain text on the window drag row; a click, the
- * hover pencil, or Enter on the pencil swaps it for an auto-sized input that
- * saves through the same Session rename the sidebar uses.
+ * The neutral stock Session title: plain text on the window drag row; a click,
+ * the hover pencil, or Enter on the pencil swaps it for an auto-sized input
+ * that saves through the same Session rename the sidebar uses.
  */
-function SessionTitle({ sessionId, title, subagent, renameSession, t }: SessionTitleProps) {
+function NeutralTitle({ sessionId, title, subagent, renameSession, t }: NeutralTitleProps) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(title)
   const [error, setError] = useState<string | null>(null)
@@ -255,14 +255,24 @@ export function ConversationSessionHeader({
                   // would subtract itself from the header's drag row (ui-web
                   // base.css) and leave the title inert for dragging too.
                   const title = last
-                    ? (
-                      <SessionTitle
-                        sessionId={summary.id}
-                        title={summary.displayTitle}
-                        subagent={summary.subagent}
-                        renameSession={renameSession}
-                        t={t}
-                      />
+                    ? renderSlot(
+                      'conversation.session.header.title',
+                      {
+                        sessionId: summary.id,
+                        title: summary.displayTitle,
+                        renameSession: next => renameSession(summary.id, next),
+                      },
+                      {
+                        fallback: (
+                          <NeutralTitle
+                            sessionId={summary.id}
+                            title={summary.displayTitle}
+                            subagent={summary.subagent}
+                            renameSession={renameSession}
+                            t={t}
+                          />
+                        ),
+                      },
                     )
                     : (
                       <button

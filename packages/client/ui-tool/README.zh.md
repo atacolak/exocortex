@@ -73,6 +73,8 @@ owner 载荷为 `ToolCallOwnerProps`：`callId`、`toolName`、`phase` 判别字
 
 ### 渲染约定
 
+`ToolCallTree` 声明 `tool.row`：一个会话级单例 Slot，由同一占用方拥有每个原子工具行。占用方接收 stock 行 props、模型编写的 `arguments.i` intent、wire 工具名，以及 `renderDefault`；后者按每次调用的覆盖渲染 stock 行，并通过同一 props 委托展开卡片。省略该 Slot 的工具视图原样渲染 stock 行；本包不附带任何 intent 感知或产品特定的行呈现。
+
 `ToolCallTree` 接收一个 Tool 节点、会话 `cwd` 和导航回调。每个分支接收稳定的 block，并缓存显式阶段 props，因此一个子调用变化不会重渲染未变化的兄弟分支。它通过 `tool.call.toolview` 按工具名分发。已派发的根调用保留递归 `subCalls`，准备阶段没有子调用。每个根调用和子调用包装层都保留 `data-chat-anchor-key="call:<id>"` 与 `data-chat-call-id` DOM 约定，供分页和选择使用。Tool 节点在三个阶段保持同一个 callId。
 
 Tool 所有者属性将 Chat 注入的稳定 `useDisclosure` 钩子传给根调用及嵌套调用。工具行在拥有展开正文的位置调用它，中间 renderer 不订阅。每次调用拥有独立展开状态，外层轮次收起时重置该状态，不替换 React 身份；展示模式切换保留该状态。

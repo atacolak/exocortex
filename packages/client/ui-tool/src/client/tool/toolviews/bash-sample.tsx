@@ -69,16 +69,12 @@ export const BashRow = memo(function BashRow({ toolName, block, sessionId, useSe
       : null,
     [genericBody, model.bodyRaw, model.variant, open],
   )
-  // The intent heading already states the task; the command (or terminal
-  // description) waits for the disclosure so the collapsed row reads as one
-  // sentence.
-  const authoredSummary = (model.intent === undefined ? terminal?.description : undefined) ?? model.summary
-  const visibleSummary = model.intent !== undefined && !open ? '' : authoredSummary
+  const normalSummary = terminal?.description ?? model.summary
   const exitLabel = terminalExitLabel(terminalModel, t)
   const settlementLine = exitLabel !== null ? null : state === 'error'
-    ? model.errorSummary ?? visibleSummary
+    ? model.errorSummary ?? normalSummary
     : state === 'stopped' ? t('bash.stopped') : null
-  const summaryText = settlementLine ?? visibleSummary
+  const summaryText = settlementLine ?? normalSummary
   const running = state === 'running' || state === 'preparing'
   const toggleFromKeyboard = useCallback((event: KeyboardEvent<HTMLDivElement>) => {
     if (!expandable || (event.key !== 'Enter' && event.key !== ' ')) return
@@ -112,7 +108,7 @@ export const BashRow = memo(function BashRow({ toolName, block, sessionId, useSe
         <span className={css.leading}>{leading}</span>
         {status !== null && <span className={css.visuallyHidden}>{status}</span>}
         <TextShimmer active={running}>
-          <TextShimmer className={css.title}>{model.intent ?? t(model.titleKey)}</TextShimmer>
+          <TextShimmer className={css.title}>{t(model.titleKey)}</TextShimmer>
           {summaryText !== '' && (
             <>
               <span className={css.sep} data-shimmer-decoration aria-hidden />

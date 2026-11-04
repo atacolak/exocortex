@@ -1,5 +1,5 @@
 /** Chat-owned Slot declarations and composed component props. */
-import type { RefObject } from 'react'
+import type { ReactNode, RefObject } from 'react'
 import type { MessageId } from '@deepseek-ai/dsh-llm/brand'
 import type { SessionId, SessionSeq } from '@deepseek-ai/dsh-session/types'
 import type { PendingSubmission } from '@deepseek-ai/dsh-api-session-controller/client'
@@ -248,6 +248,15 @@ export interface ChatNodeOwnerProps {
   loadImage: MessageImageLoader
   /** Turn-process state when this Node belongs to a projected Turn. */
   turnProcess?: TurnProcessOwnerProps | undefined
+  /**
+   * Render the Session's registered compaction card for one checkpoint.
+   * Absent when a business component renders a marker outside the Chat view,
+   * where the neutral divider is the only possible card.
+   * @param props - durable checkpoint facts for the registered occupant.
+   * @param fallback - neutral divider Chat renders when no occupant registers.
+   * @returns the compaction card.
+   */
+  renderCompactionCard?: ((props: ChatCompactionCardSlotProps, fallback: ReactNode) => ReactNode) | undefined
 }
 
 /** One attachment in the original user-message display order. */
@@ -371,11 +380,31 @@ export type ChatFlowDataInjected = Pick<ChatViewInjected, 'keyedHooks'> & {
 
 /** Ordered rows and reconciled local echoes rendered inside one Chat viewport. */
 export interface ChatFlowOwnerProps extends Pick<ChatNodeOwnerProps,
-  'cwd' | 'openFile' | 'inspectCall' | 'forkAt' | 'retryTurn' | 'loadImage'> {
+  'cwd' | 'openFile' | 'inspectCall' | 'forkAt' | 'retryTurn' | 'loadImage' | 'renderCompactionCard'> {
   readonly entries: readonly RenderEntry[]
   readonly pendingInputs: readonly (PendingSubmission | InboxState['next-step'][number])[]
   readonly lastInputTurn: number | undefined
   readonly deferCollapse: boolean
+}
+
+/**
+ * Durable facts of one history compaction checkpoint.
+ *
+ * Every field is optional because a window cut can leave the checkpoint's
+ * summary event outside the loaded transcript, and a producing runtime may
+ * report no method or token counts at all.
+ */
+export interface ChatCompactionCardSlotProps {
+  /** Producing runtime's compaction method name (for example `snapcompact`). */
+  readonly method?: string | undefined
+  /** Estimated context tokens the checkpoint replaced. */
+  readonly tokensBefore?: number | undefined
+  /** Estimated context tokens remaining after the rewrite. */
+  readonly tokensAfter?: number | undefined
+  /** Checkpoint summary text, when the cited summary event is inside the window. */
+  readonly summary?: string | undefined
+  /** Unix epoch ms of the checkpoint event. */
+  readonly timestamp?: string | number | undefined
 }
 
 /** Full props of the Chat-owned flow renderer. */
@@ -390,7 +419,7 @@ export type ChatFlowSlotProps =
 /** Full Chat view props. */
 export type ChatViewSlotProps =
   PropsRuntime<'conversation.view'>
-  & PropsRenderSlots<'conversation.chat.flow' | 'conversation.chat.text-interaction'>
+  & PropsRenderSlots<'conversation.chat.flow' | 'conversation.chat.text-interaction' | 'chat.compactionCard'>
   & PropsStore<ChatStore>
   & InjectFace<ChatViewInjected>
   & PropsLocale<'chat'>
@@ -488,6 +517,12 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
      * adds an entry; entries without content return null.
      */
     'conversation.chat.turnTail': { kind: 'list'; scope: 'session'; owner: TurnTailOwnerProps }
+    /**
+     * One history compaction checkpoint, whether it arrived as an automatic
+     * marker or as the checkpoint of a manual `/compact` command. The fallback
+     * is the neutral divider Chat ships; an occupant owns the whole card.
+     */
+    'chat.compactionCard': { kind: 'single'; scope: 'session'; owner: ChatCompactionCardSlotProps }
     /**
      * Ordered actions for one finalized assistant message. Each entry receives
      * the durable message id; a fresh `id` adds an action and reusing one replaces

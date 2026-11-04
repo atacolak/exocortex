@@ -1,4 +1,5 @@
 /** Tool UI slot declarations and their composed component props. */
+import type { ReactNode } from 'react'
 import type {
   HostObservable, InjectFace, PropsLocale, PropsRenderSlots, PropsRuntime, SessionIdOf,
 } from '@deepseek-ai/dsh-client-ui-slots'
@@ -11,14 +12,14 @@ import type { MessageImageLoader, MessageImageSource } from '@deepseek-ai/dsh-cl
 import type { AskUserQuestionAnswerItem, AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions/types'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type { ToolFileInjected } from '../tool/file-menu.ts'
+import type { ToolRowProps } from '../tool/components/ToolRow.tsx'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface SlotMap {
     /**
-     * Keyed Tool view dispatched by wire name, including custom tools.
-     * Register with `key: '<tool name>'`; a typo never renders.
-     * Occupied keys replace the view; unclaimed keys use the generic row. Owner
-     * phase data includes `name` and lazy `args`; preparing arguments may be incomplete.
+     * Keyed Tool view dispatched by wire name, including custom tools. Register with `key: '<tool name>'`;
+     * a typo never renders. Occupied keys replace the view; unclaimed keys use the generic row.
+     * Owner phase data includes `name` and lazy `args`; preparing arguments may be incomplete.
      */
     'tool.call.toolview': {
       kind: 'keyed'
@@ -39,6 +40,14 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
      * slot.
      */
     'tool.call.images': { kind: 'single'; scope: 'session'; owner: ToolImagesOwnerProps }
+    /**
+     * One rendered Tool row, declared by the Tool-call entry so a single
+     * occupant owns every atomic tool's presentation. The occupant receives
+     * the stock row props, the model-authored intent, the wire tool name, and
+     * `renderDefault`, which renders the stock row with per-call overrides and
+     * delegates the expanded card back through the same props.
+     */
+    'tool.row': { kind: 'single'; scope: 'session'; owner: ToolRowSlotProps }
   }
 }
 
@@ -50,6 +59,16 @@ export interface ToolImagesOwnerProps {
   loadImage: MessageImageLoader
   /** Horizontal placement inside the owning record. */
   align: 'start' | 'end'
+}
+
+/** Full props of one rendered Tool row: stock row data plus the slot-owned overrides. */
+export interface ToolRowSlotProps extends ToolRowProps {
+  /** The model-authored `arguments.i` intent, normalized to one line. */
+  readonly intent?: string | undefined
+  /** Wire Tool name, so an occupant can style per tool. */
+  readonly toolName?: string | undefined
+  /** Render the stock row, replacing only the row props the occupant overrides. */
+  readonly renderDefault: (overrides?: Partial<ToolRowProps>) => ReactNode
 }
 
 /** Standard owner currency supplied to every atomic Tool view. */
@@ -70,6 +89,8 @@ export interface ToolCallCommonProps {
   loadImage: MessageImageLoader
   /** Inspect this call in the trajectory view when available. */
   inspect?: (() => void) | undefined
+  /** Render the stock Tool row through the `tool.row` slot; omitted outside the call tree. */
+  renderToolRow?: ((props: ToolRowSlotProps, fallback: ReactNode) => ReactNode) | undefined
 }
 
 /** Stage-specific tool data; only start/result expose the dispatched call material. */
@@ -149,6 +170,6 @@ export type ToolHostInfoInjected = {
 
 /** Full props of the Tool call-tree renderer registered as a tool-call Chat Node. */
 export type ToolTreeProps = PropsRuntime<'conversation.chat.node', 'tool-call'>
-  & PropsRenderSlots<'tool.call.toolview'>
+  & PropsRenderSlots<'tool.call.toolview' | 'tool.row'>
   & PropsLocale<'conversation'>
   & InjectFace<ToolHostInfoInjected & ToolFileInjected>

@@ -121,12 +121,10 @@ exports[`sidebar shell snapshots > renders Windows caption controls in expanded 
               >
                 <svg
                   aria-hidden="true"
-                  class="mark"
-                  data-content="8f932582"
-                  data-penrose-mark=""
-                  focusable="false"
-                  height="24"
-                  viewBox="-541.587 -541.583 1083.17 1083.17"
+                  data-content="965fe321"
+                  fill="none"
+                  height="17.6580310880829"
+                  viewBox="0 0 23.16 17.04"
                   width="24"
                 />
               </span>
@@ -261,12 +259,10 @@ exports[`sidebar shell snapshots > renders the collapsed rail after the crossfad
           >
             <svg
               aria-hidden="true"
-              class="mark"
-              data-content="f78254f6"
-              data-penrose-mark=""
-              focusable="false"
-              height="24"
-              viewBox="-541.587 -541.583 1083.17 1083.17"
+              data-content="965fe321"
+              fill="none"
+              height="17.6580310880829"
+              viewBox="0 0 23.16 17.04"
               width="24"
             />
           </div>
@@ -373,12 +369,10 @@ exports[`sidebar shell snapshots > renders the expanded column (wordmark, capsul
               >
                 <svg
                   aria-hidden="true"
-                  class="mark"
-                  data-content="ff299e42"
-                  data-penrose-mark=""
-                  focusable="false"
-                  height="24"
-                  viewBox="-541.587 -541.583 1083.17 1083.17"
+                  data-content="965fe321"
+                  fill="none"
+                  height="17.6580310880829"
+                  viewBox="0 0 23.16 17.04"
                   width="24"
                 />
               </span>
@@ -519,12 +513,10 @@ exports[`sidebar shell snapshots > renders the expanded column in the default lo
               >
                 <svg
                   aria-hidden="true"
-                  class="mark"
-                  data-content="d341401a"
-                  data-penrose-mark=""
-                  focusable="false"
-                  height="24"
-                  viewBox="-541.587 -541.583 1083.17 1083.17"
+                  data-content="965fe321"
+                  fill="none"
+                  height="17.6580310880829"
+                  viewBox="0 0 23.16 17.04"
                   width="24"
                 />
               </span>

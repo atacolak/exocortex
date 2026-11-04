@@ -73,6 +73,8 @@ The package realizes one dispatch rule: atomic Tool views are keyed by wire Tool
 
 ### Rendering contract
 
+`ToolCallTree` declares `tool.row`, a single session-scoped seat that one occupant owns for every atomic Tool row. The occupant receives the stock row props, the model-authored `arguments.i` intent, the wire Tool name, and `renderDefault`, which renders the stock row with per-call overrides and delegates its expanded card through the same props. A Tool view that omits the seat renders the stock row unchanged; this package ships no intent-aware or otherwise product-specific row presentation.
+
 `ToolCallTree` receives one Tool node, Session `cwd`, and navigation callbacks. Each branch receives a stable block and memoizes its explicit phase props, so changing one subcall leaves unchanged sibling branches unrendered. It dispatches each tool by name through `tool.call.toolview`. Dispatched roots retain their recursive `subCalls`; preparation has no children. Each root and child wrapper preserves the `data-chat-anchor-key="call:<id>"` and `data-chat-call-id` DOM contract used for paging and selection. The Tool node keeps the same callId across all three stages.
 
 Tool owner props forward Chat's stable `useDisclosure` Hook through root and nested calls. Rows invoke it where they own their expanded bodies; intermediate renderers do not subscribe. Each invocation has independent open state that resets when the enclosing Turn collapses, without replacing React identity. Presentation-mode switches preserve it.

@@ -218,6 +218,7 @@ function mount(
       lineageOwners.push(owner as ConversationHeaderLineageOwnerProps)
       return opts?.fallback ?? null
     }
+    if (key === 'conversation.session.header.title') return opts?.fallback ?? null
     if (key === 'conversation.header') {
       return <ConversationHeader {...runtimeProps} renderSlot={renderSlot as never} />
     }

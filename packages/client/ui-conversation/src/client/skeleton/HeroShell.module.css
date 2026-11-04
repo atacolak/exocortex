@@ -87,25 +87,7 @@
 .mark {
   display: block;
   overflow: visible;
-  transform-origin: 50% 50%;
-}
-
-/* Hover breathing: the whole masked mark scales around its centre. */
-@keyframes penrose-hero-scale {
-  0%,
-  100% {
-    transform: scale(0.97);
-  }
-
-  50% {
-    transform: scale(1.03);
-  }
-}
-
-@media (hover: hover) and (prefers-reduced-motion: no-preference) {
-  .markHitbox:hover .mark {
-    animation: penrose-hero-scale 1.4s cubic-bezier(0.45, 0, 0.55, 1) infinite;
-  }
+  color: var(--dsw-alias-label-primary);
 }
 
 /* Workspace row sits 12px above the input card (figma y80 → y112). */

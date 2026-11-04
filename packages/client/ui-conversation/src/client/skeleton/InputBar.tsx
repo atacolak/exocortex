@@ -514,6 +514,7 @@ export const InputBar = memo(function InputBar({
         data-composer-card
         data-composer-scrollable={contentOverflows || undefined}
         data-composer-expanded={expanded || undefined}
+        data-expanded={expanded || undefined}
         onClick={workspaceTrigger ? onRequestWorkspace : undefined}
         onPointerDown={workspaceTrigger ? (e) => { e.stopPropagation() } : undefined}
         onMouseDown={onCardMouseDown}
@@ -522,19 +523,25 @@ export const InputBar = memo(function InputBar({
           <div className={css.overlayAnchor} data-composer-overlay>{renderSlot('conversation.input.overlay', {})}</div>
         )}
         {accessory !== undefined && <div className={css.accessory}>{accessory}</div>}
-        {!workspaceTrigger && showExpand && (
-          <Tooltip label={t(expanded ? 'input.collapse' : 'input.expand')} side="top" delayMs={500}>
-            <button
-              type="button"
-              className={css.expand}
-              aria-label={t(expanded ? 'input.collapse' : 'input.expand')}
-              aria-expanded={expanded}
-              onMouseDown={keepFocus}
-              onClick={() => { setExpanded(value => !value) }}
-            >
-              <IconFullscreenOutlineRegular size={14} />
-            </button>
-          </Tooltip>
+        {!workspaceTrigger && showExpand && renderSlot(
+          'conversation.input.expand',
+          { expanded, setExpanded, overflows: contentOverflows },
+          {
+            fallback: (
+              <Tooltip label={t(expanded ? 'input.collapse' : 'input.expand')} side="top" delayMs={500}>
+                <button
+                  type="button"
+                  className={css.expand}
+                  aria-label={t(expanded ? 'input.collapse' : 'input.expand')}
+                  aria-expanded={expanded}
+                  onMouseDown={keepFocus}
+                  onClick={() => { setExpanded(value => !value) }}
+                >
+                  <IconFullscreenOutlineRegular size={14} />
+                </button>
+              </Tooltip>
+            ),
+          },
         )}
         {renderSlot('conversation.input.attachments', {
           attachments,

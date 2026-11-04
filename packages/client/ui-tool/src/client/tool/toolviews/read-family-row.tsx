@@ -38,7 +38,7 @@ export type ReadFamilyCard = Pick<ToolRowProps, 'read' | 'image' | 'renderSlot' 
  * @returns the assembled ToolRow.
  */
 export function readFamilyRow(
-  { toolName, block, cwd, home, openFile, resolveFilePath, sessionId, inspect, useDisclosure, t }: ReadFamilyRowProps,
+  { toolName, block, cwd, home, openFile, resolveFilePath, sessionId, inspect, useDisclosure, renderToolRow, t }: ReadFamilyRowProps,
   card: ReadFamilyCard,
   getTriggerProps: ContextMenuBindings['getTriggerProps'],
 ): ReactNode {
@@ -46,7 +46,9 @@ export function readFamilyRow(
   const path = model.filePath
   return (
     <ToolRow
-      fileContextMenuProps={getTriggerProps(path === undefined ? undefined : () => ({
+      renderToolRow={renderToolRow}
+      fileContextMenuProps=
+{getTriggerProps(path === undefined ? undefined : () => ({
         kind: 'file', value: { sessionId, path: resolveFilePath(path),
           ...(card.filePathLine === undefined ? {} : { line: card.filePathLine }) },
       }))}

@@ -237,6 +237,12 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
         hideChrome: boolean
       }
     }
+    /** The current Session title crumb; a slot occupant takes over rendering and renaming. */
+    'conversation.session.header.title': {
+      kind: 'single'
+      scope: 'session'
+      owner: SessionHeaderTitleOwnerProps
+    }
     /** Optional replacement for one Session breadcrumb title; overlays must portal because the title area clips overflow. */
     'conversation.session.header.lineage': {
       kind: 'single'
@@ -290,6 +296,8 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     'conversation.input.dock': { kind: 'list'; scope: 'session'; owner: InputZone }
     /** Floating entries rendered inside the resident composer card. */
     'conversation.input.overlay': { kind: 'list'; scope: 'session' }
+    /** The composer's draft-expand affordance, rendered only while the draft overflows or is already expanded. */
+    'conversation.input.expand': { kind: 'single'; scope: 'session'; owner: ComposerExpandOwnerProps }
     /** Ambient entries below the composer card. */
     'conversation.composer.dock': { kind: 'list'; scope: 'session' }
     /** Compact controls at the left of the composer tool row. */
@@ -567,6 +575,16 @@ export interface InputActivityOwnerProps extends InputControlOwnerProps {
   onActiveChange: (active: boolean) => void
 }
 
+/** Owner share of the composer's draft-expand affordance. */
+export interface ComposerExpandOwnerProps {
+  /** Whether the draft is currently expanded past the collapsed scrollport. */
+  readonly expanded: boolean
+  /** Toggle the expansion, accepting the same updater forms as a state setter. */
+  readonly setExpanded: (next: boolean | ((prev: boolean) => boolean)) => void
+  /** Whether the draft exceeds the collapsed scrollport. */
+  readonly overflows: boolean
+}
+
 /** Full props of the resident composer bar. */
 export type ComposerBarProps =
   PropsRuntime<'conversation.composer.bar'>
@@ -575,6 +593,7 @@ export type ComposerBarProps =
     | 'conversation.input.permission'
     | 'conversation.input.left' | 'conversation.input.plan'
     | 'conversation.input.right' | 'conversation.input.model' | 'conversation.input.activity'
+    | 'conversation.input.expand'
     | 'conversation.composer.dock'
   >
   & InjectFace<ComposerBarInjected>
@@ -644,11 +663,22 @@ export type ConversationHeaderProps =
   PropsRuntime<'conversation.header'>
   & PropsRenderSlots<'conversation.header.leading' | 'conversation.session.header'>
 
+/** Owner share of the current Session title crumb. */
+export interface SessionHeaderTitleOwnerProps {
+  /** Session whose title the crumb shows. */
+  readonly sessionId: string
+  /** Current display title. */
+  readonly title: string
+  /** Rename this Session; omitted when the Session cannot be renamed. */
+  readonly renameSession?: ((nextTitle: string) => Promise<void> | void) | undefined
+}
+
 /** Full props of the strict Session header. */
 export type ConversationSessionHeaderSlotProps =
   PropsRuntime<'conversation.session.header'>
   & PropsRenderSlots<
-    'conversation.session.header.lineage'
+    'conversation.session.header.title'
+    | 'conversation.session.header.lineage'
     | 'conversation.session.header.actions'
     | 'conversation.session.header.utilities'
     | 'conversation.session.header.corner'
