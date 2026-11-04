@@ -43,17 +43,16 @@ recorded title, and attaches the socket. Any OMP agent running anywhere on
 the machine therefore appears in the sidebar with live status and opens into
 its running conversation without typing a command.
 
-## Commands
+## Slash palette
 
-| Command | Behavior |
-| --- | --- |
-| `/omp-attach <id-or-prefix> [profile]` | Resume a transcript from the unified sessions root in place, hydrating its recorded bubbles. |
-| `/omp-resume <id-or-prefix> [profile]` | Same open path as `/omp-attach`; the launchpad's canonical resume command. |
-| `/omp-fork [profile]` | Start a fresh OMP transcript and replay this Session's history into it. |
+The bridge publishes no `omp`-prefixed slash command. Live adoption replaces
+the old `/omp-attach`, `/omp-resume`, and `/omp-fork` helpers: any OMP session
+running on the machine is already mirrored into the sidebar, so the `/` palette
+holds only OMP's own native commands plus the session's Harness commands.
 
-Opening refuses a transcript that another OMP pane still holds. Hydration only
-runs on a blank Session and replays the newest 200 recorded surface events, so
-the chat shows real user/assistant/tool bubbles rather than one seed message.
+Opening a transcript that another OMP pane still holds is refused. Hydration
+only runs on a blank Session and replays the newest 200 recorded surface events,
+so the chat shows real user/assistant/tool bubbles rather than one seed message.
 
 ## `POST /api/exocortex/omp/open`
 

@@ -8,7 +8,6 @@ import { afterEach, describe, expect, it, onTestFinished } from 'vitest'
 import {
   hydrateOmpSession,
   ompHydrationEvents,
-  parseOmpResumeInput,
   readOmpTranscriptTitle,
 } from '../src/resume.ts'
 
@@ -24,16 +23,6 @@ async function transcript(lines: readonly unknown[]): Promise<string> {
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
-})
-
-describe('parseOmpResumeInput', () => {
-  it('parses a prefix with an optional profile', () => {
-    expect(parseOmpResumeInput(' 01a0c88e lead ')).toEqual({ prefix: '01a0c88e', profile: 'lead' })
-  })
-
-  it('rejects a third argument', () => {
-    expect(() => parseOmpResumeInput('01a0c88e lead extra')).toThrow('at most two arguments')
-  })
 })
 
 describe('readOmpTranscriptTitle', () => {

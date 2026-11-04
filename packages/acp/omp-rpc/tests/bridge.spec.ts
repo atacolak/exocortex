@@ -16,27 +16,11 @@ import {
   ompLaunchArgv,
   ompLaunchEnvironment,
   ompTodoItems,
-  parseOmpCommandInput,
   planOmpAttach,
 } from '../src/bridge.ts'
 import { fakeSessionServer, tick, type FakeSessionServer } from './harness.ts'
 
 describe('omp commands', () => {
-  it('parses a preset and a transcript identity', () => {
-    expect(parseOmpCommandInput('builder abc123')).toEqual({
-      preset: 'builder',
-      sessionId: 'abc123',
-    })
-  })
-
-  it('parses a lone preset', () => {
-    expect(parseOmpCommandInput('builder')).toEqual({ preset: 'builder' })
-  })
-
-  it('parses an empty input', () => {
-    expect(parseOmpCommandInput('  ')).toEqual({})
-  })
-
   it('starts a fresh transcript when attach names none', () => {
     expect(ompLaunchArgv({ executable: 'omp', mode: 'attach', sessionDir: '/tmp/omp' })).toEqual([
       'omp', '--mode', 'rpc', '--session-dir', '/tmp/omp',

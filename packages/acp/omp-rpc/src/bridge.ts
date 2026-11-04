@@ -91,22 +91,6 @@ export interface OmpBridgeOptions {
   readonly onSurface?: (request: OmpExtensionUiRequest) => void
 }
 
-/** A profile typed into `/omp-attach` or `/omp-fork`. */
-export interface OmpCommandInput {
-  readonly preset?: string
-  readonly sessionId?: string
-}
-
-/** Parse the optional `<preset> [session]` argument grammar. */
-export function parseOmpCommandInput(rawInput: string): OmpCommandInput {
-  const [preset, sessionId, ...rest] = rawInput.trim().split(/\s+/u).filter(token => token.length > 0)
-  if (rest.length > 0) throw new Error('expected at most two arguments: <preset> [session]')
-  return {
-    ...preset === undefined ? {} : { preset },
-    ...sessionId === undefined ? {} : { sessionId },
-  }
-}
-
 /**
  * Build the OMP RPC argv for one attachment. Fork starts a fresh transcript so
  * the harness history is replayed into it; attach resumes an explicitly named

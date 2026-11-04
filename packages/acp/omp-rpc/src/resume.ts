@@ -39,29 +39,6 @@ export class OmpResumeError extends Error {
   }
 }
 
-/** One `/omp-resume` argument list. */
-export interface OmpResumeRequest {
-  /** Session UUID prefix, full UUID, or transcript path. */
-  readonly prefix: string
-  /** OMP profile overriding the transcript's recorded root agent. */
-  readonly profile?: string
-}
-
-/**
- * Parse `<session-id-or-prefix> [profile]`.
- * @param rawInput - command text after the command name.
- * @returns the prefix and optional profile.
- */
-export function parseOmpResumeInput(rawInput: string): OmpResumeRequest {
-  const [prefix, profile, ...rest] = rawInput.trim().split(/\s+/u).filter(token => token.length > 0)
-  if (prefix === undefined) throw new Error('expected <session-id-or-prefix> [profile]')
-  if (rest.length > 0) throw new Error('expected at most two arguments: <session-id-or-prefix> [profile]')
-  return {
-    prefix,
-    ...profile === undefined ? {} : { profile },
-  }
-}
-
 /** Facts read from one transcript's `session` header. */
 export interface OmpTranscriptHeader {
   /** Absolute transcript path. */

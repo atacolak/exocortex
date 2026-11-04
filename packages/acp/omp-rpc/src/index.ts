@@ -2,7 +2,7 @@
  * Cordis composition of the OMP RPC bridge: auto-discovered `omp:<profile>`
  * agent presets, durable reattachment of OMP-preset sessions over a launched
  * process or a live session socket, pre-attach native command discovery,
- * `/omp-attach`, `/omp-resume`, and `/omp-fork` commands,
+ * automatic adoption of every live OMP session socket,
  * `POST /api/exocortex/omp/open`,
  * per-agent step streams, host tools, extension UI, catalog sync, and
  * trajectory projection.
@@ -25,7 +25,6 @@ import Schema from '@deepseek-ai/schemastery'
 import { defaultOmpBindingsFile, OmpBindings } from './bindings.ts'
 import {
   OmpBridge,
-  parseOmpCommandInput,
   planOmpAttach,
   registerAgentCommand,
   type OmpAttachOptions,
@@ -50,11 +49,9 @@ import {
 import {
   hydrateOmpSession,
   OmpResumeError,
-  parseOmpResumeInput,
   probeOmpSessionLease,
   readOmpTranscriptHeader,
   resolveOmpTranscript,
-  type OmpResumeRequest,
   type OmpTranscriptMatch,
 } from './resume.ts'
 import {
@@ -93,7 +90,7 @@ export interface OmpRpcConfig {
   readonly executable?: string
   /** Root directory holding every OMP transcript; defaults to the OMP sessions root. */
   readonly sessionDir?: string
-  /** Root of the live OMP transcripts `/omp-resume` resolves and resumes. */
+  /** Root of the live OMP transcripts the open route resolves and resumes. */
   readonly ompSessionsRoot?: string
   /** Default `<agent>.md` profile passed as `--agent`. */
   readonly preset?: string
@@ -139,7 +136,7 @@ export const Config: Schema<OmpRpcConfig> = Schema.object({
   onSurface: Schema.any(),
 })
 
-function attachmentSummary(mode: OmpAttachOptions['mode'], attachment: OmpAttachment): string {
+function attachmentSummary(attachment: OmpAttachment): string {
   const version = attachment.client.protocol
   const catalog = attachment.catalog.status === 'applied'
     ? `model ${attachment.catalog.model.id}`
@@ -147,16 +144,11 @@ function attachmentSummary(mode: OmpAttachOptions['mode'], attachment: OmpAttach
       ? 'harness model not offered by the OMP gateway'
       : 'OMP default model'
   const transport = attachment.launched === undefined ? ' on its live session socket' : ''
-  return `${mode === 'fork' ? 'forked' : 'attached'} OMP RPC v${String(version)} (${catalog})${transport}`
+  return `attached OMP RPC v${String(version)} (${catalog})${transport}`
 }
 
 function sessionIsBlank(session: { snapshotEvents(): readonly { readonly type: string }[] }): boolean {
   return !session.snapshotEvents().some(event => event.type === 'user/message' || event.type === 'assistant/message')
-}
-
-async function existingDirectory(path: string): Promise<boolean> {
-  const info = await stat(path).catch(() => undefined)
-  return info?.isDirectory() === true
 }
 
 async function existingFile(path: string): Promise<boolean> {
@@ -324,7 +316,7 @@ export function apply(ctx: Context, config: OmpRpcConfig): void {
         : 'ownership could not be probed'
       throw new OmpResumeError(
         'omp/session-busy',
-        `session ${transcript.id.slice(0, 8)} ${reason} — close/exit that pane first, then run /omp-resume ${transcript.id.slice(0, 8)}`,
+        `session ${transcript.id.slice(0, 8)} ${reason} — close/exit that pane first to release it`,
         409,
       )
     }
@@ -344,29 +336,8 @@ export function apply(ctx: Context, config: OmpRpcConfig): void {
     return {
       transcript,
       hydrated,
-      summary: `resumed OMP session ${transcript.id.slice(0, 8)}${profile === undefined ? '' : ` as ${profile}`} (${attachmentSummary('attach', attachment)})`,
+      summary: `resumed OMP session ${transcript.id.slice(0, 8)}${profile === undefined ? '' : ` as ${profile}`} (${attachmentSummary(attachment)})`,
     }
-  }
-
-  const resume = async (agent: Agent, request: OmpResumeRequest): Promise<OmpTranscriptOpened> => {
-    const transcript = await resolveTranscript(request.prefix)
-    const cwd = transcript.cwd !== undefined && await existingDirectory(transcript.cwd)
-      ? transcript.cwd
-      : agent.session.header.cwd ?? config.cwd
-    if (cwd === undefined) {
-      throw new OmpResumeError(
-        'omp/cwd-unavailable',
-        'OMP bridge has no working directory: set omp-rpc cwd or start the session in one',
-        400,
-      )
-    }
-    const profile = request.profile ?? transcript.profile ?? config.preset
-    return await openTranscript({
-      agent,
-      transcript,
-      cwd,
-      ...profile === undefined ? {} : { profile },
-    })
   }
 
   const attaching = new Map<string, Promise<void>>()
@@ -665,55 +636,6 @@ export function apply(ctx: Context, config: OmpRpcConfig): void {
       }
     })
   })
-
-  ctx.effect(() => ctx.commands.register({
-    name: 'omp-resume',
-    description: 'Resume a live OMP transcript from ~/.omp/agent/sessions in place and hydrate its recorded chat bubbles into this session.',
-    input: { hint: '<session-id-or-prefix> [profile]' },
-    async handler(invocation) {
-      try {
-        return { kind: 'success', text: (await resume(invocation.agent, parseOmpResumeInput(invocation.rawInput))).summary }
-      } catch (error: unknown) {
-        return { kind: 'error', text: error instanceof Error ? error.message : String(error) }
-      }
-    },
-  }), 'omp-rpc /omp-resume')
-
-  ctx.effect(() => ctx.commands.register({
-    name: 'omp-attach',
-    description: 'Attach this session to an OMP RPC process and continue an OMP transcript.',
-    input: { hint: '<session-id-or-prefix> [profile]' },
-    async handler(invocation) {
-      try {
-        return { kind: 'success', text: (await resume(invocation.agent, parseOmpResumeInput(invocation.rawInput))).summary }
-      } catch (error: unknown) {
-        return { kind: 'error', text: error instanceof Error ? error.message : String(error) }
-      }
-    },
-  }), 'omp-rpc /omp-attach')
-
-  ctx.effect(() => ctx.commands.register({
-    name: 'omp-fork',
-    description: 'Fork the attached OMP transcript natively, or start a fresh OMP process replaying this session when nothing is attached.',
-    input: { hint: '[preset]' },
-    async handler(invocation) {
-      try {
-        const input = parseOmpCommandInput(invocation.rawInput)
-        if (input.sessionId !== undefined) throw new Error('/omp-fork accepts only a preset')
-        const binding = await readBinding(invocation.agent.id)
-        const forkPath = binding !== undefined && await existingFile(binding.path) ? binding.path : undefined
-        const attachment = await bridge.attach(invocation.agent, attachOptions(invocation.agent, {
-          mode: 'fork',
-          ...input,
-          ...forkPath === undefined ? {} : { forkPath },
-        }))
-        await rememberBinding(invocation.agent, attachment, input.preset)
-        return { kind: 'success', text: attachmentSummary('fork', attachment) }
-      } catch (error: unknown) {
-        return { kind: 'error', text: error instanceof Error ? error.message : String(error) }
-      }
-    },
-  }), 'omp-rpc /omp-fork')
 
   ctx.inject(['connection'], (connectionCtx) => {
     connectionCtx.effect(() => connectionCtx.connection.fetch.register({
