@@ -5462,10 +5462,10 @@ export const CLIENT_SLOT_API: readonly ClientSlotEntry[] = [
     kind: 'single',
     scope: 'session',
     summary: 'One rendered Tool row, declared by the Tool-call entry so a single occupant owns every atomic tool\'s presentation.',
-    doc: 'One rendered Tool row, declared by the Tool-call entry so a single\noccupant owns every atomic tool\'s presentation. The occupant receives\nthe stock row props, the model-authored intent, the wire tool name, and\n`renderDefault`, which renders the stock row with per-call overrides and\ndelegates the expanded card back through the same props.',
+    doc: 'One rendered Tool row, declared by the Tool-call entry so a single\noccupant owns every atomic tool\'s presentation. The occupant receives\nthe stock row props, the model-authored intent, the wire tool name,\n`expandable`, and `renderBody`, which renders only the stock expanded\nbody under the occupant\'s own header; `renderDefault` renders the stock\nrow with per-call overrides and keeps the expanded card reachable.',
     registerOptions: [],
     ownerProps: [
-      '/** Full props of one rendered Tool row: stock row data plus the slot-owned overrides. */\nexport interface ToolRowSlotProps extends ToolRowProps {\n  /** The model-authored `arguments.i` intent, normalized to one line. */\n  readonly intent?: string | undefined\n  /** Wire Tool name, so an occupant can style per tool. */\n  readonly toolName?: string | undefined\n  /** Render the stock row, replacing only the row props the occupant overrides. */\n  readonly renderDefault: (overrides?: Partial<ToolRowProps>) => ReactNode\n}',
+      '/** Full props of one rendered Tool row: stock row data plus the slot-owned overrides. */\nexport interface ToolRowSlotProps extends ToolRowProps {\n  /** The model-authored `arguments.i` intent, normalized to one line. */\n  readonly intent?: string | undefined\n  /** Wire Tool name, so an occupant can style per tool. */\n  readonly toolName?: string | undefined\n  /** Whether this call currently has expandable content. */\n  readonly expandable?: boolean | undefined\n  /** Render only the stock expanded body without the stock collapsed header. */\n  readonly renderBody?: (() => ReactNode) | undefined\n  /** Render the stock row, replacing only the row props the occupant overrides. */\n  readonly renderDefault: (overrides?: Partial<ToolRowProps>) => ReactNode\n}',
     ],
     ownerPropsReferences: [
       'ToolRowProps',
@@ -5498,7 +5498,7 @@ export const CLIENT_SLOT_API: readonly ClientSlotEntry[] = [
     occupants: [],
     replaceRisk: 'none',
     example: 'return {\n  inject: [\'slots\'],\n  apply(ctx) {\n    ctx.slots.inject(\'tool.row\', () => ctx.slots.register(\n      { name: \'tool.row\' },\n      () => React.createElement(\'div\', null, \'hello\'),\n    ))\n  },\n}',
-    source: 'packages/client/ui-tool/src/client/contract/slots.ts:50',
+    source: 'packages/client/ui-tool/src/client/contract/slots.ts:51',
   },
   {
     key: 'tool.view.cordis',

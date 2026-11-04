@@ -136,6 +136,22 @@ export function planOmpWake(state: OmpSocketState): OmpWakePlan {
   }
 }
 
+/**
+ * Report one cold-resume attach failure as the stable refusal the open endpoint maps.
+ * A cold resume reopens a stored transcript, so an attach failure is a refused
+ * resume, not a harness fault; stable resume errors keep their own code.
+ * @param error - failure raised while attaching a cold transcript.
+ * @returns the refusal to throw, or the caller's own stable resume error.
+ */
+export function resumeRefused(error: unknown): OmpResumeError {
+  if (error instanceof OmpResumeError) return error
+  return new OmpResumeError(
+    'omp/resume-refused',
+    error instanceof Error ? error.message : String(error),
+    409,
+  )
+}
+
 /** What one open-transcript pass needs from the bridge and its attachment. */
 export interface OmpTranscriptOpenDeps {
   /** OMP session identity the caller asked to open. */

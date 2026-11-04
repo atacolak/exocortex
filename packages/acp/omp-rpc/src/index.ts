@@ -48,6 +48,7 @@ import {
   OMP_OPEN_PATH,
   openOmpTranscript,
   planOmpWake,
+  resumeRefused,
   reuseOrCreateDshSession,
   serveOmpOpen,
   type OmpWakePlan,
@@ -455,6 +456,7 @@ export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
               409,
             )
           }
+          if (live === undefined) throw resumeRefused(error)
           throw error
         }
       },

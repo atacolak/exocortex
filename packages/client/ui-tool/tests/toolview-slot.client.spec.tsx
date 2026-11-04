@@ -20,6 +20,8 @@ import { LocaleRuntime } from '@deepseek-ai/dsh-client-locale/client'
 import { apply as applyConversation, inject as injectConversation } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { apply as applyTool, inject as injectTool } from '@deepseek-ai/dsh-client-ui-tool/client'
 import type { ToolCallViewProps } from '@deepseek-ai/dsh-client-ui-tool/client'
+import type { ReactNode } from 'react'
+import type { ToolRowSlotProps } from '../src/client/contract/slots.ts'
 import { PartialArguments } from '@deepseek-ai/dsh-util-values'
 import { toolSessionEvents } from './tool-fixtures.client.ts'
 
@@ -168,6 +170,37 @@ describe('keyed toolview hole through the real machinery', () => {
     expect(view.getByText('Build')).toBeTruthy()
     // mystery: no registration under that key → render-site fallback.
     expect(view.getByText('Tool call')).toBeTruthy()
+    await b.runtime.dispose()
+  })
+
+  it('a registered tool.row occupant owns the bash header while renderBody keeps its output', async () => {
+    const b = await bench([
+      toolResult(3, 'c1', 'bash', JSON.stringify({ i: 'Build the app', command: 'make build', description: 'Build' })),
+    ])
+    let seat: ToolRowSlotProps | undefined
+    function Occupant(props: ToolRowSlotProps): ReactNode {
+      seat = props
+      const { expanded, toggle } = props.useDisclosure()
+      return (
+        <div data-testid="row-occupant">
+          <button type="button" onClick={toggle}>{expanded ? 'collapse' : 'expand'}</button>
+          {expanded && props.renderBody?.()}
+        </div>
+      )
+    }
+    const dispose = b.slots.register({ name: 'tool.row' }, Occupant)
+    const view = b.runtime.renderRoot()
+    await b.runtime.flush()
+
+    expect(seat).toMatchObject({ toolName: 'bash', intent: 'Build the app', state: 'ok', expandable: true })
+    expect(view.getByTestId('row-occupant')).toBeTruthy()
+    // The occupant's own header replaces the stock bash header entirely.
+    expect(view.queryByText('Bash')).toBeNull()
+    fireEvent.click(view.getByRole('button', { name: 'expand' }))
+    expect(view.getByText('IN')).toBeTruthy()
+    expect(view.container.textContent).toContain('make build')
+    expect(view.queryByText('Bash')).toBeNull()
+    dispose()
     await b.runtime.dispose()
   })
 
