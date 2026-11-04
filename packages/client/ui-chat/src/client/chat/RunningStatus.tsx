@@ -13,16 +13,20 @@ interface RunningStatusProps {
   readonly paused: boolean
   /** Keep the slot without showing or announcing the status: the Session stopped before its Turn closed. */
   readonly holding?: boolean
+  /** Latest intent of the Turn's running tool call, when the Turn has one. */
+  readonly intent?: string | undefined
   readonly t: ChatViewSlotProps['t']
 }
 
 /**
  * Show live elapsed time after the current Turn's content without announcing ticks.
- * @param props - Current Turn start time, pause state, and localized copy.
+ * @param props - Current Turn start time, pause state, running tool intent, and localized copy.
  * @returns the monochrome running indicator; mount while the Session is running, or holding its slot hidden until
  * the Turn's actions row replaces it.
  */
-export const RunningStatus = memo(function RunningStatus({ startTime, paused, holding = false, t }: RunningStatusProps) {
+export const RunningStatus = memo(function RunningStatus({
+  startTime, paused, holding = false, intent, t,
+}: RunningStatusProps) {
   const [now, setNow] = useState(Date.now)
   useEffect(() => {
     if (startTime === undefined || paused || holding) return
@@ -30,9 +34,14 @@ export const RunningStatus = memo(function RunningStatus({ startTime, paused, ho
     const timer = setInterval(() => { setNow(Date.now()) }, LIVE_RUN_CLOCK_INTERVAL_MS)
     return () => { clearInterval(timer) }
   }, [startTime, paused, holding])
-  const label = startTime === undefined ? t('chat.deepDiving') : t('chat.deepDivingFor', {
-    duration: formatRunDuration(Math.max(1000, now - startTime), t).map(part => part.text).join(''),
-  })
+  const elapsed = startTime === undefined
+    ? undefined
+    : formatRunDuration(Math.max(1000, now - startTime), t).map(part => part.text).join('')
+  const label = elapsed === undefined
+    ? intent ?? t('chat.deepDiving')
+    : intent === undefined
+      ? t('chat.deepDivingFor', { duration: elapsed })
+      : `${intent} · ${elapsed}`
   return (
     <div className={css.running} data-chat-running data-holding={holding ? '' : undefined} aria-hidden={holding || undefined}>
       {holding ? null : (
@@ -41,7 +50,7 @@ export const RunningStatus = memo(function RunningStatus({ startTime, paused, ho
       <span className={css.runningDivider} aria-hidden="true" />
       <span className={css.runningContent}>
         <RunningPenrose />
-        <TextShimmer active={!holding} className={css.runningText}>{label}</TextShimmer>
+        <TextShimmer active={!holding} className={css.runningText} contentClassName={css.runningLabel}>{label}</TextShimmer>
       </span>
     </div>
   )

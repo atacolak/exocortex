@@ -12,13 +12,13 @@ const t = makeTranslate(zh, commonZh)
 beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(5_000) })
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
-function statusHarness(startTime?: number) {
-  const view = render(<RunningStatus startTime={startTime} paused={false} t={t} />)
+function statusHarness(startTime?: number, intent?: string) {
+  const view = render(<RunningStatus startTime={startTime} paused={false} intent={intent} t={t} />)
   return {
     ...view,
     content: () => view.container.querySelector('[data-chat-running] > :last-child'),
-    set: (nextStartTime?: number, paused = false) => {
-      view.rerender(<RunningStatus startTime={nextStartTime} paused={paused} t={t} />)
+    set: (nextStartTime?: number, paused = false, nextIntent?: string) => {
+      view.rerender(<RunningStatus startTime={nextStartTime} paused={paused} intent={nextIntent} t={t} />)
     },
   }
 }
@@ -56,6 +56,23 @@ describe('RunningStatus', () => {
     expect(view.getByRole('status')).toBe(status)
     expect(status.textContent).toBe('深度求索中')
     view.unmount()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('names the running tool intent beside the elapsed time', () => {
+    const view = statusHarness(1_000, 'Inspecting host surface')
+    expect(view.content()?.textContent).toBe('Inspecting host surface · 4秒')
+    expect(view.container.textContent).toBe('深度求索中Inspecting host surface · 4秒')
+    expect(view.container.querySelectorAll('[data-shimmer="true"]')).toHaveLength(1)
+    view.set(1_000, false, 'Reading ChatFlow.tsx')
+    expect(view.content()?.textContent).toBe('Reading ChatFlow.tsx · 4秒')
+    view.set(1_000, false, undefined)
+    expect(view.content()?.textContent).toBe('深度求索中，用时 4秒 ···')
+  })
+
+  it('keeps the intent while the Turn start is still unknown', () => {
+    const view = statusHarness(undefined, 'Inspecting host surface')
+    expect(view.content()?.textContent).toBe('Inspecting host surface')
     expect(vi.getTimerCount()).toBe(0)
   })
 

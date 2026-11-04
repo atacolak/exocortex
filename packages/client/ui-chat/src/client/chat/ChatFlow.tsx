@@ -3,6 +3,7 @@ import { memo, type ReactElement } from 'react'
 import type { PendingSubmission } from '@deepseek-ai/dsh-api-session-controller/client'
 import { assertNever } from '@deepseek-ai/dsh-util-values'
 import type { ChatFlowSlotProps } from '../contract/slots.ts'
+import type { RunningToolCall } from '../contract/snapshot.ts'
 import { ChatNodeSeat } from './ChatNodeSeat.tsx'
 import { ChatGroupSeat } from './ChatGroupSeat.tsx'
 import { PendingSteeringBubble, PendingSubmissionBubble } from './MessageItem.tsx'
@@ -20,6 +21,23 @@ function isLocalSubmission(item: PendingInput): item is PendingSubmission {
 /** Whether the echo is a local submission that opens a new Turn. */
 function isTranscriptEcho(item: PendingInput): boolean {
   return isLocalSubmission(item) && item.placement === 'transcript'
+}
+
+const RUNNING_INTENT_LIMIT = 200
+
+/**
+ * Newest running root call's own `i` intent, normalized to one bounded line.
+ * @param calls - The live root running calls in dispatch order.
+ * @returns the last call's intent, or undefined while no call names one.
+ */
+function runningIntent(calls: readonly RunningToolCall[]): string | undefined {
+  for (let index = calls.length - 1; index >= 0; index -= 1) {
+    const intent = calls[index]?.args.text('i')
+    if (intent === undefined) continue
+    const line = intent.replace(/\s+/g, ' ').trim()
+    if (line.length > 0) return line.slice(0, RUNNING_INTENT_LIMIT)
+  }
+  return undefined
 }
 
 /** Render the flow without adding a DOM parent or changing keyed row positions. */
@@ -43,6 +61,7 @@ export const ChatFlow = memo(function ChatFlow({
     const location = node?.location
     return (location?.kind === 'turn' || location?.kind === 'step') && location.turn.status === 'open'
   })
+  const activeIntent = useChat(snapshot => runningIntent(snapshot.legacy.runningCalls))
   const holding = !running && latestTurnOpen
   const seatProps = {
     nodeStore, useChatNode, useChatNodeBottom, useChatNodeProcess, usePresentation,
@@ -94,7 +113,7 @@ export const ChatFlow = memo(function ChatFlow({
   return [
     ...rows, ...leadingRows, ...openingRows,
     ...running || holding ? [<RunningStatus key="running" startTime={runningStartTime} paused={disconnected}
-      holding={holding} t={t} />] : [],
+      holding={holding} intent={activeIntent} t={t} />] : [],
     ...pendingRows,
   ]
 })

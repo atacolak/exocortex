@@ -517,12 +517,14 @@ describe('OmpAgentDriver unsolicited wakes', () => {
     driver.close()
   })
 
-  it('opens an unsolicited prompt when a run streams without an agent_start frame', async () => {
+  it('opens an unsolicited prompt from a user frame after a missed agent_start', async () => {
     const client = new FakeClient()
     const wakes: unknown[] = []
     const driver = new OmpAgentDriver(client, { onUnsolicitedWake: (wake) => { wakes.push(wake) } })
+    const typed = 'stream without agent_start'
 
-    client.emit({ type: 'message_start', message: { role: 'assistant' } })
+    client.emit({ type: 'message_start', message: { role: 'user' } })
+    client.emit({ type: 'message_end', message: { role: 'user', content: [{ type: 'text', text: typed }] } })
     client.emit(messageUpdate('w2', { type: 'text_start', contentIndex: 0 }, assistantMessage('', 'stop', { input: 1, output: 1 })))
     client.emit(messageUpdate('w2', { type: 'text_delta', contentIndex: 0, delta: 'late' }, assistantMessage('late', 'stop', { input: 1, output: 1 })))
     client.emit(messageUpdate('w2', { type: 'text_end', contentIndex: 0, content: 'late' }, assistantMessage('late', 'stop', { input: 1, output: 1 })))
@@ -531,9 +533,88 @@ describe('OmpAgentDriver unsolicited wakes', () => {
     const chunks: StreamChunk[] = []
     for await (const chunk of driver.stream(request([]), new AbortController().signal)) chunks.push(chunk)
 
-    expect(wakes).toHaveLength(1)
+    expect(wakes).toEqual([{ text: typed }])
     expect(chunks.filter(chunk => chunk.type === 'text-delta')).toEqual([{ type: 'text-delta', index: 0, text: 'late' }])
     expect(client.commands).toEqual([])
+    driver.close()
+  })
+
+  it('never fabricates a wake from assistant output or a tool execution alone', () => {
+    const client = new FakeClient()
+    const wakes: unknown[] = []
+    const driver = new OmpAgentDriver(client, { onUnsolicitedWake: (wake) => { wakes.push(wake) } })
+
+    client.emit({ type: 'tool_execution_start', toolCallId: 't-1', toolName: 'bash', args: { command: 'sleep 1' } })
+    client.emit({ type: 'message_start', message: { role: 'assistant' } })
+    client.emit(messageUpdate('m1', { type: 'text_delta', contentIndex: 0, delta: 'late' }, assistantMessage('late', 'stop', { input: 1, output: 1 })))
+    client.emit({ type: 'agent_end', isTerminal: true })
+
+    expect(wakes).toEqual([])
+    expect(driver.hasActiveRun()).toBe(false)
+    driver.close()
+  })
+
+  it('abandons a settled prompt so the next run wakes the harness with its own input', () => {
+    const client = new FakeClient()
+    const wakes: unknown[] = []
+    const driver = new OmpAgentDriver(client, { onUnsolicitedWake: (wake) => { wakes.push(wake) } })
+    const first = 'first terminal prompt'
+    const second = 'second terminal prompt'
+
+    client.emit({ type: 'agent_start' })
+    client.emit({ type: 'message_end', message: { role: 'user', content: [{ type: 'text', text: first }] } })
+    client.emit(messageUpdate('w1', { type: 'text_start', contentIndex: 0 }, assistantMessage('', 'stop', { input: 1, output: 1 })))
+    client.emit(messageUpdate('w1', { type: 'text_end', contentIndex: 0, content: 'done' }, assistantMessage('done', 'stop', { input: 1, output: 1 })))
+    client.emit({ type: 'agent_end', isTerminal: true })
+    client.emit({ type: 'agent_start' })
+    client.emit({ type: 'message_end', message: { role: 'user', content: [{ type: 'text', text: second }] } })
+
+    expect(wakes).toEqual([{ text: first }, { text: second }])
+    expect(driver.hasActiveRun()).toBe(true)
+    driver.close()
+  })
+
+  it('wakes from a TUI prompt that carries only an image', () => {
+    const client = new FakeClient()
+    const wakes: unknown[] = []
+    const driver = new OmpAgentDriver(client, { onUnsolicitedWake: (wake) => { wakes.push(wake) } })
+
+    client.emit({ type: 'agent_start' })
+    client.emit({
+      type: 'message_end',
+      message: { role: 'user', content: [{ type: 'image', data: 'AAAA', mimeType: 'image/png' }] },
+    })
+
+    expect(wakes).toEqual([{ text: '[image]' }])
+    driver.close()
+  })
+
+  it('prompts instead of steering when the previous unsolicited run already settled', async () => {
+    const client = new FakeClient()
+    const driver = new OmpAgentDriver(client)
+    const mail = '<hcom from="lead">ship it</hcom>'
+
+    client.emit({ type: 'agent_start' })
+    client.emit({ type: 'message_end', message: { role: 'custom', content: mail } })
+    client.emit(messageUpdate('w1', { type: 'text_start', contentIndex: 0 }, assistantMessage('', 'stop', { input: 1, output: 1 })))
+    client.emit(messageUpdate('w1', { type: 'text_end', contentIndex: 0, content: 'ack' }, assistantMessage('ack', 'stop', { input: 1, output: 1 })))
+    client.emit({ type: 'agent_end', isTerminal: true })
+
+    const chunks: StreamChunk[] = []
+    const consuming = (async () => {
+      for await (const chunk of driver.stream(request([user('u1', 'next')]), new AbortController().signal)) chunks.push(chunk)
+    })()
+    await tick()
+
+    expect(client.commands.map(command => command.type)).toEqual(['prompt'])
+    client.settle()
+    client.emit(messageUpdate('m2', { type: 'text_start', contentIndex: 0 }, assistantMessage('', 'stop', { input: 1, output: 1 })))
+    client.emit(messageUpdate('m2', { type: 'text_delta', contentIndex: 0, delta: 'fresh' }, assistantMessage('fresh', 'stop', { input: 1, output: 1 })))
+    client.emit(messageUpdate('m2', { type: 'text_end', contentIndex: 0, content: 'fresh' }, assistantMessage('fresh', 'stop', { input: 1, output: 1 })))
+    settlePrompt(client)
+    await consuming
+
+    expect(chunks.filter(chunk => chunk.type === 'text-delta')).toEqual([{ type: 'text-delta', index: 0, text: 'fresh' }])
     driver.close()
   })
 
@@ -558,5 +639,109 @@ describe('OmpAgentDriver unsolicited wakes', () => {
     expect(chunks.filter(chunk => chunk.type === 'text-delta')).toEqual([{ type: 'text-delta', index: 0, text: 'on it' }])
     expect(client.commands).toEqual([])
     driver.close()
+  })
+
+  it('publishes a terminal prompt before agent_start, once per message id', () => {
+    const client = new FakeClient()
+    const wakes: unknown[] = []
+    const driver = new OmpAgentDriver(client, { onUnsolicitedWake: (wake) => { wakes.push(wake) } })
+    const typed = 'typed while the session was idle'
+
+    client.emit({ type: 'message_start', messageId: 'user-1', message: { role: 'user' } })
+    expect(wakes).toEqual([])
+    client.emit({
+      type: 'message_end', messageId: 'user-1', message: { role: 'user', content: [{ type: 'text', text: typed }] },
+    })
+    expect(wakes).toEqual([{ text: typed }])
+
+    client.emit({ type: 'agent_start' })
+    client.emit({
+      type: 'message_end', messageId: 'user-1', message: { role: 'user', content: [{ type: 'text', text: typed }] },
+    })
+    expect(wakes).toEqual([{ text: typed }])
+    driver.close()
+  })
+
+  it('publishes every terminal steer inside one running turn', () => {
+    const client = new FakeClient()
+    const wakes: unknown[] = []
+    const driver = new OmpAgentDriver(client, { onUnsolicitedWake: (wake) => { wakes.push(wake) } })
+
+    client.emit({ type: 'agent_start' })
+    client.emit({
+      type: 'message_end', messageId: 's-1', message: { role: 'user', content: [{ type: 'text', text: 'first' }] },
+    })
+    client.emit({ type: 'tool_execution_start', toolCallId: 't-1', toolName: 'bash', args: { command: 'sleep 5' } })
+    client.emit({
+      type: 'message_end', messageId: 's-2', message: { role: 'user', content: [{ type: 'text', text: 'second' }] },
+    })
+
+    expect(wakes).toEqual([{ text: 'first' }, { text: 'second' }])
+    driver.close()
+  })
+
+  it('stays silent for the echo of a steer the driver sent itself', async () => {
+    const client = new FakeClient()
+    const wakes: unknown[] = []
+    const driver = new OmpAgentDriver(client, { onUnsolicitedWake: (wake) => { wakes.push(wake) } })
+
+    client.emit({ type: 'agent_start' })
+    client.emit({
+      type: 'message_end', messageId: 's-1', message: { role: 'user', content: [{ type: 'text', text: 'typed' }] },
+    })
+    const steering = driver.steerImmediate([user('u2', 'from the web')])
+    await tick()
+    client.settle()
+    await steering
+    client.emit({
+      type: 'message_end', messageId: 's-2', message: { role: 'user', content: [{ type: 'text', text: 'from the web' }] },
+    })
+
+    expect(wakes).toEqual([{ text: 'typed' }])
+    driver.close()
+  })
+
+  it('settles a steer-interrupted cycle as a stop so the turn stays green', async () => {
+    const client = new FakeClient()
+    const driver = new OmpAgentDriver(client)
+    const consume = (async () => {
+      const chunks: StreamChunk[] = []
+      for await (const chunk of driver.stream(request([user('u1', 'hello')]), new AbortController().signal)) chunks.push(chunk)
+      return chunks
+    })()
+    await tick()
+    client.settle()
+    const aborted = assistantMessage('half', 'aborted', { input: 1, output: 1 })
+    client.emit(messageUpdate('m1', { type: 'text_start', contentIndex: 0 }, assistantMessage('', 'aborted', { input: 1, output: 1 })))
+    client.emit(messageUpdate('m1', { type: 'text_delta', contentIndex: 0, delta: 'half' }, aborted))
+    client.emit({ type: 'message_end', messageId: 'm1', message: aborted })
+    client.emit({ type: 'message_start', messageId: 'm2', message: { role: 'assistant' } })
+    const chunks = await consume
+    expect(chunks.at(-1)).toEqual({ type: 'finish', reason: { kind: 'stop' } })
+  })
+
+  it('does not fail a prompt aborted after a terminal steer', async () => {
+    const client = new FakeClient()
+    const wakes: unknown[] = []
+    const driver = new OmpAgentDriver(client, { onUnsolicitedWake: (wake) => { wakes.push(wake) } })
+    const consume = (async () => {
+      const chunks: StreamChunk[] = []
+      for await (const chunk of driver.stream(request([user('u1', 'hello')]), new AbortController().signal)) chunks.push(chunk)
+      return chunks
+    })()
+    await tick()
+    client.settle()
+    const aborted = assistantMessage('half', 'aborted', { input: 1, output: 1 })
+    client.emit(messageUpdate('m1', { type: 'text_start', contentIndex: 0 }, assistantMessage('', 'aborted', { input: 1, output: 1 })))
+    client.emit(messageUpdate('m1', { type: 'text_delta', contentIndex: 0, delta: 'half' }, aborted))
+    client.emit({
+      type: 'message_end', messageId: 't-1', message: { role: 'user', content: [{ type: 'text', text: 'steer from terminal' }] },
+    })
+    client.emit({ type: 'message_end', messageId: 'm1', message: aborted })
+    settlePrompt(client, 'aborted')
+    const chunks = await consume
+
+    expect(wakes).toEqual([{ text: 'steer from terminal' }])
+    expect(chunks.at(-1)).toEqual({ type: 'finish', reason: { kind: 'stop' } })
   })
 })

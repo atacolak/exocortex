@@ -144,6 +144,22 @@ export interface OmpUserTurn {
 /** Finish text for an OMP run whose terminal event carried no details. */
 const UNKNOWN_FAILURE = 'the OMP run ended without a terminal assistant message'
 
+/** Text standing in for one image part when OMP's message crosses into harness prose. */
+const IMAGE_PLACEHOLDER = '[image]'
+
+/** Bound on remembered OMP message ids: one attach cannot grow the set without limit. */
+const ANNOUNCED_MESSAGE_LIMIT = 256
+
+function normalizeUserText(text: string): string {
+  return text.replace(/\s+/g, ' ').trim()
+}
+
+function imageCountOf(message: Record<string, unknown> | undefined): number {
+  const content = message?.content
+  if (!Array.isArray(content)) return 0
+  return content.filter(block => objectOf(block)?.type === 'image').length
+}
+
 /** Wake attribution used when OMP replies without ever showing its own input. */
 const BACKGROUND_WAKE: OmpUnsolicitedWake = {
   text: 'Background agent wake',
@@ -158,6 +174,7 @@ function messageText(message: Record<string, unknown> | undefined): string | und
   for (const block of content) {
     const part = objectOf(block)
     if (part?.type === 'text' && typeof part.text === 'string') text.push(part.text)
+    else if (part?.type === 'image') text.push(IMAGE_PLACEHOLDER)
   }
   const joined = text.join('\n')
   return joined.trim().length === 0 ? undefined : joined
@@ -228,11 +245,13 @@ export class OmpEventTranslator {
 
   /**
    * Close the current assistant message and settle its cycle without ending the prompt.
+   * A terminal status only comes from the prompt result, so an `aborted` stop
+   * reason here means a human steer cut the message short and the run continues.
    * @returns the remaining chunks, ending in usage and finish.
    */
   endCycle(): StreamChunk[] {
     if (this.settled) return []
-    return this.settle()
+    return settledAsStop(this.settle())
   }
 
   /**
@@ -242,7 +261,7 @@ export class OmpEventTranslator {
    */
   finish(outcome?: OmpPromptOutcome): StreamChunk[] {
     if (this.settled) return []
-    const chunks = this.settle()
+    const chunks = settledAsStop(this.settle())
     const finish = chunks.at(-1)
     if (finish?.type === 'finish' && outcome !== undefined) {
       finish.reason = outcome.status === 'aborted'
@@ -333,6 +352,13 @@ function usageOf(usage: OmpUsage | undefined): TokenUsage | undefined {
   }
 }
 
+/** Rewrite a cut-short message's finish so a continued run never reports a failure. */
+function settledAsStop(chunks: StreamChunk[]): StreamChunk[] {
+  const last = chunks.at(-1)
+  if (last?.type === 'finish' && last.reason.kind === 'aborted') last.reason = { kind: 'stop' }
+  return chunks
+}
+
 function finishOf(reason: string | undefined, message: OmpAssistantMessage | undefined): FinishReason {
   if (reason === 'aborted') return { kind: 'aborted', failure: { code: 'ABORTED', message: 'the OMP run was aborted' } }
   if (reason === 'error') return { kind: 'error', failure: { code: 'PROVIDER_ERROR', message: message?.errorMessage ?? UNKNOWN_FAILURE } }
@@ -406,7 +432,14 @@ interface PromptState {
   localOnly: boolean
   failure: unknown
   outcome: OmpPromptOutcome | undefined
-  wake: { fired: boolean } | undefined
+  /** Wake attribution; `detached` marks a run already streaming when the driver attached. */
+  wake: { fired: boolean; detached: boolean } | undefined
+  /** Normalized user texts this driver already delivered into OMP for this run. */
+  readonly sentTexts: Set<string>
+  /** Images this driver delivered that OMP has not yet echoed back. */
+  pendingImages: number
+  /** Whether a user message the driver did not send arrived during this run. */
+  steered: boolean
 }
 
 /**
@@ -440,8 +473,10 @@ export interface OmpAgentDriverOptions {
    */
   readonly streaming?: boolean
   /**
-   * Admit one OMP-initiated run into the harness as a visible turn. Called at
-   * most once per run, with the waking input and its trigger-card source.
+   * Publish input a human delivered outside the harness. The first call for a
+   * run opens the visible turn; later calls inject a steer into that running
+   * turn so terminal messages appear immediately. Each external message is
+   * published once, matched against the message id OMP reports.
    */
   readonly onUnsolicitedWake?: (wake: OmpUnsolicitedWake) => void
 }
@@ -458,6 +493,8 @@ export class OmpAgentDriver {
   private readonly onTool: ((events: readonly OmpToolEvent[]) => void) | undefined
   private readonly onContinue: (() => void) | undefined
   private readonly onUnsolicitedWake: ((wake: OmpUnsolicitedWake) => void) | undefined
+  /** OMP message ids already published as external user input. */
+  private readonly announced = new Set<string>()
 
   constructor(private readonly client: OmpDriverClient, options: OmpAgentDriverOptions = {}) {
     this.transcript = options.transcript ?? 'replay'
@@ -466,7 +503,7 @@ export class OmpAgentDriver {
     this.onContinue = options.onContinue
     this.onUnsolicitedWake = options.onUnsolicitedWake
     this.stopFrames = client.onFrame((frame) => { this.observe(frame) })
-    if (options.streaming === true) this.openUnsolicitedPrompt()
+    if (options.streaming === true) this.openUnsolicitedPrompt({ detached: true })
   }
 
   /** Whether OMP is currently serving a prompt that accepts live steering. */
@@ -487,7 +524,7 @@ export class OmpAgentDriver {
     const sent = this.sent as Set<string>
     for (const [index, turn] of turns.entries()) {
       try {
-        await this.steer(turn)
+        await this.steer(this.prompt, turn)
       } catch (error) {
         for (const pending of turns.slice(index)) sent.delete(pending.key)
         throw error
@@ -504,7 +541,7 @@ export class OmpAgentDriver {
 
   private observe(frame: OmpRpcFrame): void {
     if (frame.type === 'agent_start') {
-      this.abandonDrainedPrompt()
+      this.abandonSettledPrompt()
       if (this.prompt === undefined && !this.startingPrompt) this.openUnsolicitedPrompt()
       return
     }
@@ -522,31 +559,37 @@ export class OmpAgentDriver {
       if (state === undefined || state.unsolicited) return
       const result = frame as OmpPromptResultFrame
       if (result.id !== state.id) return
+      const interrupted = result.status === 'aborted' && state.steered
       state.outcome = {
-        status: result.status,
+        status: interrupted ? 'completed' : result.status,
         ...result.error?.message === undefined ? {} : { message: result.error.message },
       }
       state.closed = true
       state.channel.close()
       return
     }
+    this.abandonSettledPrompt()
     let state = this.prompt
-    if (state === undefined && !this.startingPrompt && isCycleFrame(frame)) {
+    if (state === undefined && !this.startingPrompt && opensRun(frame)) {
       this.openUnsolicitedPrompt()
       state = this.prompt
     }
     if (state === undefined || state.closed) return
+    this.noteUserMessage(state, frame)
     if (state.unsolicited) this.noteWakingInput(state, frame)
     if (isCycleFrame(frame)) state.channel.push(frame as OmpAgentEvent)
   }
 
-  private abandonDrainedPrompt(): void {
-    const state = this.prompt
-    if (state === undefined || !state.closed || !state.channel.finished()) return
-    this.prompt = undefined
+  /**
+   * Drop a prompt whose run already settled. The generator that owns it keeps
+   * draining its own channel, so the frames a later run emits are never
+   * attributed to the closed prompt or dropped behind it.
+   */
+  private abandonSettledPrompt(): void {
+    if (this.prompt?.closed === true) this.prompt = undefined
   }
 
-  private openUnsolicitedPrompt(): void {
+  private openUnsolicitedPrompt(options: { detached?: boolean } = {}): void {
     this.prompt = {
       id: randomUUID(),
       channel: new FrameChannel(),
@@ -558,30 +601,70 @@ export class OmpAgentDriver {
       localOnly: false,
       failure: undefined,
       outcome: undefined,
-      wake: { fired: false },
+      wake: { fired: false, detached: options.detached === true },
+      sentTexts: new Set(),
+      pendingImages: 0,
+      steered: false,
     }
   }
 
-  private noteWakingInput(state: PromptState, frame: OmpRpcFrame): void {
-    if (state.wake === undefined || state.wake.fired) return
-    if (frame.type === 'tool_execution_start' || frame.type === 'message_update') {
-      this.fireWake(state, BACKGROUND_WAKE)
-      return
-    }
+  /**
+   * Publish every prompt this driver did not deliver itself, so a human typing
+   * in the terminal sees that message in the Session immediately. OMP echoes
+   * the driver's own prompt and steers back as user frames; those are matched
+   * against the delivered texts and images and stay silent. One frame per
+   * message id is announced, so `message_start` and `message_end` never double.
+   */
+  private noteUserMessage(state: PromptState, frame: OmpRpcFrame): void {
     if (frame.type !== 'message_start' && frame.type !== 'message_end') return
     const record = frame as Record<string, unknown>
     const message = objectOf(record.message)
     const role = message?.role
-    if (role === 'assistant') {
-      this.fireWake(state, BACKGROUND_WAKE)
-      return
-    }
     if (role !== 'user' && role !== 'custom') return
+    const messageId = typeof record.messageId === 'string' ? record.messageId : undefined
     const text = messageText(message)
     if (text === undefined) return
+    if (messageId === undefined ? frame.type !== 'message_end' : !this.announce(messageId)) return
+    if (state.wake !== undefined) state.wake.fired = true
+    const images = imageCountOf(message)
+    if (role === 'user') {
+      if (images > 0 && state.pendingImages > 0) {
+        state.pendingImages -= 1
+        return
+      }
+      if (state.sentTexts.has(normalizeUserText(text))) return
+      state.steered = true
+      this.markExternalUserMessage(text)
+      const source = ompTriggerSource(text)
+      this.onUnsolicitedWake?.(source === undefined ? { text } : { text, source })
+      return
+    }
     const source = ompTriggerSource(text)
-    if (source === undefined && role === 'user') this.markExternalUserMessage(text)
-    this.fireWake(state, source === undefined ? { text } : { text, source })
+    this.onUnsolicitedWake?.(source === undefined ? { text } : { text, source })
+  }
+
+  /** One announcement per OMP message id, bounded so a long attach does not grow without limit. */
+  private announce(messageId: string): boolean {
+    if (this.announced.has(messageId)) return false
+    this.announced.add(messageId)
+    if (this.announced.size > ANNOUNCED_MESSAGE_LIMIT) {
+      const oldest = this.announced.values().next()
+      if (!oldest.done) this.announced.delete(oldest.value)
+    }
+    return true
+  }
+
+  private noteWakingInput(state: PromptState, frame: OmpRpcFrame): void {
+    const wake = state.wake
+    if (wake === undefined || wake.fired) return
+    if (frame.type !== 'message_start' && frame.type !== 'message_end') {
+      if (wake.detached && (frame.type === 'tool_execution_start' || frame.type === 'message_update')) {
+        this.fireWake(state, BACKGROUND_WAKE)
+      }
+      return
+    }
+    const role = objectOf((frame as Record<string, unknown>).message)?.role
+    if (role === 'assistant') this.fireWake(state, BACKGROUND_WAKE)
   }
 
   /**
@@ -618,10 +701,10 @@ export class OmpAgentDriver {
   async *stream(request: GenerateOptions, signal: AbortSignal): AsyncIterable<StreamChunk> {
     signal.throwIfAborted()
     if (this.sent !== undefined && request.messages.length < this.highWaterMark) await this.restart()
-    this.abandonDrainedPrompt()
     const pending = this.pendingTurns(request.messages)
     let state = this.prompt
-    const drainable = state !== undefined && state.unsolicited && !state.channel.finished()
+    const buffered = state === undefined ? false : state.unsolicited && !state.channel.finished()
+    const drainable = state !== undefined && buffered && (!state.closed || pending.length === 0)
     if (state === undefined || (state.closed && !drainable)) {
       if (pending.length === 0) {
         this.highWaterMark = Math.max(this.highWaterMark, request.messages.length)
@@ -634,7 +717,7 @@ export class OmpAgentDriver {
     } else {
       for (const turn of pending) {
         signal.throwIfAborted()
-        await this.steer(turn)
+        await this.steer(state, turn)
         this.markSent([turn])
       }
     }
@@ -837,6 +920,9 @@ export class OmpAgentDriver {
         failure: undefined,
         outcome: undefined,
         wake: undefined,
+        sentTexts: new Set([normalizeUserText(text)]),
+        pendingImages: images.length,
+        steered: false,
       }
       this.prompt = state
       const prompt = {
@@ -865,8 +951,12 @@ export class OmpAgentDriver {
     }
   }
 
-  private async steer(turn: OmpUserTurn): Promise<void> {
+  private async steer(state: PromptState | undefined, turn: OmpUserTurn): Promise<void> {
     const images = await this.imagesOf([...turn.images])
+    if (state !== undefined) {
+      state.sentTexts.add(normalizeUserText(turn.text))
+      state.pendingImages += images.length
+    }
     await this.client.request({
       type: 'steer',
       message: turn.text,
@@ -935,6 +1025,19 @@ function isCycleFrame(frame: OmpRpcFrame): boolean {
     || frame.type === 'tool_execution_start'
     || frame.type === 'tool_execution_end'
     || frame.type === 'command_output'
+}
+
+/**
+ * Whether one frame can open an unsolicited run. Only a prompt OMP carries
+ * into the transcript attributes the run to real input; assistant output,
+ * tool execution, and streamed deltas alone must never fabricate a wake.
+ * @param frame - any inbound frame.
+ * @returns whether the frame is a user or custom message boundary.
+ */
+function opensRun(frame: OmpRpcFrame): boolean {
+  if (frame.type !== 'message_start' && frame.type !== 'message_end') return false
+  const role = objectOf((frame as Record<string, unknown>).message)?.role
+  return role === 'user' || role === 'custom'
 }
 
 /** Ordered, closeable frame feed shared between the client listener and the generator. */
