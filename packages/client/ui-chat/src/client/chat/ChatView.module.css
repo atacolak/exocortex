@@ -264,7 +264,6 @@
   align-items: center;
   min-width: 0;
   max-width: 100%;
-  gap: 6px;
   margin-top: 4px;
   height: calc(28px + var(--dsh-content-font-delta, 0px));
 }
@@ -284,22 +283,6 @@
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
-}
-
-.runningIcon {
-  position: relative;
-  display: inline-flex;
-  flex: none;
-  width: calc(14px + var(--dsh-content-font-delta, 0px));
-  height: calc(14px + var(--dsh-content-font-delta, 0px));
-  /* The fixed footprint contains the animation's layout and paint. */
-  contain: strict;
-  overflow: hidden;
-}
-
-.runningMark {
-  width: 100%;
-  height: 100%;
 }
 
 .openError {

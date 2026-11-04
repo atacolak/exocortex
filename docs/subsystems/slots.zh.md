@@ -130,6 +130,7 @@ root [AppFrame]
       ├─ conversation.header [ConversationHeader]
       │  ├─ conversation.header.leading
       │  └─ conversation.session.header [ConversationSessionHeader]
+      │     ├─ conversation.session.header.title
       │     ├─ conversation.session.header.lineage
       │     ├─ conversation.session.header.actions
       │     ├─ conversation.session.header.utilities
@@ -142,6 +143,7 @@ Factory: conversation.content [ConversationContent]
 │  └─ conversation.view
 │     ├─ id=chat [ChatView]
 │     │  ├─ conversation.chat.text-interaction [list]
+│     │  ├─ chat.compactionCard [MinimalNeutralCompactionDivider]
 │     │  └─ conversation.chat.flow [ChatFlow]
 │     │     └─ conversation.chat.node [ChatNodeSeat dispatch]
 │     │        ├─ key=user [UserMessageNodeView]
@@ -154,6 +156,7 @@ Factory: conversation.content [ConversationContent]
 │     │        │  └─ conversation.chat.reasoning.body [DefaultReasoningBody]
 │     │        │     └─ calls Factory: conversation.chat.reasoning.content
 │     │        ├─ key=tool-call [ToolCallTree]
+│     │        │  ├─ tool.row
 │     │        │  └─ tool.call.toolview
 │     │        │     └─ key=read_image [ReadImageRow / ToolRow]
 │     │        │        └─ tool.call.images [MessageImages]
@@ -176,6 +179,7 @@ Factory: conversation.content [ConversationContent]
 │  ├─ conversation.input.model
 │  │  └─ conversation.input.model.label
 │  ├─ conversation.input.overlay
+  ├─ conversation.input.expand
 │  ├─ conversation.composer.dock
 │  ├─ conversation.input.left
 │  └─ conversation.input.right

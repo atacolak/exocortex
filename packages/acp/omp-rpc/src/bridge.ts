@@ -1,4 +1,7 @@
 import { mkdir, stat } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
+import { homedir, tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentStepStream } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-commands'
@@ -11,13 +14,14 @@ import type { TodoItem } from '@deepseek-ai/dsh-tool-todo'
 import type { OmpBindings } from './bindings.ts'
 import { OMP_THINKING_LEVELS, OmpModelCatalogSync, type CatalogSyncOutcome, type OmpModelSelection } from './catalog.ts'
 import { OmpRpcClient } from './client.ts'
+import { DEFAULT_OMP_DAEMON_IDLE_TIMEOUT_MS, launchOmpDaemon } from './daemon.ts'
 import { DEFAULT_OMP_HOST_TOOLS, ompCordisHostTools } from './cordis-tools.ts'
 import { OmpAgentDriver, type OmpCompactionSignal, type OmpImageInput, type OmpImageRef, type OmpToolEvent } from './driver.ts'
 import { OmpHostToolBridge } from './host-tools.ts'
 import { launchOmp, type LaunchedOmp } from './launch.ts'
 import { CLIENT_OWNED_COMMANDS, ompCompactCommand, ompNativeCommandLine } from './native-commands.ts'
 import { appendOmpCompactionBoundary, tailOmpTranscriptCompaction } from './resume.ts'
-import { connectOmpSocket, type OmpSocketConnection } from './socket.ts'
+import { connectOmpSocket, ompRunDirectory, resolveOmpRunDirectory, type OmpSocketConnection } from './socket.ts'
 import { OmpUiBridge, type OmpUiAsker } from './ui.ts'
 import type { OmpExtensionUiRequest, OmpPromptResultFrame, OmpRpcCommand } from './types.ts'
 
@@ -84,7 +88,7 @@ declare module '@deepseek-ai/dsh-agent' {
 /** What one successful attachment exposes to callers. */
 export interface OmpAttachment {
   readonly client: OmpRpcClient
-  /** Launched process this bridge owns; absent when attaching to a live socket. */
+  /** Piped process this bridge owns; absent when it reaches OMP over a published socket. */
   readonly launched?: LaunchedOmp
   readonly catalog: CatalogSyncOutcome
   /** Session identity, transcript path, and in-flight-run state OMP reports as active. */
@@ -155,6 +159,18 @@ export interface OmpBridgeOptions {
     sessionId: SessionId,
     cursor: { readonly entryId: string; readonly byteOffset: number },
   ) => void
+  /**
+   * Launch sessions this bridge creates behind a detached keeper and reach OMP
+   * over its published socket; defaults to true. Tests that model OMP with an
+   * in-memory subprocess provider set it false to keep the piped launch.
+   */
+  readonly detachedDaemon?: boolean
+  /** Inactivity a detached keeper tolerates before ending OMP's request stream; defaults to one hour. */
+  readonly daemonIdleTimeoutMs?: number
+  /** Directory the bridge watches for published sockets; defaults to `$OMP_RUN_DIR` then `<home>/.omp/run`. */
+  readonly runDirectory?: string
+  /** Directory OMP itself publishes under; defaults to `$HOME/.omp/run`. */
+  readonly publicationDir?: string
 }
 
 /**
@@ -414,17 +430,34 @@ export class OmpBridge {
           && await existingFile(this.options.hcomExtension)
           ? this.options.hcomExtension
           : undefined
-        launched = launchOmp(this.options.subprocess, {
-          argv: ompLaunchArgv({
-            ...options,
-            executable,
-            ...hcomExtension === undefined ? {} : { extensions: [hcomExtension] },
-          }),
-          cwd: options.cwd,
-          env: ompLaunchEnvironment({ hcom: hcomExtension !== undefined }),
+        const argv = ompLaunchArgv({
+          ...options,
+          executable,
+          ...hcomExtension === undefined ? {} : { extensions: [hcomExtension] },
         })
-        await launched.ready
-        client = launched.client
+        const env = ompLaunchEnvironment({ hcom: hcomExtension !== undefined })
+        if (this.options.detachedDaemon === false) {
+          launched = launchOmp(this.options.subprocess, { argv, cwd: options.cwd, env })
+          await launched.ready
+          client = launched.client
+        } else {
+          const daemon = launchOmpDaemon({
+            argv,
+            cwd: options.cwd,
+            env,
+            publicationDir: this.options.publicationDir ?? ompRunDirectory(homedir()),
+            runDirectory: this.options.runDirectory ?? resolveOmpRunDirectory(undefined, undefined),
+            handshakePath: join(tmpdir(), `dsh-omp-daemon-${randomUUID()}.json`),
+            idleTimeoutMs: this.options.daemonIdleTimeoutMs ?? DEFAULT_OMP_DAEMON_IDLE_TIMEOUT_MS,
+          })
+          try {
+            const published = await daemon.published
+            connection = await connectOmpSocket(published.socketPath)
+            client = connection.client
+          } finally {
+            await daemon.dispose()
+          }
+        }
       } else {
         connection = await connectOmpSocket(options.socketPath)
         client = connection.client
@@ -636,7 +669,10 @@ export class OmpBridge {
   }
 
   /**
-   * Stop the OMP process attached to one session.
+   * Detach one session's OMP connection.
+   *
+   * A session this bridge started behind a detached keeper keeps running: only
+   * the socket client closes, so a reload or restart never interrupts a turn.
    * @param id - harness session identity.
    */
   detach(id: SessionId): Promise<void> {

@@ -168,8 +168,9 @@ function bench(over?: BenchOptions) {
   const busyEnter = createSnapshotStore<'queue' | 'steer'>(over?.busyEnter ?? 'queue')
   const stopShortcut = createSnapshotStore<readonly string[]>(['Esc', 'Esc'])
   const slotCalls: { key: string; owner: unknown }[] = []
-  const renderSlot = ((key: string, owner: object) => {
+  const renderSlot = ((key: string, owner: object, opts?: { fallback?: React.ReactNode }) => {
     slotCalls.push({ key, owner })
+    if (key === 'conversation.input.expand') return opts?.fallback ?? null
     if (key === 'conversation.input.overlay') return over?.overlay ?? null
     if (key === 'conversation.input.left') return over?.leftItems ?? null
     if (key === 'conversation.input.right') return over?.rightItems ?? null

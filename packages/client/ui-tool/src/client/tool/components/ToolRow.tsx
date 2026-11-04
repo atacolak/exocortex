@@ -9,6 +9,7 @@ import type { ContextMenuTriggerProps } from '@deepseek-ai/dsh-client-ui-context
 import type { PropsRenderSlots, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import type { OpenFileOptions, UseDisclosure } from '@deepseek-ai/dsh-client-ui-chat/client'
 import type { MessageImageLoader } from '@deepseek-ai/dsh-client-ui-conversation/client'
+import type { ToolRowSlotProps } from '../../contract/slots.ts'
 import { CHAT_DIFF_MAX_LINES, type DiffCardModel } from '../models/diff-card-model.ts'
 import { CHAT_READ_MAX_LINES, type ReadCardModel } from '../models/read-card-model.ts'
 import type { ImageCardModel } from '../models/image-card-model.ts'
@@ -39,9 +40,8 @@ export interface ToolRowProps {
   icon: ReactNode
   title: string
   /**
-   * The model's own task intent. When present it becomes the collapsed
-   * heading in place of the localized tool title, and the raw summary stays
-   * behind the disclosure until the row expands.
+   * The model's own one-line task intent from `arguments.i`. The stock row
+   * ignores it; a `tool.row` occupant may promote it into its own heading.
    */
   intent?: string | undefined
   summary: string
@@ -132,13 +132,12 @@ function stateStatus(state: ToolRowState, t: TranslateNS<'conversation'>): strin
  * @param props - tool state, summary, output, and navigation callbacks.
  * @returns the tool disclosure.
  */
-export const ToolRow = memo(function ToolRow({
+const ToolRowView = memo(function ToolRowView({
   t,
   variant,
   toolName,
   icon,
   title,
-  intent,
   summary,
   summarySuffix,
   bodyRaw,
@@ -192,12 +191,8 @@ export const ToolRow = memo(function ToolRow({
   )
   const status = stateStatus(state, t)
   const running = state === 'running' || state === 'preparing'
-  // The intent heading already states the task; its raw command/path summary
-  // waits for the disclosure so the collapsed row reads as one sentence.
-  const intentCollapsed = intent !== undefined && !open
-  const normalSummary = intentCollapsed ? ''
-    : (intent === undefined ? terminalBody?.description : undefined)
-      ?? (open ? detailsBody?.expandedSummary ?? summary : summary)
+  const normalSummary = terminalBody?.description
+    ?? (open ? detailsBody?.expandedSummary ?? summary : summary)
   const exitLabel = terminalExitLabel(terminal, t)
   // Generic failures retain their first result line; command exits keep their description.
   const failureLine = state === 'error' && exitLabel === null ? errorSummary ?? normalSummary : null
@@ -205,8 +200,8 @@ export const ToolRow = memo(function ToolRow({
   // Diff totals remain visible after the optional summary suffix.
   const diffStat = useMemo(() => diffBody === null ? null : diffTotals(diffBody.card.diffs), [diffBody])
   const settledWithCue = state === 'error' || state === 'stopped'
-  const suffix = settledWithCue || intentCollapsed ? null : summarySuffix ?? null
-  const totals = settledWithCue || intentCollapsed ? null : diffStat
+  const suffix = settledWithCue ? null : summarySuffix ?? null
+  const totals = settledWithCue ? null : diffStat
   const openFile = useMemo(() => filePath !== undefined && onOpenFile !== undefined && !settledWithCue
     ? (event: MouseEvent<HTMLButtonElement>) => {
       event.stopPropagation()
@@ -420,7 +415,7 @@ export const ToolRow = memo(function ToolRow({
         leadingClassName={css.leading}
         titleClassName={css.title}
         icon={icon}
-        title={intent ?? title}
+        title={title}
         running={running}
         open={open}
         expandable={expandable}
@@ -433,4 +428,26 @@ export const ToolRow = memo(function ToolRow({
       </DisclosureRow>
     </div>
   )
+})
+
+/** Component props of the stock row: row data plus the declaring entry's `tool.row` seat. */
+interface ToolRowComponentProps extends ToolRowProps {
+  /**
+   * Render the row through the session's `tool.row` occupant.
+   * @param props - stock row props plus the slot-owned overrides.
+   * @param fallback - the stock row, rendered when no occupant registers.
+   * @returns the rendered row.
+   */
+  readonly renderToolRow?: ((props: ToolRowSlotProps, fallback: ReactNode) => ReactNode) | undefined
+}
+
+/**
+ * Render one Tool row through the `tool.row` slot, defaulting to the stock row.
+ * @param props - row data and the declaring entry's slot seat.
+ * @returns the registered row, or the stock row when no occupant registers.
+ */
+export const ToolRow = memo(function ToolRow({ renderToolRow, ...row }: ToolRowComponentProps) {
+  const renderDefault = (overrides?: Partial<ToolRowProps>): ReactNode => <ToolRowView {...row} {...overrides} />
+  if (renderToolRow === undefined) return renderDefault()
+  return renderToolRow({ ...row, renderDefault }, renderDefault())
 })

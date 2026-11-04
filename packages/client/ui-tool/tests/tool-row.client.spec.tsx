@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 // @vitest-environment jsdom
 import { contextMenuHook } from '@deepseek-ai/dsh-client-test-runtime'
@@ -377,12 +378,16 @@ describe('ToolRow', () => {
     expect(view.container.querySelector('[aria-expanded]')?.getAttribute('aria-expanded')).toBe('false')
   })
 
-  it('renders the intent in place of the tool title and holds the raw summary until expanded', () => {
-    const view = render(<ToolRow {...rowProps} intent="Run focused tests" />)
-    expect(view.getByText('Run focused tests')).toBeTruthy()
-    expect(view.queryByText('Bash')).toBeNull()
-    expect(view.queryByText('List files')).toBeNull()
-    fireEvent.click(view.getByRole('button', { name: /Run focused tests/ }))
+  it('delivers the arguments.i intent to the tool.row seat and keeps the stock title', () => {
+    const seat = vi.fn((_props: unknown, fallback: ReactNode) => fallback)
+    const view = render(<ToolRow {...rowProps} intent="Run focused tests" renderToolRow={seat} />)
+    expect(seat).toHaveBeenCalledWith(
+      expect.objectContaining({ intent: 'Run focused tests', renderDefault: expect.any(Function) }),
+      expect.anything(),
+    )
+    expect(view.getByText('Bash')).toBeTruthy()
+    expect(view.queryByText('Run focused tests')).toBeNull()
+    fireEvent.click(view.getByRole('button'))
     expect(view.getByText('List files')).toBeTruthy()
     expect(view.container.querySelector('[class*="ioCard"]')).not.toBeNull()
   })
@@ -620,24 +625,27 @@ describe('GenericToolCard', () => {
     expect(view.container.querySelector('[data-variant="bash"]')).not.toBeNull()
   })
 
-  it('titles an intent row with the intent alone, revealing its exit badge and terminal card on expand', () => {
+  it('offers the intent to the tool.row seat while the stock row keeps its title, summary, and exit badge', () => {
     const argsRaw = JSON.stringify({ i: 'Run focused tests', command: 'npm test', description: 'Run the suite' })
     const settled = result({
       call: { name: 'bash', argsRaw },
       content: [{ type: 'text', text: 'failed\n[exit code: 2]' }],
     })
-    const view = render(<GenericToolCard {...props('bash', settled)} getFileTriggerProps={() => ({})} />)
-    expect(view.getByText('Run focused tests')).toBeTruthy()
-    expect(view.queryByText('运行命令')).toBeNull()
+    const seat = vi.fn((_props: unknown, fallback: ReactNode) => fallback)
+    const view = render(<GenericToolCard {...props('bash', settled)}
+      getFileTriggerProps={() => ({})} renderToolRow={seat} />)
+    expect(seat).toHaveBeenCalledWith(expect.objectContaining({ intent: 'Run focused tests' }), expect.anything())
+    expect(view.getByText('运行命令')).toBeTruthy()
+    expect(view.getByText('Run the suite')).toBeTruthy()
     expect(view.queryByText('npm test')).toBeNull()
     expect(view.getByText('退出码 2')).toBeTruthy()
     expect(view.container.querySelector('[data-terminal]')).toBeNull()
-    fireEvent.click(view.getByRole('button', { name: /Run focused tests/ }))
+    fireEvent.click(view.getByRole('button', { name: /运行命令/ }))
     expect(view.getAllByText('npm test').length).toBeGreaterThan(0)
     expect(view.container.querySelector('[data-terminal]')).not.toBeNull()
   })
 
-  it('keeps a read row file link and Read card under the intent heading once expanded', () => {
+  it('offers the read intent to the tool.row seat and reveals the Read card on expand', () => {
     const argsRaw = JSON.stringify({ i: 'Inspect config', file_path: 'src/a.ts' })
     const settled = result({
       call: { name: 'read', argsRaw },
@@ -645,29 +653,32 @@ describe('GenericToolCard', () => {
       content: [{ type: 'text', text: '<path>/w/src/a.ts</path>\n<type>file</type>\n<content>\nexport const a = 1\n</content>' }],
     })
     const openFile = vi.fn()
-    const view = render(<GenericToolCard {...props('read', settled)} cwd="/w" openFile={openFile} getFileTriggerProps={() => ({})} />)
-    expect(view.getByText('Inspect config')).toBeTruthy()
-    expect(view.queryByText('读取')).toBeNull()
-    // The path is raw call material: it waits for the disclosure with the card.
-    expect(view.queryByText('src/a.ts')).toBeNull()
+    const seat = vi.fn((_props: unknown, fallback: ReactNode) => fallback)
+    const view = render(<GenericToolCard {...props('read', settled)}
+      cwd="/w" openFile={openFile} getFileTriggerProps={() => ({})} renderToolRow={seat} />)
+    expect(seat).toHaveBeenCalledWith(expect.objectContaining({ intent: 'Inspect config' }), expect.anything())
+    expect(view.getByText('读取')).toBeTruthy()
+    expect(view.getByText('src/a.ts')).toBeTruthy()
     expect(view.container.querySelector('[data-read]')).toBeNull()
-    fireEvent.click(view.getByRole('button', { name: /Inspect config/ }))
+    fireEvent.click(view.getByRole('button', { name: /读取/ }))
     expect(view.container.querySelector('[data-read]')).not.toBeNull()
     fireEvent.click(view.getByRole('button', { name: 'src/a.ts' }))
     expect(openFile).toHaveBeenCalledWith('/w/src/a.ts')
   })
 
-  it('holds intent-row diff totals with the path until the card expands', () => {
+  it('holds diff totals with the path until the card expands', () => {
     const argsRaw = JSON.stringify({ i: 'Fix totals', file_path: 'src/a.ts', old_string: 'old', new_string: 'new' })
+    const seat = vi.fn((_props: unknown, fallback: ReactNode) => fallback)
     const view = render(<GenericToolCard {...props('edit', running({ name: 'edit', argsRaw }))}
-      getFileTriggerProps={() => ({})} />)
+      getFileTriggerProps={() => ({})} renderToolRow={seat} />)
+    expect(seat).toHaveBeenCalledWith(expect.objectContaining({ intent: 'Fix totals' }), expect.anything())
     const heading = view.container.querySelector('[data-disclosure-row]')
-    expect(heading?.textContent).toContain('Fix totals')
-    expect(heading?.textContent).not.toContain('编辑')
-    expect(heading?.textContent).not.toContain('src/a.ts')
-    expect(heading?.textContent).not.toContain('+1')
+    expect(heading?.textContent).toContain('编辑')
+    expect(heading?.textContent).not.toContain('Fix totals')
+    expect(heading?.textContent).toContain('src/a.ts')
+    expect(heading?.textContent).toContain('+1 -1')
     expect(view.container.querySelector('[data-diff]')).toBeNull()
-    fireEvent.click(view.getByRole('button', { name: /Fix totals/ }))
+    fireEvent.click(view.getByRole('button', { name: /编辑/ }))
     expect(heading?.textContent).toMatch(/src\/a\.ts.*\+1 -1/)
     expect(view.container.querySelector('[data-diff]')).not.toBeNull()
   })

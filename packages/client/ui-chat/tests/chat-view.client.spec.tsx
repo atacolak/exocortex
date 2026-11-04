@@ -481,6 +481,7 @@ function makeHarness(
   }
   const renderSlot = (key: string, owner: ChatFlowOwnerProps, opts: Parameters<FlowRenderer>[2]) => {
     if (key === 'conversation.chat.text-interaction') return null
+    if (key === 'chat.compactionCard') return opts?.fallback ?? null
     if (key !== 'conversation.chat.flow') throw new Error(`Undeclared ChatView child: ${key}`)
     if ('renderSlot' in owner || 'useStore' in owner || 'actions' in owner) {
       throw new Error('Flow owner data must not replace its rendering or store authority')
@@ -4768,11 +4769,7 @@ describe('ChatView', () => {
     expect([...column.children].filter(child => !child.hasAttribute('data-text-interaction-surface')).at(-1)).toBe(status)
     expect(within(status as HTMLElement).getByRole('status').textContent).toBe('深度求索中')
     expect(status?.lastElementChild?.textContent).toBe('深度求索中')
-    const icon = status?.querySelector('svg')?.parentElement
-    expect(icon?.getAttribute('aria-hidden')).toBe('true')
-    expect(icon?.firstElementChild?.getAttribute('data-penrose-mark')).not.toBeNull()
-    expect(icon?.getAttribute('style')).toBeNull()
-    expect([...(status?.querySelectorAll('animate') ?? [])].map(node => node.getAttribute('dur'))).toEqual(['4s', '4s'])
+    expect(status?.querySelector('svg')).toBeNull()
     // The running bit clears before the Turn closes: the status keeps its slot unseen and unannounced.
     act(() => { h.setSession({ running: false }) })
     const held = column.querySelector<HTMLElement>('[data-chat-running]')

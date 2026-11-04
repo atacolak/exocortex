@@ -130,6 +130,7 @@ async function socketBridge(): Promise<BridgeFixture> {
     ctx: bridgeCtx,
     subprocess: subprocess as never,
     executable: 'omp',
+    detachedDaemon: false,
     onCompactionCursor: (_sessionId, cursor) => { cursors.push(cursor) },
   })
   onTestFinished(() => bridge.dispose())
@@ -249,7 +250,7 @@ async function launchingBridge(transcriptPath: string): Promise<{
   await ctx.plugin(Object.assign((inner: Context) => { bridgeCtx = inner }, {
     inject: ['commands', 'subprocess', 'tools'],
   }))
-  const bridge = new OmpBridge({ ctx: bridgeCtx, subprocess, executable: 'omp' })
+  const bridge = new OmpBridge({ ctx: bridgeCtx, subprocess, executable: 'omp', detachedDaemon: false })
   onTestFinished(() => bridge.dispose())
   return { bridge, argv, ctx }
 }
@@ -658,6 +659,7 @@ async function mountedOmpPlugin(options: {
     bindingsFile: options.bindingsFile,
     ompSessionsRoot: options.home,
     cwd: '/work',
+    detachedDaemon: false,
   })
   await tick()
   if (route === undefined) throw new Error('the omp open route was never registered')

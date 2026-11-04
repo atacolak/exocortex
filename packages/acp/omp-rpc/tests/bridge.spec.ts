@@ -270,7 +270,7 @@ async function mountedBridge(reply: Parameters<typeof fakeOmp>[0]): Promise<{
   await ctx.plugin(Object.assign((inner: Context) => { bridgeCtx = inner }, {
     inject: ['commands', 'subprocess', 'tools'],
   }))
-  const bridge = new OmpBridge({ ctx: bridgeCtx, subprocess, executable: 'omp' })
+  const bridge = new OmpBridge({ ctx: bridgeCtx, subprocess, executable: 'omp', detachedDaemon: false })
   onTestFinished(() => bridge.dispose())
   return { ctx, bridge, bridgeCtx, subprocess }
 }
@@ -372,7 +372,7 @@ describe('OmpBridge image resolution', () => {
       inject: ['commands', 'subprocess', 'tools'],
     }))
     expect(() => bridgeCtx.attachments).toThrow(/without inject/)
-    const bridge = new OmpBridge({ ctx: bridgeCtx, subprocess, executable: 'omp' })
+    const bridge = new OmpBridge({ ctx: bridgeCtx, subprocess, executable: 'omp', detachedDaemon: false })
 
     const readImages = (bridge as unknown as {
       readImages(refs: readonly unknown[]): Promise<readonly { data: string; mimeType: string }[]>
@@ -408,7 +408,7 @@ describe('OmpBridge live socket attachment', () => {
     await ctx.plugin(Object.assign((inner: Context) => { bridgeCtx = inner }, {
       inject: ['commands', 'subprocess', 'tools'],
     }))
-    const bridge = new OmpBridge({ ctx: bridgeCtx, subprocess: subprocess as never, executable: 'omp' })
+    const bridge = new OmpBridge({ ctx: bridgeCtx, subprocess: subprocess as never, executable: 'omp', detachedDaemon: false })
     onTestFinished(() => bridge.dispose())
     return { ctx, bridge }
   }

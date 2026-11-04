@@ -558,16 +558,16 @@ describe('BashRow terminal card', () => {
     expect(view.getByText('boom', RAW)).toBeTruthy()
   })
 
-  it('heads the collapsed row with only the intent and reveals the command on expand', () => {
+  it('keeps the stock title over the arguments.i intent and reveals the command on expand', () => {
     const argsRaw = JSON.stringify({ i: 'Run the suite', command: 'npm test', description: 'Run suite' })
     const view = render(<BashRow {...rowProps(settled({
       call: { name: 'bash', argsRaw },
       content: [{ type: 'text', text: 'ok\n[exit code: 0]' }],
     }))} />)
-    expect(view.getByText('Run the suite')).toBeTruthy()
+    expect(view.getByText('运行命令')).toBeTruthy()
+    expect(view.queryByText('Run the suite')).toBeNull()
     expect(view.queryByText('npm test')).toBeNull()
-    expect(view.queryByText('Run suite')).toBeNull()
-    fireEvent.click(view.getByRole('button', { name: /Run the suite/ }))
+    fireEvent.click(view.getByRole('button', { name: /运行命令/ }))
     expect(view.getAllByText('npm test').length).toBeGreaterThan(0)
     expect(view.container.querySelector('[data-terminal]')).not.toBeNull()
   })

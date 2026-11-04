@@ -11,7 +11,9 @@ import {
   Button, IconChevronDownOutlineRegular, MarkdownDelegateProvider, Modal, type MarkdownMenuTarget,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { isAtOrOutside } from '../contract/group-tree.ts'
-import type { ChatFlowHookContext, ChatViewSlotProps, OpenFileOptions } from '../contract/slots.ts'
+import type {
+  ChatFlowHookContext, ChatNodeOwnerProps, ChatViewSlotProps, OpenFileOptions,
+} from '../contract/slots.ts'
 import type { ChatSnapshot } from '../contract/snapshot.ts'
 import { TurnNavigator } from './TurnNavigator.tsx'
 import { mergeTurnRailItems } from './turn-rail-items.ts'
@@ -65,6 +67,10 @@ export function ChatView({
   usePresentation, useProjection, useInteractionIds, dispatchInteraction, t, fileDrag,
 }: ChatViewSlotProps) {
   const { getTriggerProps } = useContextMenu()
+  const renderCompactionCard = useCallback<NonNullable<ChatNodeOwnerProps['renderCompactionCard']>>(
+    (props, fallback) => renderSlot('chat.compactionCard', props, { fallback }),
+    [renderSlot],
+  )
   const getMarkdownTriggerProps = useCallback((target: MarkdownMenuTarget) => getTriggerProps(() => {
     switch (target.kind) {
       case 'file': return { kind: 'file', value: { sessionId, path: resolveFilePath(target.path),
@@ -251,7 +257,7 @@ export function ChatView({
             >
               {renderSlot('conversation.chat.flow', {
                 entries, pendingInputs, lastInputTurn, deferCollapse,
-                cwd, openFile: requestOpenFile, inspectCall, forkAt, retryTurn, loadImage,
+                cwd, openFile: requestOpenFile, inspectCall, forkAt, retryTurn, loadImage, renderCompactionCard,
               }, { hookContext: flowContext })}
             </MarkdownDelegateProvider>
             <div ref={interactionSurfaceRef} className={css.textInteraction} data-text-interaction-surface=""

@@ -563,7 +563,7 @@
     {"digest":"c219efbdfd53b836786202ab4532913d555798f0a8615a4e9629736e3799fb70","names":[],"sources":[]},
     {"digest":"c2deb7c9183735d4e0fffddf5c623f4e34daa1c8e96b111982e957dfcbbcf896","names":["packages/workflow/workflow/src/types.ts#WorkflowAgentOutcome"],"sources":["packages/workflow/workflow/src/types.ts:110"]},
     {"digest":"c2f49004d9ae38a964e80850c87bc6849d6a872091a1d43e99eedf00c641e2a3","names":[],"sources":[]},
-    {"digest":"c348a75048e66e0e7d57c08612f1db9081805e00fe4894524c9401c65774bf82","names":[],"sources":["packages/acp/omp-rpc/src/bridge.ts:26"]},
+    {"digest":"c348a75048e66e0e7d57c08612f1db9081805e00fe4894524c9401c65774bf82","names":[],"sources":["packages/acp/omp-rpc/src/bridge.ts:30"]},
     {"digest":"c43b119ce579b3e9983a0d3adc4ba402ebb9ba773d89738a2dab01ecf5813943","names":[],"sources":[]},
     {"digest":"c5228b7a55498d84f529591744a0ab26e0b93ade18a70a26db1377a1ecfa6b49","names":[],"sources":[]},
     {"digest":"c55827fba7018198772c50e37cb7d3f60a3d8bb6e94b07de72dee0d9f8968005","names":[],"sources":["packages/interaction/user-questions/src/types.ts:134"]},

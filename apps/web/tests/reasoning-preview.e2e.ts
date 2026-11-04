@@ -69,38 +69,6 @@ it.each(['plain', 'signature'])('shows completed paragraph first lines with a ri
       const reasoning = page.locator('[data-variant="think"][data-state="running"]')
       await expandOwningTurnProcess(page, reasoning)
       await reasoning.waitFor()
-      const runningIcon = page.locator('[data-chat-running] span[aria-hidden="true"]:has(> svg)')
-      const mark = runningIcon.locator(':scope > svg')
-      const body = mark.locator('mask path').first()
-      const lines = mark.locator('mask path').nth(1)
-      const animations = mark.locator('animate')
-      await runningIcon.waitFor()
-      expect(await mark.getAttribute('viewBox')).toBe('-541.587 -541.583 1083.17 1083.17')
-      expect(await mark.locator('mask').count()).toBe(1)
-      expect(await mark.locator('rect[fill="currentColor"]').count()).toBe(1)
-      expect(await mark.locator('path[data-penrose-face]').count()).toBe(0)
-      expect(await body.getAttribute('d')).toContain('M-81.99 -431.57')
-      expect(await lines.getAttribute('d')).toContain('M-512.74 313.11')
-      expect(await animations.count()).toBe(2)
-      expect(await animations.first().getAttribute('attributeName')).toBe('d')
-      expect(await animations.first().getAttribute('dur')).toBe('4s')
-      expect(await animations.first().getAttribute('repeatCount')).toBe('indefinite')
-      expect((await animations.first().getAttribute('values'))?.startsWith('M-82.33 -431')).toBe(true)
-      try {
-        await page.emulateMedia({ reducedMotion: 'no-preference', forcedColors: 'none' })
-        const firstFrame = await runningIcon.screenshot({ animations: 'allow' })
-        await expect.poll(async () => !(await runningIcon.screenshot({ animations: 'allow' })).equals(firstFrame), {
-          timeout: 5000,
-        }).toBe(true)
-        await page.emulateMedia({ reducedMotion: 'no-preference', forcedColors: 'active' })
-        expect(await runningIcon.isVisible()).toBe(true)
-        expect(await animations.count()).toBe(2)
-      } finally {
-        await page.emulateMedia({ reducedMotion: null, forcedColors: null })
-      }
-      expect(await reasoning.getAttribute('data-preview')).toBeNull()
-      expect(await reasoning.textContent()).not.toContain('metadata.payload')
-
       first.proceed.resolve(undefined)
       await second.arrived.promise
       const preview = reasoning.locator('[data-streaming]:not([inert] *)')

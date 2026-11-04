@@ -3,7 +3,6 @@ import { memo, useEffect, useState } from 'react'
 import { TextShimmer } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ChatViewSlotProps } from '../contract/slots.ts'
 import { formatRunDuration, LIVE_RUN_CLOCK_INTERVAL_MS } from './message-chrome.ts'
-import { RunningPenrose } from './RunningPenrose.tsx'
 import a11yCss from './accessibility.module.css'
 import css from './ChatView.module.css'
 
@@ -49,7 +48,6 @@ export const RunningStatus = memo(function RunningStatus({
       )}
       <span className={css.runningDivider} aria-hidden="true" />
       <span className={css.runningContent}>
-        <RunningPenrose />
         <TextShimmer active={!holding} className={css.runningText} contentClassName={css.runningLabel}>{label}</TextShimmer>
       </span>
     </div>

@@ -37,7 +37,8 @@ const ToolCall = memo(function ToolCall({
     loadImage,
     useDisclosure,
     inspect: inspectCall === undefined ? undefined : () => { inspectCall(callId) },
-  }), [callId, toolName, call, openFile, cwd, home, loadImage, inspectCall, useDisclosure])
+    renderToolRow: (props, fallback) => renderSlot('tool.row', props, { fallback }),
+  }), [callId, toolName, call, openFile, cwd, home, loadImage, inspectCall, useDisclosure, renderSlot])
   const autoReviewDenied = useMemo(
     () => call.phase === 'result' && toolRowModel(toolName, call.block).autoReviewDenial !== null,
     [toolName, call],

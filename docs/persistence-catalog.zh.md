@@ -7098,7 +7098,7 @@ SHA-256: `52c6113cb0e53f345324bf84f01928bea5d5df57ee80bc0dd65407b8bc5a3734`
 
 SHA-256: `c348a75048e66e0e7d57c08612f1db9081805e00fe4894524c9401c65774bf82`
 
-来源：[`packages/acp/omp-rpc/src/bridge.ts:26`](../packages/acp/omp-rpc/src/bridge.ts)
+来源：[`packages/acp/omp-rpc/src/bridge.ts:30`](../packages/acp/omp-rpc/src/bridge.ts)
 
 | 属性 | 存在性 | 类型 |
 |---|---|---|

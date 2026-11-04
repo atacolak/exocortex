@@ -49,7 +49,7 @@ function turnOf(node: ChatNode | undefined): number | undefined {
  */
 export const ChatNodeSeat = memo(function ChatNodeSeat({
   nodeKey, groupPart, useChatNode, useChatNodeProcess, usePresentation,
-  cwd, openFile, inspectCall, forkAt, retryTurn,
+  cwd, openFile, inspectCall, forkAt, retryTurn, renderCompactionCard,
   loadImage, useStore, actions, renderSlot, t, useChatNodeBottom, deferCollapse, useGroupAction,
 }: ChatNodeSeatProps) {
   const bottom = useChatNodeBottom(nodeKey)
@@ -140,9 +140,10 @@ export const ChatNodeSeat = memo(function ChatNodeSeat({
       retryTurn,
       loadImage,
       turnProcess,
+      renderCompactionCard,
     }, [
     node, groupPart, cwd, openFile, inspectCall, forkAt, retryTurn,
-    loadImage, turnProcess,
+    loadImage, turnProcess, renderCompactionCard,
   ])
   if (routedNode === undefined || owner === null) return null
   // Runtime dispatch owns the correlation: every Node's discriminant is the

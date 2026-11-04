@@ -3,7 +3,7 @@
 
 import type { ReactNode, RefObject } from 'react'
 import {
-  IconChevronDownOutlineRegular, IconFolderCloseRegular, IconFolderOpenRegular, PenroseMark,
+  FISH_LOGO_PATH, FISH_LOGO_VIEWBOX, IconChevronDownOutlineRegular, IconFolderCloseRegular, IconFolderOpenRegular,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { workspaceTitleOf } from '@deepseek-ai/dsh-util-workspace-path'
 import type { ConversationContentProps } from '../contract/slots.ts'
@@ -71,6 +71,27 @@ export interface HeroShellProps {
 }
 
 /**
+ * The neutral stock hero mark: the static fish glyph, decorative and hidden
+ * from the accessibility tree. A registered `conversation.hero.brand.mark`
+ * occupant replaces it.
+ * @returns the fish svg element.
+ */
+export function HeroFish() {
+  return (
+    <svg
+      className={css.mark}
+      width={34}
+      height={(34 * FISH_LOGO_VIEWBOX.height) / FISH_LOGO_VIEWBOX.width}
+      viewBox={`0 0 ${FISH_LOGO_VIEWBOX.width} ${FISH_LOGO_VIEWBOX.height}`}
+      fill="none"
+      aria-hidden="true"
+    >
+      <path d={FISH_LOGO_PATH} fill="currentColor" />
+    </svg>
+  )
+}
+
+/**
  * Render the hero chrome (headline only; no composer, no workspace row).
  * @param props - see {@link HeroShellProps}.
  * @returns the centered hero element tree.
@@ -83,7 +104,7 @@ export function HeroShell({ t, renderSlot, children }: HeroShellProps) {
           {/* figma 34:10412: mark leading the headline, gap 10. */}
           <span className={css.markHitbox}>
             {renderSlot('conversation.hero.brand.mark', { size: 34, className: css.mark }, {
-              fallback: <PenroseMark size={34} className={css.mark} />,
+              fallback: <HeroFish />,
             })}
           </span>
           <span className={css.titleGroup}>
