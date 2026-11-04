@@ -7,7 +7,7 @@ import CommandRuntime from '@deepseek-ai/dsh-commands'
 import { Context } from '@deepseek-ai/cordis'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import type { StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import SessionStore, { Session, SessionId } from '@deepseek-ai/dsh-session'
 import type { SubprocessHandle, SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import { afterEach, describe, expect, it, onTestFinished } from 'vitest'
@@ -467,7 +467,7 @@ describe('OmpBridge live socket attachment', () => {
     const { ctx, bridge } = await socketBridge()
     const { directory, frames } = await published('omp-live-stale')
     const agent = await scopedAgent(ctx, 'socket-stale')
-    const stale = createUserMessage({ content: [{ type: 'text', text: 'want Option B in Wave 2' }] })
+    const stale = createUserMessage({ content: [{ type: 'text', text: 'want Option B in Wave 2' }], source: { kind: 'user' } })
     agent.session.append('user/message', stale, { surfaceOp: 'append' })
 
     await bridge.attach(agent, {
@@ -547,6 +547,7 @@ describe('OmpBridge live socket attachment', () => {
     })
 
     const live = (bridge as unknown as { attachments: Map<string, object> }).attachments.get(agent.id)
+    if (live === undefined) throw new Error('expected an attached OMP session')
     const stream = (bridge as unknown as {
       liveStream(live: object, request: GenerateOptions, signal: AbortSignal): AsyncIterable<StreamChunk>
     }).liveStream.bind(bridge)

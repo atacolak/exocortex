@@ -13,6 +13,11 @@ import {
 
 const roots: string[] = []
 
+function firstText(blocks: readonly { readonly type: string; readonly text?: string }[]): string | undefined {
+  const block = blocks[0]
+  return block?.type === 'text' ? block.text : undefined
+}
+
 async function transcript(lines: readonly unknown[]): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'omp-hydrate-'))
   roots.push(root)
@@ -474,14 +479,14 @@ describe('hydrateOmpSession tail sync', () => {
     expect(second.appended).toBeGreaterThan(0)
     expect(events.filter(event => event.type === 'turn/start').map(event => event.data.turn)).toEqual([1, 2, 3, 4, 5])
     expect(events.filter(event => event.type === 'turn/end').map(event => event.data.turn)).toEqual([1, 2, 3, 4, 5])
-    expect(events.filter(event => event.type === 'user/message').map(event => event.data.content[0]?.text)).toEqual([
+    expect(events.filter(event => event.type === 'user/message').map(event => firstText(event.data.content))).toEqual([
       'one',
       'two',
       'three',
       'four',
       'five',
     ])
-    expect(events.filter(event => event.type === 'assistant/message').map(event => event.data.message.content[0]?.text)).toEqual([
+    expect(events.filter(event => event.type === 'assistant/message').map(event => firstText(event.data.message.content))).toEqual([
       'one reply',
       'two reply',
       'three reply',
@@ -521,7 +526,7 @@ describe('hydrateOmpSession tail sync', () => {
     const outcome = await hydrateOmpSession(session, path, 200, 2)
 
     expect(outcome.turns).toBe(3)
-    expect(session.snapshotEvents().filter(event => event.type === 'user/message').map(event => event.data.content[0]?.text))
+    expect(session.snapshotEvents().filter(event => event.type === 'user/message').map(event => firstText(event.data.content)))
       .toEqual(['three'])
   })
 })
