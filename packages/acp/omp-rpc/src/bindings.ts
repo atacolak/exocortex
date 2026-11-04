@@ -7,8 +7,13 @@
 import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { SessionId, type Session } from '@deepseek-ai/dsh-session'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
+import {
+  hydrateOmpSession,
+  type OmpHydrationCursor,
+  type OmpHydrationOutcome,
+} from './resume.ts'
 
 /** One persisted Harness-session binding to an OMP transcript. */
 export interface OmpBinding {
@@ -222,20 +227,6 @@ export class OmpBindings {
   }
 
   /**
-   * Find the Harness session already bound to one OMP session identity.
-   * @param ompSessionId - session id recorded by the OMP transcript header.
-   * @returns the Harness session identity and its binding, or undefined when unbound.
-   */
-  async findByOmpSession(ompSessionId: string): Promise<{ readonly dshSessionId: SessionId; readonly binding: OmpBinding } | undefined> {
-    await this.tail
-    const sessions = (await this.load()).sessions
-    for (const [dshSessionId, binding] of Object.entries(sessions)) {
-      if (binding.ompSessionId === ompSessionId) return { dshSessionId: SessionId(dshSessionId), binding }
-    }
-    return undefined
-  }
-
-  /**
    * Find the single Harness session bound to one OMP session identity.
    * @param ompSessionId - session id recorded by the OMP transcript header.
    * @returns the canonical Harness session identity and its binding, or undefined when unbound.
@@ -384,4 +375,46 @@ export class OmpBindings {
     this.tail = run.then(() => {}, () => {})
     return run
   }
+}
+
+/** One hydration pass over a bound transcript. */
+export interface OmpBindingHydration {
+  /** Store that receives the cursor this pass records. */
+  readonly bindings: OmpBindings
+  /** Live session receiving the transcript's unprojected turns. */
+  readonly session: Session
+  /** Transcript facts to persist alongside the cursor. */
+  readonly binding: OmpBinding
+  /** Cursor a previous pass recorded, when it is not already on `binding`. */
+  readonly cursor?: OmpHydrationCursor
+  /** false leaves the last transcript turn out because OMP is still streaming it. */
+  readonly includeNewestTurn: boolean
+}
+
+/**
+ * Append the turns one binding's transcript recorded after its cursor, then
+ * persist the canonical leaf and byte offset a reopen resumes from.
+ *
+ * Every active-branch turn is admitted, so a cold open of a long transcript
+ * mirrors its whole history; a later pass reads only the tail OMP appended
+ * while the Harness was detached.
+ * @param request - store, session, transcript facts, and the cursor to resume from.
+ * @returns what this pass appended and the cursor it persisted.
+ */
+export async function hydrateOmpBinding(request: OmpBindingHydration): Promise<OmpHydrationOutcome> {
+  const outcome = await hydrateOmpSession(
+    request.session,
+    request.binding.path,
+    Number.POSITIVE_INFINITY,
+    request.cursor ?? request.binding,
+    request.includeNewestTurn,
+  )
+  await request.bindings.set(request.session.id, {
+    ...request.binding,
+    hydratedTurns: outcome.hydratedTurns,
+    ...outcome.hydratedLeafEntryId === undefined ? {} : { hydratedLeafEntryId: outcome.hydratedLeafEntryId },
+    ...outcome.hydratedByteOffset === undefined ? {} : { hydratedByteOffset: outcome.hydratedByteOffset },
+    updatedAt: new Date().toISOString(),
+  })
+  return outcome
 }

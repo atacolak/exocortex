@@ -24,7 +24,7 @@ import { inboxProjectionDefinition, OmpAgentFactory, type OmpAgentHost } from '.
 import { OMP_LLM_PROVIDER, registerOmpLlmProvider } from './llm-catalog.ts'
 import type {} from '@deepseek-ai/dsh-workspace'
 import Schema from '@deepseek-ai/schemastery'
-import { defaultOmpBindingsFile, OmpBindings } from './bindings.ts'
+import { defaultOmpBindingsFile, hydrateOmpBinding, OmpBindings, type OmpBinding } from './bindings.ts'
 import {
   OmpBridge,
   planOmpAttach,
@@ -58,7 +58,6 @@ import {
   ompProfileOfPreset,
 } from './presets.ts'
 import {
-  hydrateOmpSession,
   OmpResumeError,
   probeOmpSessionLease,
   readOmpTranscriptHeader,
@@ -258,28 +257,45 @@ export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
     }
   }
 
-  const rememberBinding = async (
-    agent: Agent,
-    attachment: OmpAttachment,
-    profile?: string,
-    hydratedTurns?: number,
-  ): Promise<void> => {
-    if (attachment.session.path === undefined) {
+  const bindingFacts = (attachment: OmpAttachment, profile?: string): OmpBinding | undefined =>
+    attachment.session.path === undefined
+      ? undefined
+      : {
+          ompSessionId: attachment.session.id,
+          path: attachment.session.path,
+          cwd: attachment.cwd,
+          ...profile === undefined ? {} : { profile },
+          updatedAt: new Date().toISOString(),
+        }
+
+  const rememberBinding = async (agent: Agent, attachment: OmpAttachment, profile?: string): Promise<void> => {
+    const facts = bindingFacts(attachment, profile)
+    if (facts === undefined) {
       await forgetBinding(agent.id)
       return
     }
     try {
-      await bindings.set(agent.id, {
-        ompSessionId: attachment.session.id,
-        path: attachment.session.path,
-        cwd: attachment.cwd,
-        ...profile === undefined ? {} : { profile },
-        ...hydratedTurns === undefined ? {} : { hydratedTurns },
-        updatedAt: new Date().toISOString(),
-      })
+      await bindings.set(agent.id, facts)
     } catch (error: unknown) {
       warn(`cannot persist binding for session "${agent.id}"`, error)
     }
+  }
+
+  const hydrateBoundTranscript = async (request: {
+    readonly agent: Agent
+    readonly binding: OmpBinding
+    readonly cursor?: OmpBinding
+    readonly includeNewestTurn: boolean
+  }) => {
+    const hydration = await hydrateOmpBinding({
+      bindings,
+      session: request.agent.session,
+      binding: request.binding,
+      ...request.cursor === undefined ? {} : { cursor: request.cursor },
+      includeNewestTurn: request.includeNewestTurn,
+    })
+    bridge.seedDelivered(request.agent.id)
+    return hydration
   }
 
   const readBinding = async (id: SessionId) => {
@@ -349,15 +365,18 @@ export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
       ...profile === undefined ? {} : { preset: profile },
     }))
     const binding = await readBinding(agent.id)
-    const hydration = await hydrateOmpSession(
-      agent.session,
-      transcript.path,
-      200,
-      binding?.hydratedTurns ?? 0,
-      !attachment.session.streaming,
-    )
-    bridge.seedDelivered(agent.id)
-    await rememberBinding(agent, attachment, profile, hydration.turns)
+    const hydration = await hydrateBoundTranscript({
+      agent,
+      binding: {
+        ompSessionId: attachment.session.id,
+        path: transcript.path,
+        cwd,
+        ...profile === undefined ? {} : { profile },
+        updatedAt: new Date().toISOString(),
+      },
+      ...binding === undefined ? {} : { cursor: binding },
+      includeNewestTurn: !attachment.session.streaming,
+    })
     await pinOpenedSession(agent, profile)
     return {
       transcript,
@@ -405,22 +424,18 @@ export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
         ...profile === undefined ? {} : { preset: profile },
       }))
     }
-    let hydratedTurns = binding?.hydratedTurns
     if (binding?.path !== undefined && await existingFile(binding.path)) {
       try {
-        hydratedTurns = (await hydrateOmpSession(
-          agent.session,
-          binding.path,
-          Number.POSITIVE_INFINITY,
-          binding.hydratedTurns ?? 0,
-          !attachment.session.streaming,
-        )).turns
-        bridge.seedDelivered(agent.id)
+        await hydrateBoundTranscript({
+          agent,
+          binding,
+          includeNewestTurn: !attachment.session.streaming,
+        })
       } catch (error: unknown) {
         warn(`cannot tail-sync OMP transcript for session "${agent.id}"`, error)
       }
     }
-    await rememberBinding(agent, attachment, profile, hydratedTurns)
+    await rememberBinding(agent, attachment, profile)
     if (plan.forkPath !== undefined) {
       try {
         await bindings.deleteFork(agent.id)
@@ -525,18 +540,10 @@ export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
     if (binding === undefined || !(await existingFile(binding.path))) return
     try {
       const live = await liveSocketOf(binding.ompSessionId)
-      const hydration = await hydrateOmpSession(
-        agent.session,
-        binding.path,
-        Number.POSITIVE_INFINITY,
-        binding.hydratedTurns ?? 0,
-        live === undefined,
-      )
-      bridge.seedDelivered(agent.id)
-      await bindings.set(agent.id, {
-        ...binding,
-        hydratedTurns: hydration.turns,
-        updatedAt: new Date().toISOString(),
+      await hydrateBoundTranscript({
+        agent,
+        binding,
+        includeNewestTurn: live === undefined,
       })
     } catch (error: unknown) {
       warn(`cannot tail-sync OMP transcript for reopened session "${agent.id}"`, error)
@@ -579,8 +586,8 @@ export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
 
   const adoptLiveSession = async (controller: SessionController, live: OmpSocketSession): Promise<void> => {
     if (bridge.servesOmpSession(live.sessionId)) return
-    const bound = await bindings.findByOmpSession(live.sessionId)
-    let sessionId = bound?.dshSessionId ?? hosted.get(live.sessionId)
+    const bound = await bindings.findByOmpSessionId(live.sessionId)
+    let sessionId = bound?.sessionId ?? hosted.get(live.sessionId)
     let profile = bound?.binding.profile
     const transcriptPath = live.sessionFile ?? bound?.binding.path
     let created = false
@@ -620,22 +627,21 @@ export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
       cwd: live.cwd,
       ...profile === undefined ? {} : { preset: profile },
     }))
-    let hydratedTurns: number | undefined
-    if (transcriptPath !== undefined) {
+    const facts = bindingFacts(attachment, profile)
+    const source = facts ?? bound?.binding
+    if (transcriptPath !== undefined && source !== undefined) {
       try {
-        hydratedTurns = (await hydrateOmpSession(
-          agent.session,
-          transcriptPath,
-          200,
-          bound?.binding.hydratedTurns ?? 0,
-          !attachment.session.streaming,
-        )).turns
+        await hydrateBoundTranscript({
+          agent,
+          binding: source,
+          ...bound === undefined ? {} : { cursor: bound.binding },
+          includeNewestTurn: !attachment.session.streaming,
+        })
       } catch (error: unknown) {
         warn(`cannot hydrate adopted session "${agent.id}"`, error)
       }
-      bridge.seedDelivered(agent.id)
     }
-    await rememberBinding(agent, attachment, profile, hydratedTurns)
+    await rememberBinding(agent, attachment, profile)
     await attachWorkspace(agent.id, live.cwd, created)
   }
 
@@ -764,7 +770,7 @@ export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
             let createdPreset: string | undefined
             const target = await reuseOrCreateDshSession({
               ompSessionId: input.ompSessionId,
-              findBound: async () => (await bindings.findByOmpSession(input.ompSessionId))?.dshSessionId,
+              findBound: async () => (await bindings.findByOmpSessionId(input.ompSessionId))?.sessionId,
               create: async () => {
                 const created = await controller.create({
                   cwd: input.cwd,
