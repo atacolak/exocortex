@@ -1,4 +1,4 @@
-import { memo, useCallback, useMemo, type KeyboardEvent } from 'react'
+import { memo, useCallback, useMemo, type KeyboardEvent, type ReactNode } from 'react'
 import type { Context } from '@deepseek-ai/cordis'
 import clsx from 'clsx'
 import {
@@ -41,7 +41,9 @@ function stateStatus(state: ToolRowState, t: BashRowProps['t']): string | null {
  * @param props - tool call, Session sources, locale, and inspection callback.
  * @returns the Bash output row.
  */
-export const BashRow = memo(function BashRow({ toolName, block, sessionId, useSessions, inspect, useDisclosure, t }: BashRowProps) {
+export const BashRow = memo(function BashRow({
+  toolName, block, sessionId, useSessions, inspect, useDisclosure, t, renderToolRow,
+}: BashRowProps) {
   const model = useMemo(() => toolRowModel(toolName, block), [toolName, block])
   // An omitted shell workdir is the session workspace; relative values resolve
   // against it before reaching the terminal primitive.
@@ -63,12 +65,6 @@ export const BashRow = memo(function BashRow({ toolName, block, sessionId, useSe
   const genericBody = terminal === null && hasBody && model.state !== 'preparing'
   const expandable = terminal !== null || genericBody
   const open = expanded && expandable
-  const body = useMemo(
-    () => open && genericBody && model.bodyRaw !== null
-      ? formatToolBody(model.variant, model.bodyRaw)
-      : null,
-    [genericBody, model.bodyRaw, model.variant, open],
-  )
   const normalSummary = terminal?.description ?? model.summary
   const exitLabel = terminalExitLabel(terminalModel, t)
   const settlementLine = exitLabel !== null ? null : state === 'error'
@@ -91,7 +87,54 @@ export const BashRow = memo(function BashRow({ toolName, block, sessionId, useSe
         </>
       )
       : BASH_ICON
-  return (
+  // The slot occupant owns the collapsed header; this body stays available
+  // through `renderBody` even while its own header shows a different state.
+  const renderBody = (): ReactNode => {
+    const body = genericBody && model.bodyRaw !== null ? formatToolBody(model.variant, model.bodyRaw) : null
+    return (
+      <div className={css.bodyWrap}>
+        {terminal !== null
+          ? (
+            <TerminalBlock
+              {...terminal.card}
+              maxLines={Infinity}
+              labels={labels}
+              className={css.terminal}
+            />
+          )
+          : (
+            <div className={css.ioCard}>
+              {body !== null && (
+                <div className={css.ioSection}>
+                  <span className={css.ioLabel}>{t('row.input')}</span>
+                  {background
+                    ? <CommandText className={css.commandInput} text={body} label={t('row.commandArguments')} />
+                    : <span className={css.ioText}>{body}</span>}
+                </div>
+              )}
+              {body !== null && model.output !== null && (
+                <span className={css.ioDivider} aria-hidden />
+              )}
+              {model.output !== null && (
+                <div className={css.ioSection}>
+                  <span className={css.ioLabel}>{t('row.output')}</span>
+                  <span className={css.ioText} data-error={state === 'error' || undefined}>
+                    {model.output}
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
+        {inspect !== undefined && (
+          <button type="button" className={css.inspectButton} onClick={inspect}>
+            <IconInspectOutlineRegular />
+            {t('row.inspect')}
+          </button>
+        )}
+      </div>
+    )
+  }
+  const renderDefault = (): ReactNode => (
     <div className={css.card}>
       <div
         className={css.root}
@@ -124,50 +167,25 @@ export const BashRow = memo(function BashRow({ toolName, block, sessionId, useSe
           {exitLabel !== null && <ExitCodeBadge label={exitLabel} />}
         </TextShimmer>
       </div>
-      {open && (
-        <div className={css.bodyWrap}>
-          {terminal !== null
-            ? (
-              <TerminalBlock
-                {...terminal.card}
-                maxLines={Infinity}
-                labels={labels}
-                className={css.terminal}
-              />
-            )
-            : (
-              <div className={css.ioCard}>
-                {body !== null && (
-                  <div className={css.ioSection}>
-                    <span className={css.ioLabel}>{t('row.input')}</span>
-                    {background
-                      ? <CommandText className={css.commandInput} text={body} label={t('row.commandArguments')} />
-                      : <span className={css.ioText}>{body}</span>}
-                  </div>
-                )}
-                {body !== null && model.output !== null && (
-                  <span className={css.ioDivider} aria-hidden />
-                )}
-                {model.output !== null && (
-                  <div className={css.ioSection}>
-                    <span className={css.ioLabel}>{t('row.output')}</span>
-                    <span className={css.ioText} data-error={state === 'error' || undefined}>
-                      {model.output}
-                    </span>
-                  </div>
-                )}
-              </div>
-            )}
-          {inspect !== undefined && (
-            <button type="button" className={css.inspectButton} onClick={inspect}>
-              <IconInspectOutlineRegular />
-              {t('row.inspect')}
-            </button>
-          )}
-        </div>
-      )}
+      {open && renderBody()}
     </div>
   )
+  if (renderToolRow === undefined) return renderDefault()
+  return renderToolRow({
+    t,
+    variant: 'bash',
+    toolName,
+    icon: BASH_ICON,
+    title: t(model.titleKey),
+    intent: model.intent,
+    summary: summaryText,
+    state,
+    useDisclosure,
+    inspect,
+    expandable,
+    renderBody,
+    renderDefault,
+  }, renderDefault())
 })
 
 /** Registers the standalone Bash conversation-row sample. */

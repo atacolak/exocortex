@@ -43,9 +43,10 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     /**
      * One rendered Tool row, declared by the Tool-call entry so a single
      * occupant owns every atomic tool's presentation. The occupant receives
-     * the stock row props, the model-authored intent, the wire tool name, and
-     * `renderDefault`, which renders the stock row with per-call overrides and
-     * delegates the expanded card back through the same props.
+     * the stock row props, the model-authored intent, the wire tool name,
+     * `expandable`, and `renderBody`, which renders only the stock expanded
+     * body under the occupant's own header; `renderDefault` renders the stock
+     * row with per-call overrides and keeps the expanded card reachable.
      */
     'tool.row': { kind: 'single'; scope: 'session'; owner: ToolRowSlotProps }
   }
@@ -67,6 +68,10 @@ export interface ToolRowSlotProps extends ToolRowProps {
   readonly intent?: string | undefined
   /** Wire Tool name, so an occupant can style per tool. */
   readonly toolName?: string | undefined
+  /** Whether this call currently has expandable content. */
+  readonly expandable?: boolean | undefined
+  /** Render only the stock expanded body without the stock collapsed header. */
+  readonly renderBody?: (() => ReactNode) | undefined
   /** Render the stock row, replacing only the row props the occupant overrides. */
   readonly renderDefault: (overrides?: Partial<ToolRowProps>) => ReactNode
 }

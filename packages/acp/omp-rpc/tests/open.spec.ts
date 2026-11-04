@@ -5,6 +5,7 @@ import {
   createOmpSessionLock,
   normalizeDshSessionId,
   parseOmpOpenInput,
+  resumeRefused,
   reuseOrCreateDshSession,
   serveOmpOpen,
   type OmpOpenDeps,
@@ -128,6 +129,37 @@ describe('one OMP session maps onto one harness session', () => {
     const [fromOpen, fromAdoption] = await Promise.all([open(), open()])
     expect(created).toBe(1)
     expect(fromOpen).toBe(fromAdoption)
+  })
+})
+
+describe('resumeRefused', () => {
+  it('reports a cold-resume attach failure as a stable 409 refusal', () => {
+    expect(resumeRefused(new Error('OMP ownership unknown'))).toMatchObject({
+      name: 'OmpResumeError',
+      code: 'omp/resume-refused',
+      message: 'OMP ownership unknown',
+      status: 409,
+    })
+  })
+
+  it('passes a stable resume error through and stringifies non-errors', () => {
+    const stable = new OmpResumeError('omp/session-busy', 'busy', 409)
+    expect(resumeRefused(stable)).toBe(stable)
+    expect(resumeRefused('attach exploded')).toMatchObject({
+      code: 'omp/resume-refused',
+      message: 'attach exploded',
+      status: 409,
+    })
+  })
+
+  it('maps the refusal through the open route instead of a generic 500', async () => {
+    const response = await serveOmpOpen(request({ ompSession: match.id }), deps({
+      openTranscript: async () => { throw resumeRefused(new Error('reserve refused')) },
+    }))
+    expect(response.status).toBe(409)
+    await expect(response.json()).resolves.toEqual({
+      error: { code: 'omp/resume-refused', message: 'reserve refused' },
+    })
   })
 })
 

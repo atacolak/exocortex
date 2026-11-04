@@ -126,42 +126,54 @@ function stateStatus(state: ToolRowState, t: TranslateNS<'conversation'>): strin
   }
 }
 
+/** Component props of the stock row: row data plus the declaring entry's `tool.row` seat. */
+interface ToolRowComponentProps extends ToolRowProps {
+  /**
+   * Render the row through the session's `tool.row` occupant.
+   * @param props - stock row props plus the slot-owned overrides.
+   * @param fallback - the stock row, rendered when no occupant registers.
+   * @returns the rendered row.
+   */
+  readonly renderToolRow?: ((props: ToolRowSlotProps, fallback: ReactNode) => ReactNode) | undefined
+}
+
 /**
  * Render one localized tool summary and lazily mounted result card.
  * Preparation retains the icon, title, and optional tool-name summary without disclosure.
  * @param props - tool state, summary, output, and navigation callbacks.
  * @returns the tool disclosure.
  */
-const ToolRowView = memo(function ToolRowView({
-  t,
-  variant,
-  toolName,
-  icon,
-  title,
-  summary,
-  summarySuffix,
-  bodyRaw,
-  output,
-  askQuestion,
-  errorSummary,
-  terminal,
-  diff,
-  read,
-  image,
-  renderSlot,
-  loadImage,
-  search,
-  web,
-  details,
-  state,
-  filePath,
-  filePathLine,
-  onOpenFile,
-  fileContextMenuProps, urlContextMenuProps,
-  href,
-  inspect,
-  useDisclosure,
-}: ToolRowProps) {
+const ToolRowView = memo(function ToolRowView({ renderToolRow, ...row }: ToolRowComponentProps) {
+  const {
+    t,
+    variant,
+    toolName,
+    icon,
+    title,
+    summary,
+    summarySuffix,
+    bodyRaw,
+    output,
+    askQuestion,
+    errorSummary,
+    terminal,
+    diff,
+    read,
+    image,
+    renderSlot,
+    loadImage,
+    search,
+    web,
+    details,
+    state,
+    filePath,
+    filePathLine,
+    onOpenFile,
+    fileContextMenuProps, urlContextMenuProps,
+    href,
+    inspect,
+    useDisclosure,
+  } = row
   const { expanded, toggle: toggleExpand } = useDisclosure()
   const terminalLabels = useMemo(() => terminalBlockLabels(t), [t])
   const diffLabels = useMemo(() => diffBlockLabels(t), [t])
@@ -185,10 +197,6 @@ const ToolRowView = memo(function ToolRowView({
   const card = askQuestionBody ?? terminalBody ?? diffBody ?? readBody ?? imageBody ?? searchBody ?? webBody ?? detailsBody
   const expandable = state !== 'preparing' && (inputRaw !== null || outputText !== null || card !== null)
   const open = expanded && expandable
-  const bodyText = useMemo(
-    () => open && card === null && inputRaw !== null ? formatToolBody(variant, inputRaw) : null,
-    [card, inputRaw, open, variant],
-  )
   const status = stateStatus(state, t)
   const running = state === 'running' || state === 'preparing'
   const normalSummary = terminalBody?.description
@@ -220,7 +228,6 @@ const ToolRowView = memo(function ToolRowView({
   }, [])
   // The code variant's program renders through CodeBlock (shiki), so only its
   // output joins the IN/OUT card; every other variant's input does too.
-  const cardBody = variant === 'code' ? null : bodyText
   const collapsedContent = useMemo(() => (summaryText !== '' || exitLabel !== null) && (
     /* A row that is only its title shows neither a trailing separator nor a
        summary; an exit capsule still stands on its own. */
@@ -280,134 +287,139 @@ const ToolRowView = memo(function ToolRowView({
       )}
     </>
   ), [summaryLinkKeyDown, fileContextMenuProps, urlContextMenuProps, linkHref, openFile, state, suffix, totals, summaryText, exitLabel])
-  const expandedContent = useMemo(() => open ? (
-    <div className={clsx(css.bodyWrap, detailsBody !== null && css.detailsBodyWrap)}>
-      {askQuestionBody !== null
-        ? <AskQuestionCard card={askQuestionBody} />
-        : terminalBody !== null
-          ? (
-            <TerminalBlock
-              {...terminalBody.card}
-              maxLines={Infinity}
-              labels={terminalLabels}
-              className={css.terminalBody}
-            />
-          )
-          : diffBody !== null
+  const renderBody = useCallback((): ReactNode => {
+    const bodyText = card === null && inputRaw !== null ? formatToolBody(variant, inputRaw) : null
+    const cardBody = variant === 'code' ? null : bodyText
+    return (
+      <div className={clsx(css.bodyWrap, detailsBody !== null && css.detailsBodyWrap)}>
+        {askQuestionBody !== null
+          ? <AskQuestionCard card={askQuestionBody} />
+          : terminalBody !== null
             ? (
-              <>
-                <DiffBlock {...diffBody.card} labels={diffLabels} maxLines={CHAT_DIFF_MAX_LINES} className={css.diffBody} />
-                {state === 'error' && outputText !== null && (
-                  <div className={css.ioCard}>
-                    <div className={css.ioSection}>
-                      <span className={css.ioLabel}>{t('row.output')}</span>
-                      <span className={css.ioText} data-error>{outputText}</span>
-                    </div>
-                  </div>
-                )}
-              </>
+              <TerminalBlock
+                {...terminalBody.card}
+                maxLines={Infinity}
+                labels={terminalLabels}
+                className={css.terminalBody}
+              />
             )
-            : readBody !== null
-              ? <ReadBlock {...readBody} labels={readLabels} maxLines={CHAT_READ_MAX_LINES} className={css.readBody} />
-              : imageBody !== null
-                ? (
-                  /* Gallery, then the full path and each attached image's size.
-                     These come from the image card model, never from the row's
-                     flattened output, which JSON.stringifies the image block. They
-                     stay visible when the attachment slot renders nothing. */
-                  <div className={css.imageBody}>
-                    {renderSlot !== undefined && loadImage !== undefined && renderSlot('tool.call.images', {
-                      images: imageBody.images,
-                      loadImage,
-                      align: 'start',
-                    })}
-                    <div className={css.imageMeta}>
-                      <div>{imageBody.path}</div>
-                      {imageBody.images.map(({ attachment }, index) => (
-                        <div key={index}>
-                          {attachment.originalDimensions === undefined
-                            ? t('row.imageSize', { width: attachment.width, height: attachment.height, bytes: attachment.bytes })
-                            : t('row.imageSizeDownscaled', {
-                              width: attachment.width,
-                              height: attachment.height,
-                              originalWidth: attachment.originalDimensions.width,
-                              originalHeight: attachment.originalDimensions.height,
-                              bytes: attachment.bytes,
-                            })}
-                        </div>
-                      ))}
+            : diffBody !== null
+              ? (
+                <>
+                  <DiffBlock {...diffBody.card} labels={diffLabels} maxLines={CHAT_DIFF_MAX_LINES} className={css.diffBody} />
+                  {state === 'error' && outputText !== null && (
+                    <div className={css.ioCard}>
+                      <div className={css.ioSection}>
+                        <span className={css.ioLabel}>{t('row.output')}</span>
+                        <span className={css.ioText} data-error>{outputText}</span>
+                      </div>
                     </div>
-                    {imageBody.extraText !== null && <div className={css.imageExtra}>{imageBody.extraText}</div>}
-                  </div>
-                )
-                : searchBody !== null
+                  )}
+                </>
+              )
+              : readBody !== null
+                ? <ReadBlock {...readBody} labels={readLabels} maxLines={CHAT_READ_MAX_LINES} className={css.readBody} />
+                : imageBody !== null
                   ? (
-                    <>
-                      <SearchBlock
-                        {...searchBody.card}
-                        labels={searchLabels}
-                        maxLines={CHAT_SEARCH_MAX_LINES}
-                        className={css.searchBody}
-                      />
-                      {/* A capped search's recovery locator lives only in the result
-                      text; show it below the card so the dropped rows survive. */}
-                      {searchBody.recovery !== undefined && (
-                        <div className={css.searchRecovery}>{searchBody.recovery}</div>
-                      )}
-                    </>
+                    /* Gallery, then the full path and each attached image's size.
+                       These come from the image card model, never from the row's
+                       flattened output, which JSON.stringifies the image block. They
+                       stay visible when the attachment slot renders nothing. */
+                    <div className={css.imageBody}>
+                      {renderSlot !== undefined && loadImage !== undefined && renderSlot('tool.call.images', {
+                        images: imageBody.images,
+                        loadImage,
+                        align: 'start',
+                      })}
+                      <div className={css.imageMeta}>
+                        <div>{imageBody.path}</div>
+                        {imageBody.images.map(({ attachment }, index) => (
+                          <div key={index}>
+                            {attachment.originalDimensions === undefined
+                              ? t('row.imageSize', { width: attachment.width, height: attachment.height, bytes: attachment.bytes })
+                              : t('row.imageSizeDownscaled', {
+                                width: attachment.width,
+                                height: attachment.height,
+                                originalWidth: attachment.originalDimensions.width,
+                                originalHeight: attachment.originalDimensions.height,
+                                bytes: attachment.bytes,
+                              })}
+                          </div>
+                        ))}
+                      </div>
+                      {imageBody.extraText !== null && <div className={css.imageExtra}>{imageBody.extraText}</div>}
+                    </div>
                   )
-                  : webBody !== null
-                    ? <WebBlock {...webBody} labels={webLabels} className={css.webBody} />
-                    : detailsBody !== null
-                      ? <ToolDetails model={detailsBody} hasInspect={inspect !== undefined} t={t} onOpenFile={onOpenFile} />
-                      : (
-                        <>
-                          {variant === 'code' && bodyText !== null && (
-                            <div className={css.bodyScroll}>
-                              <CodeBlock code={bodyText} lang="typescript" copyLabel={t('copy')} copiedLabel={t('copied')}
-                                toolbarLabels={codeToolbarLabels(t)} className={css.codeBody} />
-                            </div>
-                          )}
-                          {(cardBody !== null || outputText !== null) && (
-                            <div className={css.ioCard}>
-                              {cardBody !== null && (
-                                <div className={css.ioSection}>
-                                  <span className={css.ioLabel}>{t('row.input')}</span>
-                                  <span className={css.ioText}>{cardBody}</span>
-                                </div>
-                              )}
-                              {cardBody !== null && outputText !== null && (
-                                <span className={css.ioDivider} aria-hidden />
-                              )}
-                              {outputText !== null && (
-                                <div className={css.ioSection}>
-                                  <span className={css.ioLabel}>{t('row.output')}</span>
-                                  <span className={css.ioText} data-error={state === 'error' || undefined}>
-                                    {outputText}
-                                  </span>
-                                </div>
-                              )}
-                            </div>
-                          )}
-                        </>
-                      )}
-      {inspect !== undefined && (
-        <button
-          type="button"
-          className={css.inspectButton}
-          onClick={inspect}
-        >
-          <IconInspectOutlineRegular />
-          {t('row.inspect')}
-        </button>
-      )}
-    </div>
-  ) : undefined, [
-    open, detailsBody, askQuestionBody, terminalBody, terminalLabels, diffBody, diffLabels, readBody, readLabels,
-    imageBody, renderSlot, loadImage, searchBody, searchLabels, webBody, webLabels, inspect, t, onOpenFile,
-    variant, bodyText, cardBody, outputText, state,
+                  : searchBody !== null
+                    ? (
+                      <>
+                        <SearchBlock
+                          {...searchBody.card}
+                          labels={searchLabels}
+                          maxLines={CHAT_SEARCH_MAX_LINES}
+                          className={css.searchBody}
+                        />
+                        {/* A capped search's recovery locator lives only in the result
+                        text; show it below the card so the dropped rows survive. */}
+                        {searchBody.recovery !== undefined && (
+                          <div className={css.searchRecovery}>{searchBody.recovery}</div>
+                        )}
+                      </>
+                    )
+                    : webBody !== null
+                      ? <WebBlock {...webBody} labels={webLabels} className={css.webBody} />
+                      : detailsBody !== null
+                        ? <ToolDetails model={detailsBody} hasInspect={inspect !== undefined} t={t} onOpenFile={onOpenFile} />
+                        : (
+                          <>
+                            {variant === 'code' && bodyText !== null && (
+                              <div className={css.bodyScroll}>
+                                <CodeBlock code={bodyText} lang="typescript" copyLabel={t('copy')} copiedLabel={t('copied')}
+                                  toolbarLabels={codeToolbarLabels(t)} className={css.codeBody} />
+                              </div>
+                            )}
+                            {(cardBody !== null || outputText !== null) && (
+                              <div className={css.ioCard}>
+                                {cardBody !== null && (
+                                  <div className={css.ioSection}>
+                                    <span className={css.ioLabel}>{t('row.input')}</span>
+                                    <span className={css.ioText}>{cardBody}</span>
+                                  </div>
+                                )}
+                                {cardBody !== null && outputText !== null && (
+                                  <span className={css.ioDivider} aria-hidden />
+                                )}
+                                {outputText !== null && (
+                                  <div className={css.ioSection}>
+                                    <span className={css.ioLabel}>{t('row.output')}</span>
+                                    <span className={css.ioText} data-error={state === 'error' || undefined}>
+                                      {outputText}
+                                    </span>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </>
+                        )}
+        {inspect !== undefined && (
+          <button
+            type="button"
+            className={css.inspectButton}
+            onClick={inspect}
+          >
+            <IconInspectOutlineRegular />
+            {t('row.inspect')}
+          </button>
+        )}
+      </div>
+    )
+  }, [
+    card, inputRaw, variant, detailsBody, askQuestionBody, terminalBody, terminalLabels, diffBody, diffLabels,
+    readBody, readLabels, imageBody, renderSlot, loadImage, searchBody, searchLabels, webBody, webLabels, inspect,
+    t, onOpenFile, outputText, state,
   ])
-  return (
+  const expandedContent = useMemo(() => open ? renderBody() : undefined, [open, renderBody])
+  const stock = (
     <div className={css.root} data-variant={variant} data-tool={toolName} data-state={state}>
       {status !== null && <span className={css.visuallyHidden}>{status}</span>}
       <DisclosureRow
@@ -428,26 +440,16 @@ const ToolRowView = memo(function ToolRowView({
       </DisclosureRow>
     </div>
   )
+  if (renderToolRow === undefined) return stock
+  const renderDefault = (overrides?: Partial<ToolRowProps>): ReactNode => <ToolRowView {...row} {...overrides} />
+  return renderToolRow({ ...row, expandable, renderBody, renderDefault }, stock)
 })
-
-/** Component props of the stock row: row data plus the declaring entry's `tool.row` seat. */
-interface ToolRowComponentProps extends ToolRowProps {
-  /**
-   * Render the row through the session's `tool.row` occupant.
-   * @param props - stock row props plus the slot-owned overrides.
-   * @param fallback - the stock row, rendered when no occupant registers.
-   * @returns the rendered row.
-   */
-  readonly renderToolRow?: ((props: ToolRowSlotProps, fallback: ReactNode) => ReactNode) | undefined
-}
 
 /**
  * Render one Tool row through the `tool.row` slot, defaulting to the stock row.
  * @param props - row data and the declaring entry's slot seat.
  * @returns the registered row, or the stock row when no occupant registers.
  */
-export const ToolRow = memo(function ToolRow({ renderToolRow, ...row }: ToolRowComponentProps) {
-  const renderDefault = (overrides?: Partial<ToolRowProps>): ReactNode => <ToolRowView {...row} {...overrides} />
-  if (renderToolRow === undefined) return renderDefault()
-  return renderToolRow({ ...row, renderDefault }, renderDefault())
+export const ToolRow = memo(function ToolRow(props: ToolRowComponentProps) {
+  return <ToolRowView {...props} />
 })
