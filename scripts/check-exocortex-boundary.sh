@@ -13,7 +13,7 @@
 # 5% change. The reason is echoed into the output so it lands in the merge record.
 set -uo pipefail
 
-FORBIDDEN='^(packages/client/|docs/persistence-schema\.json$|docs/persistence-catalog\.)'
+FORBIDDEN='^(packages/client/|packages/core/|packages/host/|docs/persistence-schema\.json$|docs/persistence-catalog\.)'
 
 if [ "${1:-}" = "--staged" ]; then
   changed=$(git diff --cached --name-only)
