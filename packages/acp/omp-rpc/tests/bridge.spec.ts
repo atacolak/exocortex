@@ -375,11 +375,13 @@ describe('OmpBridge image resolution', () => {
     const bridge = new OmpBridge({ ctx: bridgeCtx, subprocess, executable: 'omp', detachedDaemon: false })
 
     const readImages = (bridge as unknown as {
-      readImages(refs: readonly unknown[]): Promise<readonly { data: string; mimeType: string }[]>
+      readImages(refs: readonly unknown[]): Promise<readonly { type: string; data: string; mimeType: string }[]>
     }).readImages.bind(bridge)
     const images = await readImages([{ mediaType: 'image/png' }])
 
-    expect(images).toEqual([{ data: Buffer.from([1, 2, 3]).toString('base64'), mimeType: 'image/png' }])
+    expect(images).toEqual([
+      { type: 'image', data: Buffer.from([1, 2, 3]).toString('base64'), mimeType: 'image/png' },
+    ])
   })
 })
 

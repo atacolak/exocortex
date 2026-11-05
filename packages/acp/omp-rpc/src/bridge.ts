@@ -835,7 +835,7 @@ export class OmpBridge {
     const images: OmpImageInput[] = []
     for (const ref of refs) {
       const stored = await attachments.readImage(ref)
-      images.push({ data: Buffer.from(stored.data).toString('base64'), mimeType: ref.mediaType })
+      images.push({ type: 'image', data: Buffer.from(stored.data).toString('base64'), mimeType: ref.mediaType })
     }
     return images
   }
