@@ -564,6 +564,11 @@ interface PromptState {
 /**
  * Drive harness agent steps from one long-lived OMP RPC session.
  *
+ * The driver stays bound to the OMP session its attachment opened: transcript
+ * identity is fixed by `--resume`, `--fork`, or the attached socket, so a
+ * shrinking harness history is OMP compacting its own context, never a reason
+ * to reset the conversation inside the live process.
+ *
  * The first prompt carries only real user messages (never assembled context
  * or assistant/tool echoes), so `[Image #N]` markers in prose line up with the
  * frame-1 image array. Later steps steer newly assembled user messages into
@@ -612,7 +617,6 @@ export class OmpAgentDriver {
   private readonly external = new Set<string>()
   /** Harness turns already satisfied by a terminal-typed message, kept across every later step. */
   private readonly claimedKeys = new Set<string>()
-  private highWaterMark = 0
   private prompt: PromptState | undefined
   private startingPrompt = false
   private readonly stopFrames: () => void
@@ -906,14 +910,12 @@ export class OmpAgentDriver {
   async *stream(request: GenerateOptions, signal: AbortSignal): AsyncIterable<StreamChunk> {
     this.userCancelled = false
     signal.throwIfAborted()
-    if (this.sent !== undefined && request.messages.length < this.highWaterMark) await this.restart()
     const pending = this.pendingTurns(request.messages)
     let state = this.prompt
     const buffered = state === undefined ? false : state.unsolicited && !state.channel.finished()
     const drainable = state !== undefined && buffered && (!state.closed || pending.length === 0)
     if (state === undefined || (state.closed && !drainable)) {
       if (pending.length === 0) {
-        this.highWaterMark = Math.max(this.highWaterMark, request.messages.length)
         yield { type: 'finish', reason: { kind: 'stop' } }
         return
       }
@@ -1062,7 +1064,6 @@ export class OmpAgentDriver {
       if (tools.length > 0 && (finalOutcome === undefined || finalOutcome.status === 'completed')) this.onTool?.(tools)
       const chunks = final ? translator.finish(settling) : translator.endCycle()
       for (const chunk of chunks) yield chunk
-      this.highWaterMark = Math.max(this.highWaterMark, request.messages.length)
       if (final) {
         state.closed = true
         this.prompt = undefined
@@ -1217,14 +1218,6 @@ export class OmpAgentDriver {
       content: toolContentOf(frame.result),
       isError: frame.isError === true,
     }
-  }
-
-  private async restart(): Promise<void> {
-    await this.client.request({ type: 'new_session' })
-    this.sent = undefined
-    this.highWaterMark = 0
-    this.prompt?.channel.close()
-    this.prompt = undefined
   }
 }
 

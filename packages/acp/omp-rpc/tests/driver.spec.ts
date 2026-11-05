@@ -325,7 +325,7 @@ describe('OmpAgentDriver', () => {
     await consume
   })
 
-  it('restarts a replay session when the assembled history shrinks', async () => {
+  it('keeps one OMP session when compaction shrinks the assembled history', async () => {
     const client = new FakeClient()
     const driver = new OmpAgentDriver(client)
     const first = request([user('u1', 'one'), assistant('a1', 'two'), user('u2', 'three')])
@@ -340,19 +340,23 @@ describe('OmpAgentDriver', () => {
     settlePrompt(client)
     await consume
 
+    client.emit({ type: 'auto_compaction_start', reason: 'threshold' })
+    client.emit({ type: 'auto_compaction_end', aborted: false, skipped: false })
+
     const compacted = request([user('u9', 'fresh start')])
     const consumeCompacted = (async () => {
       for await (const _chunk of driver.stream(compacted, new AbortController().signal)) { /* drain */ }
     })()
     await tick()
+    expect(client.commands.filter(command => command.type === 'new_session')).toEqual([])
+    expect(client.commands.filter(command => command.type === 'prompt')).toHaveLength(2)
     client.settle()
     await tick()
     client.emit(messageUpdate('m2', { type: 'text_start', contentIndex: 0 }, assistantMessage('', 'stop', { input: 1, output: 1 })))
     client.emit(messageUpdate('m2', { type: 'text_end', contentIndex: 0, content: 'ok' }, assistantMessage('ok', 'stop', { input: 1, output: 1 })))
-    client.settle()
     settlePrompt(client)
     await consumeCompacted
-    expect(client.commands.filter(command => command.type === 'new_session')).toHaveLength(1)
+    expect(client.commands.map(command => command.type)).toEqual(['prompt', 'prompt'])
     expect(client.promptText(1)).toBe('fresh start')
   })
 
