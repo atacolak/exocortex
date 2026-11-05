@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { OmpAgentDriver, OmpEventTranslator, pureUserTurns } from '../src/driver.ts'
+import type { OmpImageInput } from '../src/driver.ts'
 import type { OmpAgentEvent, OmpRpcCommand, OmpRpcFrame } from '../src/types.ts'
 
 class FakeClient {
@@ -68,6 +69,31 @@ const assistant = (id: string, text: string): GenerateOptions['messages'][number
   id: id as never,
   source: { kind: 'model', provider: 'omp', model: 'omp' },
 })
+
+const attachment = {
+  attachmentId: 'img-1' as never, mediaType: 'image/png' as const, bytes: 3, width: 1, height: 1,
+}
+
+const imageUser = (id: string, text: string): GenerateOptions['messages'][number] => ({
+  role: 'user',
+  content: [{ type: 'text', text }, { type: 'image', attachment }],
+  id: id as never,
+  source: { kind: 'user' },
+})
+
+const imageOnlyUser = (id: string): GenerateOptions['messages'][number] => ({
+  role: 'user',
+  content: [{ type: 'image', attachment }],
+  id: id as never,
+  source: { kind: 'user' },
+})
+
+const resolveImage: (refs: readonly { readonly mediaType: string }[]) => Promise<readonly OmpImageInput[]> =
+  async refs => refs.map(ref => ({
+    type: 'image',
+    data: ref.mediaType === 'image/webp' ? 'BBBB' : 'AAAA',
+    mimeType: ref.mediaType,
+  }))
 
 function messageUpdate(messageId: string, assistantMessageEvent: object, message: object): OmpAgentEvent {
   return { type: 'message_update', messageId, assistantMessageEvent, message }
@@ -820,6 +846,134 @@ describe('OmpAgentDriver unsolicited wakes', () => {
     expect(wakes).toEqual([{ text: 'typed' }])
     driver.close()
   })
+
+  it('consumes a typeless image echo by identity and keeps later input visible', async () => {
+    const client = new FakeClient()
+    const wakes: unknown[] = []
+    const driver = new OmpAgentDriver(client, {
+      resolveImages: resolveImage,
+      onUnsolicitedWake: (wake) => { wakes.push(wake) },
+    })
+
+    client.emit({ type: 'agent_start' })
+    const steering = driver.steerImmediate([imageOnlyUser('u2')])
+    await tick()
+    client.settle()
+    await steering
+    client.emit({
+      type: 'message_end',
+      messageId: 'echo-1',
+      message: { role: 'user', content: [{ mimeType: 'image/png', data: 'AAAA' }] },
+    })
+    expect(wakes).toEqual([])
+
+    client.emit({
+      type: 'message_end',
+      messageId: 'steer-1',
+      message: {
+        role: 'user',
+        content: [{ type: 'text', text: 'later' }, { type: 'image', mimeType: 'image/webp', data: 'CCCC' }],
+      },
+    })
+
+    expect(wakes).toEqual([{ text: 'later\n[image]' }])
+    driver.close()
+  })
+
+  it('publishes a terminal image+text steer while an earlier web image echo is outstanding', async () => {
+    const client = new FakeClient()
+    const wakes: unknown[] = []
+    const driver = new OmpAgentDriver(client, {
+      resolveImages: resolveImage,
+      onUnsolicitedWake: (wake) => { wakes.push(wake) },
+    })
+
+    client.emit({ type: 'agent_start' })
+    const steering = driver.steerImmediate([imageUser('u2', 'show me the layout')])
+    await tick()
+    client.settle()
+    await steering
+    client.emit({
+      type: 'message_end',
+      messageId: 'web-echo',
+      message: {
+        role: 'user',
+        content: [{ type: 'text', text: 'show me the layout' }, { mimeType: 'image/webp', data: 'BBBB' }],
+      },
+    })
+    expect(wakes).toEqual([])
+
+    client.emit({
+      type: 'message_end',
+      messageId: 'terminal-steer',
+      message: {
+        role: 'user',
+        content: [{ type: 'text', text: 'fix the layout' }, { type: 'image', mimeType: 'image/png', data: 'DDDD' }],
+      },
+    })
+
+    expect(wakes).toEqual([{ text: 'fix the layout\n[image]' }])
+    driver.close()
+  })
+
+  it('suppresses a genuine image echo exactly once', async () => {
+    const client = new FakeClient()
+    const wakes: unknown[] = []
+    const driver = new OmpAgentDriver(client, {
+      resolveImages: resolveImage,
+      onUnsolicitedWake: (wake) => { wakes.push(wake) },
+    })
+
+    client.emit({ type: 'agent_start' })
+    const steering = driver.steerImmediate([imageUser('u2', 'from the web')])
+    await tick()
+    client.settle()
+    await steering
+    client.emit({ type: 'message_start', messageId: 'echo-1', message: { role: 'user' } })
+    client.emit({
+      type: 'message_end',
+      messageId: 'echo-1',
+      message: {
+        role: 'user',
+        content: [{ type: 'text', text: 'from the web' }, { type: 'image', mimeType: 'image/png', data: 'AAAA' }],
+      },
+    })
+
+    expect(wakes).toEqual([])
+    driver.close()
+  })
+
+  it('still publishes a plain-text steer after image echoes settle', async () => {
+    const client = new FakeClient()
+    const wakes: unknown[] = []
+    const driver = new OmpAgentDriver(client, {
+      resolveImages: resolveImage,
+      onUnsolicitedWake: (wake) => { wakes.push(wake) },
+    })
+
+    client.emit({ type: 'agent_start' })
+    const steering = driver.steerImmediate([imageUser('u2', 'from the web')])
+    await tick()
+    client.settle()
+    await steering
+    client.emit({
+      type: 'message_end',
+      messageId: 'echo-1',
+      message: {
+        role: 'user',
+        content: [{ type: 'text', text: 'from the web' }, { type: 'image', mimeType: 'image/png', data: 'AAAA' }],
+      },
+    })
+    client.emit({
+      type: 'message_end',
+      messageId: 'plain-1',
+      message: { role: 'user', content: [{ type: 'text', text: 'plain words' }] },
+    })
+
+    expect(wakes).toEqual([{ text: 'plain words' }])
+    driver.close()
+  })
+
 
   it('settles a steer-interrupted cycle as a stop so the turn stays green', async () => {
     const client = new FakeClient()

@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { boundContextSummary } from '@deepseek-ai/dsh-llm'
 import type { FinishReason, GenerateOptions, RequestMessage, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm'
 import type { OmpRpcClient } from './client.ts'
@@ -174,10 +174,31 @@ function interjectionBody(text: string): string | undefined {
   return body === undefined || body.length === 0 ? undefined : body
 }
 
-function imageCountOf(message: Record<string, unknown> | undefined): number {
+function imageIdentitiesOf(message: Record<string, unknown> | undefined): string[] {
   const content = message?.content
-  if (!Array.isArray(content)) return 0
-  return content.filter(block => objectOf(block)?.type === 'image').length
+  if (!Array.isArray(content)) return []
+  const identities: string[] = []
+  for (const block of content) {
+    const part = objectOf(block)
+    if (typeof part?.data !== 'string' || typeof part?.mimeType !== 'string') continue
+    identities.push(imageIdentity(part.data, part.mimeType))
+  }
+  return identities
+}
+
+function imageIdentity(data: string, mimeType: string): string {
+  return createHash('sha256').update(mimeType).update('\0').update(data).digest('hex')
+}
+
+/** A delivered image kept until OMP echoes it back, tagged with the text it arrived with. */
+interface PendingImage {
+  readonly hash: string
+  readonly text: string
+}
+
+/** The operator's own prose in a message whose images stand in as placeholders. */
+function proseOf(text: string): string {
+  return normalizeUserText(text.split('\n').filter(line => line.trim() !== IMAGE_PLACEHOLDER).join('\n'))
 }
 
 /** Wake attribution used when OMP replies without ever showing its own input. */
@@ -519,8 +540,8 @@ interface PromptState {
   wake: { fired: boolean; detached: boolean } | undefined
   /** Normalized user texts this driver already delivered into OMP for this run. */
   readonly sentTexts: Set<string>
-  /** Images this driver delivered that OMP has not yet echoed back. */
-  pendingImages: number
+  /** Images this driver delivered that OMP has not yet echoed back, in delivery order. */
+  pendingImages: PendingImage[]
   /** Whether a user message the driver did not send arrived during this run. */
   steered: boolean
 }
@@ -746,7 +767,7 @@ export class OmpAgentDriver {
       outcome: undefined,
       wake: { fired: false, detached: options.detached === true },
       sentTexts: new Set(),
-      pendingImages: 0,
+      pendingImages: [],
       steered: false,
     }
   }
@@ -766,18 +787,34 @@ export class OmpAgentDriver {
     if (role !== 'user' && role !== 'custom') return
     const messageId = typeof record.messageId === 'string' ? record.messageId : undefined
     const text = messageText(message)
-    if (text === undefined) return
-    const head = text.trimStart()
-    if (head.startsWith('<memories>') || head.startsWith('<system-reminder>')) return
+    const images = imageIdentitiesOf(message)
+    if (text === undefined && images.length === 0) return
+    if (text !== undefined) {
+      const head = text.trimStart()
+      if (head.startsWith('<memories>') || head.startsWith('<system-reminder>')) return
+    }
     if (messageId === undefined ? frame.type !== 'message_end' : !this.announce(messageId)) return
     if (state.wake !== undefined) state.wake.fired = true
-    const images = imageCountOf(message)
     if (role === 'user') {
-      if (images > 0 && state.pendingImages > 0) {
-        state.pendingImages -= 1
+      const prose = text === undefined ? '' : proseOf(text)
+      if (prose.length === 0 && images.length > 0) {
+        const remaining = state.pendingImages.filter(pending => !images.includes(pending.hash))
+        if (remaining.length < state.pendingImages.length) {
+          state.pendingImages = remaining
+          return
+        }
+        state.pendingImages.shift()
+        const published = text ?? IMAGE_PLACEHOLDER
+        state.steered = true
+        this.markExternalUserMessage(published)
+        this.onUnsolicitedWake?.({ text: published })
         return
       }
-      if (state.sentTexts.has(normalizeUserText(text))) return
+      if (text === undefined) return
+      if (state.sentTexts.has(prose)) {
+        state.pendingImages = state.pendingImages.filter(pending => pending.text !== prose)
+        return
+      }
       state.steered = true
       const interjection = interjectionBody(text)
       if (interjection !== undefined) {
@@ -791,6 +828,7 @@ export class OmpAgentDriver {
       this.onUnsolicitedWake?.(source === undefined ? { text } : { text, source })
       return
     }
+    if (text === undefined) return
     const source = ompTriggerSource(text)
     this.markExternalUserMessage(text)
     this.onUnsolicitedWake?.(source === undefined ? { text } : { text, source })
@@ -1078,7 +1116,7 @@ export class OmpAgentDriver {
         outcome: undefined,
         wake: undefined,
         sentTexts: new Set([normalizeUserText(text)]),
-        pendingImages: images.length,
+        pendingImages: images.map(image => ({ hash: imageIdentity(image.data, image.mimeType), text: normalizeUserText(text) })),
         steered: false,
       }
       this.prompt = state
@@ -1111,8 +1149,9 @@ export class OmpAgentDriver {
   private async steer(state: PromptState | undefined, turn: OmpUserTurn): Promise<void> {
     const images = await this.imagesOf([...turn.images])
     if (state !== undefined) {
-      state.sentTexts.add(normalizeUserText(turn.text))
-      state.pendingImages += images.length
+      const text = normalizeUserText(turn.text)
+      state.sentTexts.add(text)
+      state.pendingImages.push(...images.map(image => ({ hash: imageIdentity(image.data, image.mimeType), text })))
     }
     await this.client.request({
       type: 'steer',
