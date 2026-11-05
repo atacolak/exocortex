@@ -635,6 +635,22 @@ describe('OmpAgentDriver unsolicited wakes', () => {
     },
   )
 
+  it('classifies live advisor guidance recorded as a user frame, never as operator prose', () => {
+    const client = new FakeClient()
+    const wakes: unknown[] = []
+    const driver = new OmpAgentDriver(client, { onUnsolicitedWake: (wake) => { wakes.push(wake) } })
+    const advisory = '<advisory severity="concern" guidance="weigh, don\'t blindly obey">\nThe hook misses two paths.\n</advisory>'
+
+    client.emit({ type: 'agent_start' })
+    client.emit({ type: 'message_end', message: { role: 'user', content: [{ type: 'text', text: advisory }] } })
+
+    expect(wakes).toEqual([{
+      text: advisory,
+      source: { kind: 'omp-wake', form: 'notice', summary: 'The hook misses two paths.' },
+    }])
+    driver.close()
+  })
+
   it('classifies hcom actor mail as an agent message relay', () => {
     const client = new FakeClient()
     const wakes: unknown[] = []
@@ -643,6 +659,38 @@ describe('OmpAgentDriver unsolicited wakes', () => {
 
     client.emit({ type: 'agent_start' })
     client.emit({ type: 'message_end', message: { role: 'custom', content: mail } })
+
+    expect(wakes).toEqual([{
+      text: mail,
+      source: { kind: 'omp-agent-message', form: 'relay' },
+    }])
+    driver.close()
+  })
+
+  it('carries a live hcom envelope verbatim for the trigger row to attribute', () => {
+    const client = new FakeClient()
+    const wakes: unknown[] = []
+    const driver = new OmpAgentDriver(client, { onUnsolicitedWake: (wake) => { wakes.push(wake) } })
+    const mail = '<hcom>[inform #24819] mg_lead -> argon: mg-l7i wave is running: three builders, non-blocking.</hcom>'
+
+    client.emit({ type: 'agent_start' })
+    client.emit({ type: 'message_end', message: { role: 'user', content: [{ type: 'text', text: mail }] } })
+
+    expect(wakes).toEqual([{
+      text: mail,
+      source: { kind: 'omp-agent-message', form: 'relay' },
+    }])
+    driver.close()
+  })
+
+  it('carries every mail of a batched hcom envelope verbatim, not just the first', () => {
+    const client = new FakeClient()
+    const wakes: unknown[] = []
+    const driver = new OmpAgentDriver(client, { onUnsolicitedWake: (wake) => { wakes.push(wake) } })
+    const mail = '<hcom>[2 new messages] | [inform #43234] charter_arch -> argon: ack #43170: reading the charter. | [inform #43237] mg_lead -> argon: ACK #43174. Split and sequenced.</hcom>'
+
+    client.emit({ type: 'agent_start' })
+    client.emit({ type: 'message_end', message: { role: 'user', content: [{ type: 'text', text: mail }] } })
 
     expect(wakes).toEqual([{
       text: mail,
