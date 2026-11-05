@@ -22,7 +22,7 @@ import type {
 } from '@deepseek-ai/dsh-session'
 import { parseSessionFormatLogFilename, sessionFormatLogFilename, SessionFormatUnsupportedMigrationError } from '@deepseek-ai/dsh-session-format'
 import type { SessionFormatEvent } from '@deepseek-ai/dsh-session-format'
-import type { SessionFormatRecovery, SessionFormatRestore } from '@deepseek-ai/dsh-session-format'
+import type { SessionFormatArtifact, SessionFormatRecovery, SessionFormatRestore } from '@deepseek-ai/dsh-session-format'
 import { sessionFormatCatalog } from '@deepseek-ai/dsh-session-format-catalog'
 import { assertV4RowAdmission, assertReleasedV4Relationships } from '@deepseek-ai/dsh-session-format-v3-to-v4'
 import {
@@ -378,6 +378,55 @@ function parseHeaderRecord(record: Buffer): { readonly meta: SessionHeader; read
 }
 
 /**
+ * A decoded log whose released relationships do not validate, carrying the
+ * longest prefix that still does. Callers classifying the failure can offer the
+ * prefix to a mirror owner that must not lose input with the unusable tail.
+ */
+export class SessionLogRelationshipError extends Error {
+  /**
+   * @param message - the rejected relationship's own diagnostic.
+   * @param salvagedEvents - longest decoded prefix that still validates.
+   * @param options - original validation failure.
+   */
+  constructor(message: string, readonly salvagedEvents: readonly SessionEvent[], options: ErrorOptions) {
+    super(message, options)
+    this.name = 'SessionLogRelationshipError'
+  }
+}
+
+/**
+ * Find the longest decoded prefix that satisfies released relationships.
+ * Relationship checks only look backward, so validity is monotone over
+ * prefixes and a binary search finds the cut in logarithmic validation passes.
+ * A trailing `compaction/start` is dropped because an unterminated compaction
+ * poisons every later turn event a recreated Session would append.
+ * @param artifact - decoded artifact whose full event list was refused.
+ * @returns the readable prefix, empty when even the first event is refused.
+ */
+function salvageableEvents(artifact: SessionFormatArtifact): readonly SessionEvent[] {
+  const events = artifact.events
+  let low = 0
+  let high = events.length - 1
+  let best = -1
+  while (low <= high) {
+    const middle = (low + high) >>> 1
+    try {
+      assertReleasedV4Relationships(
+        { ...artifact, events: events.slice(0, middle + 1) },
+        KNOWN_SESSION_EVENT_TYPES,
+      )
+      best = middle
+      low = middle + 1
+    } catch {
+      high = middle - 1
+    }
+  }
+  const salvaged = best < 0 ? [] : events.slice(0, best + 1)
+  while (salvaged.at(-1)?.type === 'compaction/start') salvaged.pop()
+  return salvaged as unknown as readonly SessionEvent[]
+}
+
+/**
  * Incrementally scan complete JSONL event records after an independently
  * supplied header record. Newline search and byte offsets stay on raw buffers;
  * only complete records are decoded to UTF-8. A fragment crossing writes is
@@ -465,7 +514,15 @@ export class SessionLogScanner {
   finish(): SessionLogScan {
     this.finished = true
     const artifact = this.restore.finish()
-    assertReleasedV4Relationships(artifact, KNOWN_SESSION_EVENT_TYPES)
+    try {
+      assertReleasedV4Relationships(artifact, KNOWN_SESSION_EVENT_TYPES)
+    } catch (error: unknown) {
+      throw new SessionLogRelationshipError(
+        error instanceof Error ? error.message : String(error),
+        salvageableEvents(artifact),
+        { cause: error },
+      )
+    }
     return {
       meta: this.meta,
       inheritedEventCount: SessionLogOffset(artifact.inheritedEventCount),

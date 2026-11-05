@@ -48,6 +48,7 @@ import {
   SessionLogOffset,
   interruptedTurnClosers,
   type Session,
+  type SessionEvent,
   type SessionEventMap,
   type SessionHeader,
   type SessionId,
@@ -639,6 +640,18 @@ function callId(id: string): SessionEventMap['tool/call']['callId'] {
   return id as SessionEventMap['tool/call']['callId']
 }
 
+/**
+ * What lossless recovery hands back: the header to recreate under, plus the
+ * decoded prefix the refusing backend salvaged before its corrupt tail. The
+ * prefix carries committed events the canonical source never received — an
+ * un-delivered prompt and its inbox splice — so recreating an empty Session
+ * would drop input no transcript can replay.
+ */
+export interface OmpRecoveredSession extends SessionHeader {
+  /** Readable prefix from the refused artifact; absent when the backend decoded none. */
+  readonly salvagedEvents?: readonly SessionEvent[]
+}
+
 /** Structural owner interface used by the factory heartbeat counters. */
 export interface OmpAgentFactoryOptions {
   readonly ctx: Context
@@ -658,12 +671,33 @@ export interface OmpAgentFactoryOptions {
    * @param failure - format error that refused the artifact.
    * @returns header to recreate the session from, or undefined to leave it untouched.
    */
-  readonly recover?: (id: SessionId, failure: Error) => Promise<SessionHeader | undefined>
+  readonly recover?: (id: SessionId, failure: Error) => Promise<OmpRecoveredSession | undefined>
 }
 
-/** Session-format failures cross into this package without a direct dependency. */
+/** Maximum `cause` links inspected before a failure counts as unrelated. */
+const SESSION_FORMAT_CAUSE_DEPTH = 8
+
+/**
+ * Session-format failures cross into this package without a direct dependency,
+ * and a backend may wrap the refusal in its own corruption error while keeping
+ * the original as `cause`. Traverse that chain up to
+ * {@link SESSION_FORMAT_CAUSE_DEPTH} links, stopping at a repeated object, so
+ * a wrapped format refusal still selects lossless recovery.
+ *
+ * `SessionFormatUnsupportedError` is deliberately not a format refusal: the log
+ * is intact but this build cannot interpret it, so quarantine would discard an
+ * artifact a newer build still reads. That refusal keeps its upgrade remedy.
+ */
 function isSessionFormatError(error: unknown): error is Error {
-  return error instanceof Error && error.name === 'SessionFormatError'
+  const seen = new Set<unknown>()
+  let current: unknown = error
+  for (let depth = 0; depth < SESSION_FORMAT_CAUSE_DEPTH; depth += 1) {
+    if (!(current instanceof Error) || seen.has(current)) return false
+    seen.add(current)
+    if (current.name === 'SessionFormatError') return true
+    current = current.cause
+  }
+  return false
 }
 
 /** Agent factory registered through `ctx.agents.setFactory`. */
@@ -712,9 +746,9 @@ export class OmpAgentFactory implements Factory {
       return await this.resumeStored(persistence, ownerCtx, options)
     } catch (error: unknown) {
       if (!isSessionFormatError(error) || this.options.recover === undefined) throw error
-      const header = await this.options.recover(id, error)
-      if (header === undefined) throw error
-      return await this.recreate(persistence, ownerCtx, options, header)
+      const recovered = await this.options.recover(id, error)
+      if (recovered === undefined) throw error
+      return await this.recreate(persistence, ownerCtx, options, recovered)
     }
   }
 
@@ -751,11 +785,16 @@ export class OmpAgentFactory implements Factory {
     persistence: SessionPersistence,
     ownerCtx: Context,
     options: ResumeAgentOptions,
-    header: SessionHeader,
+    recovered: OmpRecoveredSession,
   ): Promise<AgentHandle> {
+    const { salvagedEvents, ...header } = recovered
     const handle = await persistence.create(header, { ...options.signal === undefined ? {} : { signal: options.signal } })
     try {
-      const session = this.ctx.sessions.prepare(options.resumeSessionId, { meta: structuredClone(header) })
+      const salvaged = salvagedEvents ?? []
+      const session = this.ctx.sessions.prepare(options.resumeSessionId, {
+        meta: structuredClone(header),
+        ...salvaged.length === 0 ? {} : { seed: [...salvaged] },
+      })
       return await this.initialize(ownerCtx, {
         session,
         stored: { handle, storedCount: 0 },

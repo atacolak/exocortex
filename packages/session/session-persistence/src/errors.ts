@@ -7,7 +7,7 @@
  */
 
 import { SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
-import type { SessionId } from '@deepseek-ai/dsh-session'
+import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 
 /** The requested Session identity has no durable log visible to this caller. */
 export class SessionPersistenceNotFoundError extends Error {
@@ -92,12 +92,21 @@ export interface SessionLocation {
 /** Durable session contents failed validation after a successful backend read. */
 export class SessionPersistenceCorruptionError extends Error {
   /**
-   * @param message - stable corruption context.
-   * @param options - original validation failure.
+   * Longest decoded prefix that still satisfied the installed format's released
+   * relationships, when the backend admitted one before refusing the artifact.
+   * A derived-mirror owner can recreate the Session from this prefix so pending
+   * input the canonical source never received is not lost with the corrupt tail.
    */
-  constructor(message: string, options: ErrorOptions) {
+  readonly salvagedEvents?: readonly SessionEvent[]
+
+  /**
+   * @param message - stable corruption context.
+   * @param options - original validation failure and any salvageable prefix.
+   */
+  constructor(message: string, options: ErrorOptions & { readonly salvagedEvents?: readonly SessionEvent[] }) {
     super(message, options)
     this.name = 'SessionPersistenceCorruptionError'
+    if (options.salvagedEvents !== undefined) this.salvagedEvents = options.salvagedEvents
   }
 }
 
