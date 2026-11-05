@@ -26,6 +26,7 @@ import type {} from '@deepseek-ai/dsh-session-query'
 import type {} from '@deepseek-ai/dsh-workspace'
 import Schema from '@deepseek-ai/schemastery'
 import { bindingFactsOf, defaultOmpBindingsFile, hydrateOmpBinding, OmpBindings, rememberOmpBinding, type OmpBinding } from './bindings.ts'
+import { missingWorkspaceMessage } from './daemon.ts'
 import {
   OmpBridge,
   planOmpAttach,
@@ -614,6 +615,10 @@ export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
       ompSessionId: transcript.id,
       attached: served,
       async attach() {
+        const workspace = await stat(cwd).catch(() => undefined)
+        if (workspace === undefined || !workspace.isDirectory()) {
+          throw new OmpResumeError('omp/workspace-missing', missingWorkspaceMessage(cwd), 409)
+        }
         const executable = await ctx.subprocess.resolveExecutable(resolveOmpExecutable(config.executable), undefined)
         const wake = await wakeDecisionOf(transcript.id)
         const lease = await probeOmpSessionLease(ctx.subprocess, executable, transcript.id, cwd)

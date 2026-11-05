@@ -45,14 +45,17 @@ its running conversation without typing a command.
 
 ## Missing workspace directories
 
-The detached launcher `stat`s the workspace directory before it spawns the
-keeper that owns OMP. A Session whose recorded directory no longer exists is
-refused instead of started: opening it fails with `workspace directory <path>
-no longer exists; relocate this session to an existing directory or forget it`.
-The refusal belongs to that Session; the Host and every other Session keep
-running. A directory that disappears between the check and the spawn still
-arrives as the same per-Session failure because the keeper's `error` event is
-observed.
+`POST /api/exocortex/omp/open` and the detached launcher both `stat` the
+workspace directory before any spawn. A Session whose recorded directory no
+longer exists is refused instead of started: the open route answers 409
+`omp/workspace-missing` with `workspace directory <path> no longer exists;
+relocate this session to an existing directory or forget it`, and the launcher
+rejects its publication promise with the same message. The refusal belongs to
+that Session; the Host and every other Session keep running. A directory that
+disappears between the check and the spawn still becomes a per-Session
+failure, never a process exit, because the keeper observes its child's `error`
+event and reports `cannot start OMP in workspace <path>` with the same
+relocate/forget guidance.
 
 ## Slash palette
 

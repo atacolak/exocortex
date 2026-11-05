@@ -1,5 +1,37 @@
 # AGENTS.md
 
+> ## EXOCORTEX BOUNDARY - READ BEFORE TOUCHING ANYTHING
+>
+> This repository is used as the **Exocortex** product, not upstream DeepSeek Harness. The authority is
+> `/home/sf/workspace/deepseek-harness/CHARTER.md`; when this file disagrees with it, the CHARTER wins.
+>
+> **The 5% / 95% Cordis plugin rule.**
+> - **95% - default:** product behavior lives in a Cordis plugin at `/home/sf/worlds/exocortex-bundles/<bundle>/`,
+>   hot-reloaded through HMR in under 500 ms. If a slot or seam exists, use it. Do not edit core.
+> - **5% - exception:** core (`packages/**`) changes only for a genuine upstream defect that **no slot can express**,
+>   in a `cap/*` branch, verified on `:3081` before promotion.
+>
+> **Hard-forbidden outside a `cap/*` branch:** `packages/client/**`, `docs/persistence-schema.json`,
+> `docs/persistence-catalog.*`. New persistence union members and new client renderers are almost always the
+> wrong answer - check `ctx.slots.inject(...)` and the registered slot list first.
+>
+> **Slot override rules.** Lowest numeric `priority` wins (`ui-slots/src/index.ts:774`); `priority: 0` collides and
+> throws - use an explicit negative value such as `-100`. Shadowing a node slot replaces it for **every** case it
+> serves, so a bundle renderer must be a **superset** of the kinds it overrides, not just the one you are adding.
+>
+> **Structured RPC only.** Slash popups read typed OMP RPC frames (`get_available_models`,
+> `get_available_thinking_levels`, `get_state`, `set_model`, `set_thinking_level`, `compact`, `get_tree`, ...).
+> **Never parse ANSI or command text output** to build a UI.
+>
+> **Enforced mechanically:** `scripts/check-exocortex-boundary.sh <base-ref>` fails a merge that touches
+> `packages/client/**` or `docs/persistence-*` without an explicit exemption.
+>
+> **Never restart `dsh-web.service` (`:3080`)** from an agent. Verify on `:3081`. Wrap every test/build in
+> `systemd-run --user --scope -p MemoryHigh=3G -p MemoryMax=4G -p KillMode=control-group`.
+>
+> Everything below is upstream DeepSeek Harness documentation. It describes the **upstream monorepo**, and its
+> instruction to edit `packages/<group>/<pkg>/` applies to the 5% exception only.
+
 DeepSeek Harness is an all-plugin Cordis agent harness. Read [docs/architecture.md](docs/architecture.md) before changing `packages/`; follow [docs/AGENTS.md](docs/AGENTS.md) for documentation.
 
 ## Pre-stable APIs and released Session data

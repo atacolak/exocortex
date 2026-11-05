@@ -36,8 +36,8 @@ function stamp(turn: number, offsetSeconds = 0): string {
   return new Date(EPOCH + turn * 60_000 + offsetSeconds * 1_000).toISOString()
 }
 
-function sessionLine(): unknown {
-  return { type: 'session', version: 3, id: OMP_SESSION, cwd: '/work' }
+function sessionLine(cwd = '/work'): unknown {
+  return { type: 'session', version: 3, id: OMP_SESSION, cwd }
 }
 
 function userEntry(turn: number, parent: string): unknown {
@@ -682,7 +682,7 @@ describe('stale OMP publication cleanup across the watched and publication direc
     await mkdir(runDir, { recursive: true })
     await mkdir(publicationDir, { recursive: true })
     const dead = await deadPid()
-    const transcriptPath = await transcriptOf([sessionLine(), userEntry(1, OMP_SESSION), assistantEntry(1)])
+    const transcriptPath = await transcriptOf([sessionLine(root), userEntry(1, OMP_SESSION), assistantEntry(1)])
     const sidecars = [
       join(runDir, `${OMP_SESSION}.json`),
       join(publicationDir, `${OMP_SESSION}.json`),
@@ -693,7 +693,7 @@ describe('stale OMP publication cleanup across the watched and publication direc
           pid: dead,
           sessionId: OMP_SESSION,
           sessionFile: transcriptPath,
-          cwd: '/work',
+          cwd: root,
         }))
         await writeFile(ompSocketPath(directory, OMP_SESSION), 'stale')
         await writeFile(join(directory, `${OMP_SESSION}.sock.bind.lock`), 'stale')
@@ -716,7 +716,7 @@ describe('stale OMP publication cleanup across the watched and publication direc
     await bindings.set(SessionId('session-publish-bound'), {
       ompSessionId: OMP_SESSION,
       path: transcriptPath,
-      cwd: '/work',
+      cwd: root,
       updatedAt: '2026-11-05T00:00:00.000Z',
     })
 

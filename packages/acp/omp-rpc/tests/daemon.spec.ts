@@ -264,6 +264,39 @@ describe('detached OMP session daemon', () => {
     expect(result.stdout).toContain('forget')
   }, 20_000)
 
+  it('reports a spawn failure after the workspace pre-flight without crashing the host', async () => {
+    const root = await sandbox()
+    const program = `
+      import { launchOmpDaemon } from ${JSON.stringify(new URL('../src/daemon.ts', import.meta.url).href)}
+      const launch = launchOmpDaemon({
+        argv: [${JSON.stringify(join(root, 'missing-omp-binary'))}],
+        cwd: ${JSON.stringify(root)},
+        publicationDir: ${JSON.stringify(join(root, '.omp', 'run'))},
+        runDirectory: ${JSON.stringify(join(root, 'omp-run'))},
+        handshakePath: ${JSON.stringify(join(root, 'handshake.json'))},
+        publicationTimeoutMs: 500,
+      })
+      const keepAlive = setInterval(() => {}, 1000)
+      try {
+        await launch.published
+        console.log('published')
+      } catch (error) {
+        console.log('session error: ' + error.message)
+      } finally {
+        clearInterval(keepAlive)
+      }
+      await launch.dispose()
+      console.log('host alive')
+    `
+    const result = await runNode(program, root)
+    expect(result.stderr).not.toContain("Unhandled 'error' event")
+    expect(result.code).toBe(0)
+    expect(result.stdout).toContain('host alive')
+    expect(result.stdout).toContain(`cannot start OMP in workspace ${root}`)
+    expect(result.stdout).toContain('relocate')
+    expect(result.stdout).toContain('forget')
+  }, 20_000)
+
   it('isolates a deleted workspace to its own session and attaches the next session', async () => {
     const root = await sandbox()
     const publicationDir = join(root, '.omp', 'run')
