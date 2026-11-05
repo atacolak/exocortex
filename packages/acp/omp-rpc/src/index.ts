@@ -191,6 +191,36 @@ async function existingFile(path: string): Promise<boolean> {
   return info?.isFile() === true
 }
 
+/**
+ * Set aside a persisted artifact that fails session-format validation.
+ *
+ * The artifact is a derived mirror of an OMP transcript that still exists, so
+ * it is renamed (never deleted) to keep the evidence while the caller recreates
+ * the same session identity and rehydrates that identity from the transcript.
+ * @param ctx - context carrying session persistence and the logger.
+ * @param id - persisted session whose open failed validation.
+ * @param failure - format error that refused the artifact.
+ * @returns the header to recreate the session from, or undefined to leave it in place.
+ */
+export async function quarantineCorruptSession(ctx: Context, id: SessionId, failure: Error): Promise<SessionHeader | undefined> {
+  try {
+    const snapshot = await ctx.get('sessionPersistence')?.stat(id)
+    const path = snapshot?.location?.path
+    if (snapshot === undefined || path === undefined) return undefined
+    if (snapshot.header.isSeeded) {
+      ctx.logger.warn(`[omp-rpc] session "${id}" failed session-format validation and is fork-seeded; keeping ${path} untouched: ${failure.message}`)
+      return undefined
+    }
+    const quarantined = `${path}.corrupt-${new Date().toISOString().replaceAll(':', '-').replaceAll('.', '-')}`
+    await rename(path, quarantined)
+    ctx.logger.warn(`[omp-rpc] session "${id}" failed session-format validation; quarantined ${path} as ${quarantined} and rehydrating from its bound OMP transcript: ${failure.message}`)
+    return snapshot.header
+  } catch (error: unknown) {
+    ctx.logger.warn(`[omp-rpc] cannot quarantine the unusable session artifact for "${id}": ${error instanceof Error ? error.message : String(error)}`)
+    return undefined
+  }
+}
+
 /** What one resolved transcript open produced. */
 interface OmpTranscriptOpened {
   readonly transcript: OmpTranscriptMatch
@@ -661,25 +691,6 @@ export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
     }
   }
 
-  const quarantineCorruptSession = async (id: SessionId, failure: Error): Promise<SessionHeader | undefined> => {
-    try {
-      const snapshot = await ctx.get('sessionPersistence')?.stat(id)
-      const path = snapshot?.location?.path
-      if (snapshot === undefined || path === undefined) return undefined
-      if (snapshot.header.isSeeded) {
-        warn(`session "${id}" failed session-format validation and is fork-seeded; keeping ${path} untouched`, failure)
-        return undefined
-      }
-      const quarantined = `${path}.corrupt-${new Date().toISOString().replaceAll(':', '-').replaceAll('.', '-')}`
-      await rename(path, quarantined)
-      warn(`session "${id}" failed session-format validation; quarantined ${path} as ${quarantined} and rehydrating from its bound OMP transcript`, failure)
-      return snapshot.header
-    } catch (error: unknown) {
-      warn(`cannot quarantine the unusable session artifact for "${id}"`, error)
-      return undefined
-    }
-  }
-
   const modelSelection = await ctx.sessionProjections.register(modelSelectionProjectionDefinition)
   const inbox = await ctx.sessionProjections.register(inboxProjectionDefinition)
   registerOmpLlmProvider(ctx, OMP_LLM_PROVIDER)
@@ -687,7 +698,7 @@ export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
     ctx,
     host: agentHost,
     hydrate: hydrateBoundSession,
-    recover: quarantineCorruptSession,
+    recover: (id, failure) => quarantineCorruptSession(ctx, id, failure),
   })), 'omp-rpc agent factory')
 
   const hosted = new Map<string, SessionId>()

@@ -1078,7 +1078,13 @@ function dedupeLiveTurn(events: readonly OmpHydrationEvent[], dedupe: LiveTurnDe
           ...event,
           data: {
             ...event.data,
-            message: createAssistantMessage({ content, source: event.data.message.source }),
+            message: createAssistantMessage({
+              content,
+              source: {
+                provider: event.data.message.source.provider,
+                model: event.data.message.source.model,
+              },
+            }),
           },
         })
         break
@@ -1175,7 +1181,8 @@ export async function hydrateOmpSession(
   if (matched === -1) matched = projected > 0 ? turns.length - 1 : recorded - 1
 
   const pending = turns.slice(matched + 1)
-  const admissible = includeNewestTurn ? pending : pending.slice(0, -1)
+  const harnessTurnOpen = openTurnStart(session.snapshotEvents()) !== undefined
+  const admissible = includeNewestTurn && !harnessTurnOpen ? pending : pending.slice(0, -1)
   const admitted = base === 0 ? newestTurns(admissible, limit) : oldestTurns(admissible, limit)
   const selected = admitted.map((entry, index) => renumberTurn(entry.events, base + index + 1))
   const title = await readOmpTranscriptTitle(path)
