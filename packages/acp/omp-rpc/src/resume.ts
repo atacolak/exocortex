@@ -1337,6 +1337,7 @@ export async function hydrateOmpSession(
   for (const boundary of matchedTurn?.boundariesAfter ?? []) emitBoundary(boundary)
   for (const boundary of admitted[0]?.boundariesBefore ?? []) emitBoundary(boundary)
   let appendedEvents = 0
+  let awaitingOpener = false
   const liveTurn = mergedInto === undefined ? undefined : liveTurnDedupeOf(session)
   for (const [index, events] of selected.entries()) {
     const batch = liveTurn === undefined || admitted[index] !== mergedInto
@@ -1346,6 +1347,7 @@ export async function hydrateOmpSession(
       appendedEvents += 1
       switch (event.type) {
         case 'turn/start':
+          awaitingOpener = true
           session.append('turn/start', event.data, timingOf(event.time))
           break
         case 'turn/end':
@@ -1357,9 +1359,26 @@ export async function hydrateOmpSession(
         case 'step/end':
           session.append('step/end', event.data, timingOf(event.time))
           break
-        case 'user/message':
-          session.append('user/message', event.data, { surfaceOp: 'append', ...timingOf(event.time) })
+        case 'user/message': {
+          const timing = timingOf(event.time)
+          if (awaitingOpener && event.data.source.kind !== 'user') {
+            session.append('agent/inbox/spliced', {
+              target: 'next-turn',
+              start: 0,
+              inserted: [event.data],
+            }, timing)
+            session.append('agent/inbox/spliced', {
+              target: 'next-turn',
+              start: 0,
+              removedCount: 1,
+              inserted: [],
+            }, timing)
+            appendedEvents += 2
+          }
+          awaitingOpener = false
+          session.append('user/message', event.data, { surfaceOp: 'append', ...timing })
           break
+        }
         case 'assistant/message':
           session.append('assistant/message', event.data, { surfaceOp: 'append', ...timingOf(event.time) })
           break

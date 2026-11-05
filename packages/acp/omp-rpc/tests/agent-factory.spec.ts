@@ -479,6 +479,75 @@ describe('OmpAgentFactory keeps the harness request shape intact', () => {
   })
 })
 
+describe('OmpAgentFactory claims an idle external wake as its Turn opener', () => {
+  const mail = '<hcom>[inform #41909] exo_lead -> argon: ship the wake rows</hcom>'
+  const wake = { text: mail, source: { kind: 'omp-agent-message', form: 'relay' } } as const
+
+  it('records the next-turn insert and claim around an idle wake so Chat promotes it', async () => {
+    const h = await harness()
+    const created = await createAgent(h, 'session-factory-idle-wake')
+    expect(typeof created.agent.projectExternalWake).toBe('function')
+    created.agent.projectExternalWake!(wake)
+    await tick()
+
+    const events = created.agent.session.snapshotEvents()
+    const splices = inboxSplices(events).filter(splice => splice.data.target === 'next-turn')
+    const opened = events.find(event => event.type === 'turn/start')
+    const logged = userTurns(events)[0]
+    const insert = splices.find(splice => splice.data.removedCount === undefined)
+    const claim = splices.find(splice => splice.data.removedCount === 1)
+
+    expect(logged?.data.source).toEqual({ kind: 'omp-agent-message', form: 'relay' })
+    expect(logged?.data.content).toEqual([{ type: 'text', text: mail }])
+    expect(insert, 'the wake is queued for the next Turn').toBeDefined()
+    expect(claim, 'the waking Turn claims the queued mail').toBeDefined()
+    expect(insert!.data.inserted.map(message => message.id)).toEqual([logged?.data.id])
+    expect(claim!.data.inserted).toEqual([])
+    expect(claim!.data.outcome).toBeUndefined()
+    expect(insert!.seq).toBeLessThan(opened!.seq)
+    expect(opened!.seq).toBeLessThan(claim!.seq)
+    expect(claim!.seq).toBeLessThan(logged!.seq)
+
+    await created.agent.whenIdle()
+    await created.dispose()
+  })
+
+  it('keeps a wake that interrupts a running Turn out of the next-turn claim chain', async () => {
+    const h = await harness()
+    const created = await createAgent(h, 'session-factory-running-wake')
+    created.agent.followup(userInput('start the long tool'))
+    await tick()
+    acceptPrompt(h)
+    emit(h, assistantCycle('m1', 'Working', 'toolUse'))
+    h.rpc.receive({ type: 'tool_execution_start', toolCallId: 'c1', toolName: 'bash', args: { command: 'sleep 60' } })
+    await tick()
+
+    created.agent.projectExternalWake!(wake)
+    await tick()
+
+    const events = created.agent.session.snapshotEvents()
+    expect(inboxSplices(events).filter(splice => splice.data.target === 'next-turn')).toEqual([])
+    expect(userTurns(events).map(event => event.data.source)).toEqual([
+      { kind: 'user' },
+      { kind: 'omp-agent-message', form: 'relay' },
+    ])
+
+    h.rpc.receive({
+      type: 'tool_execution_end',
+      toolCallId: 'c1',
+      toolName: 'bash',
+      result: { content: [{ type: 'text', text: 'done' }] },
+      isError: false,
+    })
+    h.rpc.receive({ type: 'message_start', messageId: 'm2', message: { role: 'assistant' } })
+    await tick()
+    emit(h, assistantCycle('m2', 'Finished').slice(1))
+    settle(h)
+    await created.agent.whenIdle()
+    await created.dispose()
+  })
+})
+
 const builtLib = fileURLToPath(new URL('../lib/index.js', import.meta.url))
 
 describe('OmpAgentFactory publishes the shared scope module', () => {
