@@ -430,7 +430,7 @@ export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
     config.watchRunDir === false ? undefined : config.watchRunDir,
     config.home,
   )
-  const ompPublicationDir = join(config.home ?? homedir(), '.omp', 'run')
+  const ompPublicationDir = resolveOmpRunDirectory(undefined, config.home)
   const bridge = new OmpBridge({
     ctx,
     subprocess: ctx.subprocess,
