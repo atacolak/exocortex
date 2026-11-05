@@ -10,7 +10,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { stat } from 'node:fs/promises'
+import { rename, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -19,8 +19,8 @@ import type {} from '@deepseek-ai/dsh-client-connection'
 import type {} from '@deepseek-ai/dsh-commands'
 import { modelSelectionProjectionDefinition, type Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
-import { SessionId } from '@deepseek-ai/dsh-session'
-import { inboxProjectionDefinition, OmpAgentFactory, type OmpAgentHost } from './agent-factory.ts'
+import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { inboxProjectionDefinition, OmpAgentFactory, type OmpAgentHost, type OmpRecoveredSession } from './agent-factory.ts'
 import { OMP_LLM_PROVIDER, registerOmpLlmProvider } from './llm-catalog.ts'
 import type {} from '@deepseek-ai/dsh-workspace'
 import Schema from '@deepseek-ai/schemastery'
@@ -191,6 +191,71 @@ async function existingFile(path: string): Promise<boolean> {
   return info?.isFile() === true
 }
 
+/** Maximum `cause` links inspected when looking for a backend-salvaged prefix. */
+const SALVAGE_CAUSE_DEPTH = 8
+
+/**
+ * Read the readable-prefix payload a persistence backend attached to its
+ * corruption refusal. The payload is read structurally because this package
+ * carries no dependency on the backend that produces it; a wrapping error keeps
+ * the payload on its own `cause`, so the chain is walked to a bounded depth.
+ * @param failure - the refusal that selected recovery.
+ * @returns the salvaged events, empty when no link carries any.
+ */
+function salvagedPrefixOf(failure: Error): readonly SessionEvent[] {
+  const seen = new Set<unknown>()
+  let current: unknown = failure
+  for (let depth = 0; depth < SALVAGE_CAUSE_DEPTH; depth += 1) {
+    if (!(current instanceof Error) || seen.has(current)) return []
+    seen.add(current)
+    if ('salvagedEvents' in current) {
+      const salvaged: unknown = current.salvagedEvents
+      if (Array.isArray(salvaged)) return salvaged as readonly SessionEvent[]
+    }
+    current = current.cause
+  }
+  return []
+}
+
+/**
+ * Set aside a persisted artifact that fails session-format validation.
+ *
+ * The artifact is a derived mirror of an OMP transcript that still exists, so
+ * it is renamed (never deleted) to keep the evidence while the caller recreates
+ * the same session identity and rehydrates that identity from the transcript.
+ * A backend that admitted a readable prefix before its corrupt tail hands that
+ * prefix over on the failure; it carries committed events the transcript never
+ * received, so it is returned with the header instead of being dropped with the
+ * quarantined file.
+ * @param ctx - context carrying session persistence and the logger.
+ * @param id - persisted session whose open failed validation.
+ * @param failure - format error that refused the artifact.
+ * @returns the header to recreate the session from plus any salvaged prefix, or undefined to leave it in place.
+ */
+export async function quarantineCorruptSession(
+  ctx: Context,
+  id: SessionId,
+  failure: Error,
+): Promise<OmpRecoveredSession | undefined> {
+  try {
+    const snapshot = await ctx.get('sessionPersistence')?.stat(id)
+    const path = snapshot?.location?.path
+    if (snapshot === undefined || path === undefined) return undefined
+    if (snapshot.header.isSeeded) {
+      ctx.logger.warn(`[omp-rpc] session "${id}" failed session-format validation and is fork-seeded; keeping ${path} untouched: ${failure.message}`)
+      return undefined
+    }
+    const quarantined = `${path}.corrupt-${new Date().toISOString().replaceAll(':', '-').replaceAll('.', '-')}`
+    await rename(path, quarantined)
+    const salvagedEvents = salvagedPrefixOf(failure)
+    ctx.logger.warn(`[omp-rpc] session "${id}" failed session-format validation; quarantined ${path} as ${quarantined} and rehydrating from its bound OMP transcript with ${salvagedEvents.length} salvaged event(s): ${failure.message}`)
+    return { ...snapshot.header, ...salvagedEvents.length === 0 ? {} : { salvagedEvents } }
+  } catch (error: unknown) {
+    ctx.logger.warn(`[omp-rpc] cannot quarantine the unusable session artifact for "${id}": ${error instanceof Error ? error.message : String(error)}`)
+    return undefined
+  }
+}
+
 /** What one resolved transcript open produced. */
 interface OmpTranscriptOpened {
   readonly transcript: OmpTranscriptMatch
@@ -327,14 +392,12 @@ export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
     readonly agent: Agent
     readonly binding: OmpBinding
     readonly cursor?: OmpBinding
-    readonly includeNewestTurn: boolean
   }) => {
     const hydration = await hydrateOmpBinding({
       bindings,
       session: request.agent.session,
       binding: request.binding,
       ...request.cursor === undefined ? {} : { cursor: request.cursor },
-      includeNewestTurn: request.includeNewestTurn,
     })
     bridge.seedDelivered(request.agent.id)
     return hydration
@@ -472,7 +535,6 @@ export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
             updatedAt: new Date().toISOString(),
           },
           ...binding === undefined ? {} : { cursor: binding },
-          includeNewestTurn: !(attachment?.session.streaming ?? served?.streaming ?? false),
         })
         return hydration.appended
       },
@@ -545,11 +607,7 @@ export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
     }
     if (binding?.path !== undefined && await existingFile(binding.path)) {
       try {
-        await hydrateBoundTranscript({
-          agent,
-          binding,
-          includeNewestTurn: !attachment.session.streaming,
-        })
+        await hydrateBoundTranscript({ agent, binding })
       } catch (error: unknown) {
         warn(`cannot tail-sync OMP transcript for session "${agent.id}"`, error)
       }
@@ -661,12 +719,7 @@ export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
     const binding = await readBinding(agent.id)
     if (binding === undefined || !(await existingFile(binding.path))) return
     try {
-      const wake = (await wakeDecisionOf(binding.ompSessionId))?.plan
-      await hydrateBoundTranscript({
-        agent,
-        binding,
-        includeNewestTurn: wake?.kind !== 'attach',
-      })
+      await hydrateBoundTranscript({ agent, binding })
     } catch (error: unknown) {
       warn(`cannot tail-sync OMP transcript for reopened session "${agent.id}"`, error)
     }
@@ -679,6 +732,7 @@ export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
     ctx,
     host: agentHost,
     hydrate: hydrateBoundSession,
+    recover: (id, failure) => quarantineCorruptSession(ctx, id, failure),
   })), 'omp-rpc agent factory')
 
   const hosted = new Map<string, SessionId>()
@@ -758,7 +812,6 @@ export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
           agent,
           binding: source,
           ...bound === undefined ? {} : { cursor: bound.binding },
-          includeNewestTurn: !attachment.session.streaming,
         })
       } catch (error: unknown) {
         warn(`cannot hydrate adopted session "${agent.id}"`, error)

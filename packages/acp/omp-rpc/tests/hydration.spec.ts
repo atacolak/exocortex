@@ -113,7 +113,6 @@ describe('hydrateOmpBinding', () => {
       bindings,
       session,
       binding: bindingOf(path),
-      includeNewestTurn: true,
     })
 
     expect(outcome.turns).toBe(250)
@@ -136,7 +135,6 @@ describe('hydrateOmpBinding', () => {
       bindings: new OmpBindings(file),
       session,
       binding: bindingOf(path),
-      includeNewestTurn: true,
     })
     await appendFile(path, `${turnEntries(4, 5).map(line => JSON.stringify(line)).join('\n')}\n`)
 
@@ -147,7 +145,6 @@ describe('hydrateOmpBinding', () => {
       bindings: reopened,
       session,
       binding: stored!,
-      includeNewestTurn: true,
     })
 
     expect(outcome.appended).toBeGreaterThan(0)
@@ -170,7 +167,6 @@ describe('hydrateOmpBinding', () => {
       bindings: new OmpBindings(file),
       session,
       binding: bindingOf(path),
-      includeNewestTurn: true,
     })
     const before = session.snapshotEvents().length
 
@@ -179,7 +175,6 @@ describe('hydrateOmpBinding', () => {
       bindings: reopened,
       session,
       binding: (await reopened.get(SESSION_ID))!,
-      includeNewestTurn: true,
     })
 
     expect(again.appended).toBe(0)
@@ -218,7 +213,7 @@ describe('OMP compaction boundaries', () => {
     ])
     const session = Session.create(SESSION_ID)
     const file = join(await sandbox(), 'omp', 'bindings.json')
-    await hydrateOmpBinding({ bindings: new OmpBindings(file), session, binding: bindingOf(path), includeNewestTurn: true })
+    await hydrateOmpBinding({ bindings: new OmpBindings(file), session, binding: bindingOf(path), })
 
     const events = session.snapshotEvents()
     const summaries = events.filter(event => event.type === 'compaction/summary')
@@ -255,23 +250,20 @@ describe('OMP compaction boundaries', () => {
     const file = join(await sandbox(), 'omp', 'bindings.json')
     const session = Session.create(SESSION_ID)
     const first = await hydrateOmpBinding({
-      bindings: new OmpBindings(file), session, binding: bindingOf(path), includeNewestTurn: true,
-    })
+      bindings: new OmpBindings(file), session, binding: bindingOf(path), })
     expect(session.snapshotEvents().filter(event => event.type === 'compaction/summary')).toHaveLength(0)
 
     await appendFile(path, `${JSON.stringify(compactionLine(entryId(4)))}\n`)
     const reopened = new OmpBindings(file)
     const cursor = (await reopened.get(SESSION_ID))!
     const second = await hydrateOmpBinding({
-      bindings: reopened, session, binding: cursor, includeNewestTurn: true,
-    })
+      bindings: reopened, session, binding: cursor, })
     expect(second.appended).toBe(4)
     expect(session.snapshotEvents().filter(event => event.type === 'compaction/summary')).toHaveLength(1)
 
     const third = new OmpBindings(file)
     const settled = await hydrateOmpBinding({
-      bindings: third, session, binding: (await third.get(SESSION_ID))!, includeNewestTurn: true,
-    })
+      bindings: third, session, binding: (await third.get(SESSION_ID))!, })
     expect(settled.appended).toBe(0)
     expect(session.snapshotEvents().filter(event => event.type === 'compaction/summary')).toHaveLength(1)
     expect(first.hydratedLeafEntryId).not.toBe(entryId(101))
@@ -300,7 +292,6 @@ describe('OMP compaction boundaries', () => {
       bindings: new OmpBindings(join(root, 'bindings.json')),
       session,
       binding: bindingOf(path),
-      includeNewestTurn: true,
     })
     await handle.append(session.snapshotEvents())
     await handle.close()

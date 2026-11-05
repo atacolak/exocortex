@@ -4,10 +4,26 @@ import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
-import { SESSION_FORMAT_VERSION, Session, SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
+import {
+  SESSION_FORMAT_VERSION,
+  Session,
+  SessionId,
+  type SessionAppendTiming,
+  type SessionEvent,
+  type SurfaceIntent,
+} from '@deepseek-ai/dsh-session'
+import {
+  createAssistantMessage,
+  createSystemMessage,
+  createToolResultMessage,
+  createUserMessage,
+  ToolCallId,
+  type ContentBlock,
+} from '@deepseek-ai/dsh-llm'
 import { isCompactCheckpointSource } from '@deepseek-ai/dsh-compaction/checkpoint'
 import { afterEach, describe, expect, it, onTestFinished } from 'vitest'
 import {
+  appendOmpCompactionBoundary,
   hydrateOmpSession,
   ompHydrationEvents,
   ompTranscriptTurns,
@@ -828,6 +844,30 @@ describe('hydrateOmpSession canonical cursor', () => {
     expect(sessionUserTexts(session)).toEqual(['turn 1', 'turn 2', 'turn 3', 'turn 4'])
     expect(sessionTurnNumbers(session)).toEqual([1, 2, 3, 4])
   })
+
+  it('keeps a new turn whose prompt repeats the last completed turn', async () => {
+    const path = await transcript([
+      sessionLine(),
+      userEntry(entryId(1), SESSION_UUID, 'go'),
+      assistantEntry(entryId(2), entryId(1), 'reply 1'),
+      userEntry(entryId(3), entryId(2), 'go'),
+      assistantEntry(entryId(4), entryId(3), 'reply 2'),
+    ])
+    const session = boundarySession('repeated-prompt')
+    closedTurn(session, 1, 'go')
+
+    const outcome = await hydrateOmpSession(session, path, Number.POSITIVE_INFINITY, {
+      hydratedTurns: 1,
+      hydratedLeafEntryId: entryId(2),
+      hydratedByteOffset: 0,
+    })
+
+    expect(outcome.appended).toBeGreaterThan(0)
+    expect(sessionUserTexts(session)).toEqual(['go', 'go'])
+    expect(sessionTurnNumbers(session)).toEqual([1, 2])
+    expect(assistantTexts(session)).toEqual(['reply 1', 'reply 2'])
+    await expect(persistAndReopen(session)).resolves.toBeDefined()
+  })
 })
 
 describe.skipIf(!existsSync(REAL_TRANSCRIPT))('real OMP transcript hydration', () => {
@@ -914,4 +954,294 @@ describe.skipIf(!existsSync(REAL_TRANSCRIPT))('real OMP transcript hydration', (
       await reopened.close()
     }
   }, 120_000)
+})
+
+function boundarySession(id: string): Session {
+  const header = {
+    version: SESSION_FORMAT_VERSION,
+    id: SessionId(id),
+    createdAt: 1,
+    cwd: '/work',
+    isSeeded: false,
+  } as const
+  return Session.create(SessionId(id), [], header)
+}
+
+function appendSystemHead(
+  session: Session,
+  turn: number,
+  step: number,
+  text: string,
+  timing: SurfaceIntent<'system/message'> & SessionAppendTiming = { surfaceOp: 'append' },
+): SessionEvent<'system/message'> {
+  return session.append('system/message', { turn, step, message: createSystemMessage(text) }, timing)
+}
+
+function appendUser(session: Session, text: string): SessionEvent<'user/message'> {
+  return session.append('user/message', createUserMessage({
+    content: [{ type: 'text', text }],
+    source: { kind: 'user' },
+  }), { surfaceOp: 'append' })
+}
+
+function appendAssistant(
+  session: Session,
+  turn: number,
+  step: number,
+  content: readonly ContentBlock[],
+): SessionEvent<'assistant/message'> {
+  return session.append('assistant/message', {
+    turn,
+    step,
+    message: createAssistantMessage({ content, source: { provider: 'omp', model: 'omp' } }),
+    stream: [],
+  }, { surfaceOp: 'append' })
+}
+
+function closeTurn(session: Session, turn: number, step: number): void {
+  session.append('step/end', { turn, step })
+  session.append('turn/end', { turn, reason: { kind: 'completed' } })
+}
+
+function closedTurn(session: Session, turn: number, text: string, head?: string): void {
+  session.append('turn/start', { turn })
+  session.append('step/start', { turn, step: 1 })
+  if (head !== undefined) appendSystemHead(session, turn, 1, head)
+  appendUser(session, text)
+  appendAssistant(session, turn, 1, [{ type: 'text', text: `reply ${String(turn)}` }])
+  closeTurn(session, turn, 1)
+}
+
+async function persistAndReopen(session: Session): Promise<readonly SessionEvent[]> {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-boundary-log-'))
+  onTestFinished(() => rm(root, { recursive: true, force: true }))
+  const ctx = new Context()
+  onTestFinished(() => ctx.fiber.dispose())
+  await ctx.plugin(JsonlSessionPersistence, { root })
+  const handle = await ctx.sessionPersistence.create({
+    version: SESSION_FORMAT_VERSION,
+    id: session.id,
+    createdAt: 1,
+    cwd: '/work',
+    isSeeded: false,
+  })
+  try {
+    await handle.append(session.snapshotEvents())
+  } finally {
+    await handle.close()
+  }
+  const reopened = await ctx.sessionPersistence.open(session.id, 'read')
+  try {
+    return (await reopened.read()).events
+  } finally {
+    await reopened.close()
+  }
+}
+
+function compactionSummaries(session: Session): SessionEvent<'compaction/summary'>[] {
+  return session.snapshotEvents().filter((event): event is SessionEvent<'compaction/summary'> => event.type === 'compaction/summary')
+}
+
+function boundaryOwners(session: Session): (string | number | null)[][] {
+  return session.snapshotEvents()
+    .filter(event => event.type === 'compaction/start' || event.type === 'compaction/end')
+    .map(event => [event.type, event.data.turn])
+}
+
+function assistantTexts(session: Session): (string | undefined)[] {
+  return session.snapshotEvents()
+    .filter((event): event is SessionEvent<'assistant/message'> => event.type === 'assistant/message')
+    .map(event => firstText(event.data.message.content))
+}
+
+describe('appendOmpCompactionBoundary protected system head', () => {
+  it('excludes a leading system/message from the shadowed span so the artifact stays readable', async () => {
+    const session = boundarySession('boundary-system-head')
+    closedTurn(session, 1, 'one', 'You are Argon.')
+    closedTurn(session, 2, 'two')
+    const headSeq = session.surface.nodes[0]
+    expect(headSeq).toBeDefined()
+    expect(session.snapshotEvents()[headSeq!]?.type).toBe('system/message')
+    const surface = [...session.surface.nodes]
+
+    const compactionId = appendOmpCompactionBoundary(session, {
+      entryId: 'cmp-head',
+      summary: 'Earlier conversation summarized',
+      tokensBefore: 1234,
+    })
+
+    expect(compactionId).toBeDefined()
+    const [summary] = compactionSummaries(session)
+    expect(summary).toBeDefined()
+    const expected = surface.slice(1)
+    expect(expected.length).toBeGreaterThan(0)
+    expect(summary!.data.shadowedSeqs).toEqual(expected)
+    expect(summary!.data.shadowedRange).toEqual({ start: expected[0], end: expected.at(-1) })
+    expect(summary!.data.shadowedSeqs).not.toContain(headSeq)
+    expect(session.surface.nodes[0]).toBe(headSeq)
+    expect(session.snapshotEvents().at(-1)?.type).toBe('compaction/end')
+
+    await expect(persistAndReopen(session)).resolves.toBeDefined()
+  })
+
+  it('keeps a protected head that a mid-session system/message replacement established', async () => {
+    const session = boundarySession('boundary-protected-head')
+    closedTurn(session, 1, 'one', 'You are Argon.')
+    const originalHead = session.surface.nodes[0]
+    expect(originalHead).toBeDefined()
+    closedTurn(session, 2, 'two')
+
+    session.append('turn/start', { turn: 3 })
+    session.append('step/start', { turn: 3, step: 1 })
+    const protectedHead = appendSystemHead(session, 3, 1, 'You are Argon. Context window refreshed.', {
+      surfaceOp: { op: 'replace', startSeq: originalHead!, endSeq: originalHead! },
+      sourceEventSeqs: [originalHead!],
+    })
+    expect(session.surface.nodes[0]).toBe(protectedHead.seq)
+    appendUser(session, 'three')
+    appendAssistant(session, 3, 1, [{ type: 'text', text: 'reply 3' }])
+    closeTurn(session, 3, 1)
+    closedTurn(session, 4, 'four')
+    const surface = [...session.surface.nodes]
+    expect(surface[0]).toBe(protectedHead.seq)
+
+    appendOmpCompactionBoundary(session, {
+      entryId: 'cmp-protected-head',
+      summary: 'Earlier conversation summarized',
+      tokensBefore: 4096,
+    })
+
+    const [summary] = compactionSummaries(session)
+    const expected = surface.slice(1)
+    expect(summary!.data.shadowedSeqs).toEqual(expected)
+    expect(summary!.data.shadowedSeqs).not.toContain(protectedHead.seq)
+    expect(summary!.data.shadowedRange).toEqual({ start: expected[0], end: expected.at(-1) })
+    expect(session.surface.nodes[0]).toBe(protectedHead.seq)
+
+    await expect(persistAndReopen(session)).resolves.toBeDefined()
+  })
+
+  it('returns undefined when the surface holds only a system/message', () => {
+    const session = boundarySession('boundary-only-system')
+    session.append('turn/start', { turn: 1 })
+    session.append('step/start', { turn: 1, step: 1 })
+    appendSystemHead(session, 1, 1, 'You are Argon.')
+    const before = session.snapshotEvents().length
+
+    const compactionId = appendOmpCompactionBoundary(session, {
+      entryId: 'cmp-only-head',
+      summary: 'nothing to shadow',
+      tokensBefore: 42,
+    })
+
+    expect(compactionId).toBeUndefined()
+    expect(session.snapshotEvents()).toHaveLength(before)
+  })
+
+  it('shadows the whole surface exactly as before when no system/message exists', () => {
+    const session = boundarySession('boundary-no-system')
+    closedTurn(session, 1, 'one')
+    closedTurn(session, 2, 'two')
+    const surface = [...session.surface.nodes]
+
+    appendOmpCompactionBoundary(session, {
+      entryId: 'cmp-no-system',
+      summary: 'Earlier conversation summarized',
+      tokensBefore: 777,
+    })
+
+    const [summary] = compactionSummaries(session)
+    expect(summary!.data.shadowedSeqs).toEqual(surface)
+    expect(summary!.data.shadowedRange).toEqual({ start: surface[0], end: surface.at(-1) })
+    expect(session.surface.nodes).toHaveLength(1)
+  })
+
+  it('owns compaction events by the open turn and records null between turns', async () => {
+    const idle = boundarySession('boundary-idle-owner')
+    closedTurn(idle, 1, 'one')
+    appendOmpCompactionBoundary(idle, { entryId: 'cmp-idle', summary: 'idle summary', tokensBefore: 100 })
+    expect(boundaryOwners(idle)).toEqual([['compaction/start', null], ['compaction/end', null]])
+
+    const open = boundarySession('boundary-open-owner')
+    closedTurn(open, 1, 'one')
+    open.append('turn/start', { turn: 2 })
+    appendUser(open, 'two')
+    appendOmpCompactionBoundary(open, { entryId: 'cmp-open', summary: 'open summary', tokensBefore: 200 })
+    expect(boundaryOwners(open)).toEqual([['compaction/start', 2], ['compaction/end', 2]])
+
+    await expect(persistAndReopen(open)).resolves.toBeDefined()
+  })
+})
+
+describe('hydrateOmpSession against a live streaming turn', () => {
+  it('keeps the active turn committed transcript prefix with no duplicates and no gaps', async () => {
+    const path = await transcript([
+      sessionLine(),
+      userEntry(entryId(1), SESSION_UUID, 'one'),
+      assistantEntry(entryId(2), entryId(1), 'reply 1'),
+      userEntry(entryId(3), entryId(2), 'two'),
+      {
+        type: 'message',
+        id: entryId(4),
+        parentId: entryId(3),
+        message: {
+          role: 'assistant',
+          content: [
+            { type: 'text', text: 'checking' },
+            { type: 'toolCall', id: 'c1', name: 'read', arguments: { path: '/tmp/a' } },
+          ],
+        },
+      },
+      {
+        type: 'message',
+        id: entryId(5),
+        parentId: entryId(4),
+        message: { role: 'toolResult', toolCallId: 'c1', content: [{ type: 'text', text: 'contents' }], isError: false },
+      },
+      {
+        type: 'message',
+        id: entryId(6),
+        parentId: entryId(5),
+        message: { role: 'assistant', content: [{ type: 'text', text: 'done' }] },
+      },
+    ])
+
+    const session = boundarySession('streaming-active-turn')
+    closedTurn(session, 1, 'one')
+    session.append('turn/start', { turn: 2 })
+    session.append('step/start', { turn: 2, step: 1 })
+    appendUser(session, 'two')
+    appendAssistant(session, 2, 1, [
+      { type: 'text', text: 'checking' },
+      { type: 'tool-call', id: ToolCallId('c1'), name: 'read', arguments: JSON.stringify({ path: '/tmp/a' }) },
+    ])
+    session.append('tool/call', { turn: 2, step: 1, callId: ToolCallId('c1'), name: 'read', arguments: JSON.stringify({ path: '/tmp/a' }) })
+    session.append('tool/result', {
+      turn: 2,
+      step: 1,
+      message: createToolResultMessage({
+        callId: ToolCallId('c1'),
+        content: [{ type: 'text', text: 'contents' }],
+        isError: false,
+      }),
+    }, { surfaceOp: 'append' })
+
+    const outcome = await hydrateOmpSession(session, path, Number.POSITIVE_INFINITY, {
+      hydratedTurns: 1,
+      hydratedLeafEntryId: entryId(2),
+      hydratedByteOffset: 0,
+    })
+
+    expect(outcome.appended).toBeGreaterThan(0)
+    expect(sessionTurnNumbers(session)).toEqual([1, 2])
+    expect(sessionUserTexts(session)).toEqual(['one', 'two'])
+    expect(assistantTexts(session)).toEqual(['reply 1', 'checking', 'done'])
+    expect(session.snapshotEvents().filter(event => event.type === 'tool/call')).toHaveLength(1)
+    expect(session.snapshotEvents().filter(event => event.type === 'tool/result')).toHaveLength(1)
+    expect(session.snapshotEvents()
+      .filter(event => event.type === 'turn/end')
+      .map(event => event.data.turn)).toEqual([1, 2])
+
+    await expect(persistAndReopen(session)).resolves.toBeDefined()
+  })
 })

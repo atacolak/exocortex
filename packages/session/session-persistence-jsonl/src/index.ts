@@ -38,7 +38,7 @@ import { SESSION_FORMAT_VERSION, SessionId as makeSessionId, SessionLogOffset } 
 import type { SessionEvent, SessionId, SessionHeader, SessionLogOffset as SessionLogOffsetType } from '@deepseek-ai/dsh-session'
 import {
   assertNoRetiredHeaderFields, encodeSegment, eventLines, generationLogFilename, generationLogPath, logPath, logSuffix,
-  parseGenerationLogFilename, projectDir, scanLog, sessionDir, SessionLogScanner, toHeaderLine,
+  parseGenerationLogFilename, projectDir, scanLog, sessionDir, SessionLogScanner, SessionLogRelationshipError, toHeaderLine,
   type JsonlCompression,
 } from './format.ts'
 import {
@@ -852,7 +852,10 @@ class JsonlSessionPersistence extends SessionPersistence {
       if (error instanceof SessionFormatUnsupportedError) {
         throw new SessionFormatUnsupportedError(`${error.message} (raw log: ${path})`, { kind: 'jsonl', path })
       }
-      throw new SessionPersistenceCorruptionError(`session "${expectedId}": stored log is corrupt: ${String(error)} (raw log: ${path})`, { cause: error })
+      throw new SessionPersistenceCorruptionError(`session "${expectedId}": stored log is corrupt: ${String(error)} (raw log: ${path})`, {
+        cause: error,
+        ...error instanceof SessionLogRelationshipError ? { salvagedEvents: error.salvagedEvents } : {},
+      })
     }
     signal?.throwIfAborted()
     await this.assertStoredIdentity(path, SESSION_FORMAT_VERSION, parsed.meta, expectedId, signal)
