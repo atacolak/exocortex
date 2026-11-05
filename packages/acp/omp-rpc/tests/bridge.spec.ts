@@ -462,6 +462,38 @@ describe('OmpBridge live socket attachment', () => {
     await expect.poll(() => server.open, { timeout: 2_000 }).toBe(0)
   })
 
+  it('switches to a named OMP session by binding a new process, never restarting the old one', async () => {
+    const { ctx, bridge } = await socketBridge()
+    const from = await published('omp-live-from')
+    const to = await published('omp-live-to')
+    const agent = await scopedAgent(ctx, 'socket-switch')
+
+    await bridge.attach(agent, {
+      mode: 'attach',
+      sessionDir: from.directory,
+      socketPath: ompSocketPath(from.directory, 'omp-live-from'),
+      sessionId: 'omp-live-from',
+      cwd: '/work',
+    })
+    const before = bridge.driverOf(agent.id)
+    await bridge.attach(agent, {
+      mode: 'attach',
+      sessionDir: to.directory,
+      socketPath: ompSocketPath(to.directory, 'omp-live-to'),
+      sessionId: 'omp-live-to',
+      cwd: '/work',
+    })
+    const after = bridge.driverOf(agent.id)
+
+    expect(before).toBeDefined()
+    expect(after).toBeDefined()
+    expect(after).not.toBe(before)
+    expect(from.frames.filter(frame => frame.type === 'new_session')).toEqual([])
+    expect(bridge.servesOmpSession('omp-live-from')).toBe(false)
+    expect(bridge.servesOmpSession('omp-live-to')).toBe(true)
+    await expect.poll(() => from.server.open, { timeout: 2_000 }).toBe(0)
+  })
+
   it('refuses a socket publishing a different session than requested', async () => {
     const { ctx, bridge } = await socketBridge()
     const { directory } = await published('omp-live-2')
