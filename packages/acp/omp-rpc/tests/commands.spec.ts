@@ -20,8 +20,13 @@ async function mountedPlugin(options: MountOptions = {}): Promise<Context> {
   await ctx.plugin(SessionStore)
   await ctx.plugin(CommandRuntime)
   ctx.provide('tools', { definitions: () => [] } as never)
-  ctx.provide('subprocess', {} as never)
-  ctx.provide('llm', { registerAdapter: () => () => {} } as never)
+  ctx.provide('subprocess', {
+    resolveExecutable: async () => '/nonexistent/omp-catalog-spec',
+  } as never)
+  ctx.provide('llm', {
+    registerAdapter: () => Object.assign(() => {}, { replace: () => {} }),
+    listProviders: () => [],
+  } as never)
   ctx.provide('agents', { setFactory: () => {} } as never)
   ctx.provide('sessionProjections', {
     register: async () => ({ readerFor: () => undefined }),
