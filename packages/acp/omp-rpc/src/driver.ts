@@ -65,6 +65,7 @@ interface OmpMessageEnd {
 
 /** One image encoded for OMP's `images` prompt/steer field. */
 export interface OmpImageInput {
+  readonly type: 'image'
   readonly data: string
   readonly mimeType: string
 }

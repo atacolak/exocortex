@@ -12,8 +12,9 @@ import SessionStore, { Session, SessionId } from '@deepseek-ai/dsh-session'
 import type { SubprocessHandle, SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { OmpBindings } from '../src/bindings.ts'
-import type { OmpAgentDriver } from '../src/driver.ts'
+import { OmpAgentDriver, type OmpImageInput, type OmpImageRef } from '../src/driver.ts'
 import { ompSocketPath } from '../src/socket.ts'
+import type { OmpRpcCommand, OmpRpcFrame } from '../src/types.ts'
 import {
   OmpBridge,
   ompLaunchArgv,
@@ -375,11 +376,115 @@ describe('OmpBridge image resolution', () => {
     const bridge = new OmpBridge({ ctx: bridgeCtx, subprocess, executable: 'omp', detachedDaemon: false })
 
     const readImages = (bridge as unknown as {
-      readImages(refs: readonly unknown[]): Promise<readonly { data: string; mimeType: string }[]>
+      readImages(refs: readonly unknown[]): Promise<readonly { type: string; data: string; mimeType: string }[]>
     }).readImages.bind(bridge)
     const images = await readImages([{ mediaType: 'image/png' }])
 
-    expect(images).toEqual([{ data: Buffer.from([1, 2, 3]).toString('base64'), mimeType: 'image/png' }])
+    expect(images).toEqual([
+      { type: 'image', data: Buffer.from([1, 2, 3]).toString('base64'), mimeType: 'image/png' },
+    ])
+  })
+
+  class ImageCommandClient {
+    readonly commands: Array<Record<string, unknown>> = []
+    private readonly listeners = new Set<(frame: OmpRpcFrame) => void>()
+    private readonly pending: Array<(value: unknown) => void> = []
+
+    request(command: OmpRpcCommand): Promise<unknown> {
+      this.commands.push(command as unknown as Record<string, unknown>)
+      const { promise, resolve } = Promise.withResolvers<unknown>()
+      this.pending.push(resolve)
+      return promise
+    }
+
+    onFrame(listener: (frame: OmpRpcFrame) => void): () => void {
+      this.listeners.add(listener)
+      return () => { this.listeners.delete(listener) }
+    }
+
+    settle(): void {
+      const next = this.pending.shift()
+      if (next === undefined) throw new Error('no pending OMP command')
+      next({})
+    }
+  }
+
+  const imageTurn = (id: string, text: string): GenerateOptions['messages'][number] => ({
+    role: 'user',
+    content: [
+      { type: 'text', text },
+      {
+        type: 'image',
+        attachment: {
+          attachmentId: 'img-1' as never, mediaType: 'image/png' as const, bytes: 3, width: 1, height: 1,
+        },
+      },
+    ],
+    id: id as never,
+    source: { kind: 'user' },
+  })
+
+  const completeImage = (): OmpImageInput => ({
+    type: 'image', data: Buffer.from([1, 2, 3]).toString('base64'), mimeType: 'image/png',
+  })
+
+  async function imageBridge(): Promise<(refs: readonly OmpImageRef[]) => Promise<readonly OmpImageInput[]>> {
+    const ctx = new Context()
+    onTestFinished(() => ctx.fiber.dispose())
+    const readImage = async (): Promise<{ data: Uint8Array }> => ({ data: new Uint8Array([1, 2, 3]) })
+    await ctx.plugin({
+      name: 'test-attachments',
+      apply: (inner: Context) => { inner.provide('attachments', { readImage } as never) },
+    })
+    const { subprocess } = fakeOmp(() => ({}))
+    ctx.provide('subprocess', subprocess as never)
+    let bridgeCtx!: Context
+    await ctx.plugin(Object.assign((inner: Context) => { bridgeCtx = inner }, { inject: ['subprocess'] }))
+    const bridge = new OmpBridge({ ctx: bridgeCtx, subprocess, executable: 'omp', detachedDaemon: false })
+    return (bridge as unknown as {
+      readImages(refs: readonly OmpImageRef[]): Promise<readonly OmpImageInput[]>
+    }).readImages.bind(bridge)
+  }
+
+  it('sends a complete image element on the idle prompt command', async () => {
+    const client = new ImageCommandClient()
+    const driver = new OmpAgentDriver(client, { resolveImages: await imageBridge() })
+    const consuming = (async () => {
+      for await (const chunk of driver.stream(
+        { provider: 'omp', model: 'omp', messages: [imageTurn('u1', 'look at this')] },
+        new AbortController().signal,
+      )) void chunk
+    })()
+    await tick()
+    client.settle()
+    driver.close()
+    await consuming
+
+    const prompt = client.commands.find(command => command.type === 'prompt')
+    expect(prompt?.images).toEqual([completeImage()])
+  })
+
+  it('sends a complete image element on the busy steer command', async () => {
+    const client = new ImageCommandClient()
+    const driver = new OmpAgentDriver(client, { resolveImages: await imageBridge() })
+    const consuming = (async () => {
+      for await (const chunk of driver.stream(
+        { provider: 'omp', model: 'omp', messages: [imageTurn('u1', 'first')] },
+        new AbortController().signal,
+      )) void chunk
+    })()
+    await tick()
+    client.settle()
+
+    const steering = driver.steerImmediate([imageTurn('u2', 'second')])
+    await tick()
+    client.settle()
+    await steering
+    driver.close()
+    await consuming
+
+    const steer = client.commands.find(command => command.type === 'steer')
+    expect(steer?.images).toEqual([completeImage()])
   })
 })
 
