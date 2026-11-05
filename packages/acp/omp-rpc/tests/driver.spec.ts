@@ -231,6 +231,45 @@ describe('pureUserTurns', () => {
 })
 
 describe('OmpAgentDriver', () => {
+  it('sends a complete image element on the idle prompt command', async () => {
+    const client = new FakeClient()
+    const driver = new OmpAgentDriver(client, { resolveImages: resolveImage })
+    const consuming = (async () => {
+      for await (const chunk of driver.stream(request([imageUser('u1', 'look at this')]), new AbortController().signal)) {
+        void chunk
+      }
+    })()
+    await tick()
+    client.settle()
+    driver.close()
+    await consuming
+
+    const prompt = client.commands.find(command => command.type === 'prompt')
+    expect(prompt?.images).toEqual([{ type: 'image', data: 'AAAA', mimeType: 'image/png' }])
+  })
+
+  it('sends a complete image element on the busy steer command', async () => {
+    const client = new FakeClient()
+    const driver = new OmpAgentDriver(client, { resolveImages: resolveImage })
+    const consuming = (async () => {
+      for await (const chunk of driver.stream(request([imageUser('u1', 'first')]), new AbortController().signal)) {
+        void chunk
+      }
+    })()
+    await tick()
+    client.settle()
+
+    const steering = driver.steerImmediate([imageUser('u2', 'second')])
+    await tick()
+    client.settle()
+    await steering
+    driver.close()
+    await consuming
+
+    const steer = client.commands.find(command => command.type === 'steer')
+    expect(steer?.images).toEqual([{ type: 'image', data: 'AAAA', mimeType: 'image/png' }])
+  })
+
   it('replays the history once and then sends only new messages', async () => {
     const client = new FakeClient()
     const driver = new OmpAgentDriver(client)
