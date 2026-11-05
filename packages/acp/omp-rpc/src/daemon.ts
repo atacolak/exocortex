@@ -1,6 +1,5 @@
 import { spawn } from 'node:child_process'
-import { unlink } from 'node:fs/promises'
-import { readFile } from 'node:fs/promises'
+import { readFile, stat, unlink } from 'node:fs/promises'
 
 /** Idle lifetime a detached keeper grants OMP before it ends the request stream. */
 export const DEFAULT_OMP_DAEMON_IDLE_TIMEOUT_MS = 60 * 60_000
@@ -218,30 +217,9 @@ export function launchOmpDaemon(spec: OmpDaemonLaunchSpec): OmpDaemonLaunch {
   const [executable, ...args] = spec.argv
   if (executable === undefined) throw new Error('OMP daemon launch needs an executable')
   const publicationTimeoutMs = spec.publicationTimeoutMs ?? DEFAULT_OMP_DAEMON_PUBLICATION_TIMEOUT_MS
-  const keeper = spawn(
-    process.execPath,
-    [
-      '--input-type=module',
-      '-e',
-      KEEPER_SOURCE,
-      JSON.stringify({
-        argv: [executable, ...args],
-        cwd: spec.cwd,
-        env: spec.env ?? {},
-        publicationDir: spec.publicationDir,
-        runDirectory: spec.runDirectory,
-        handshakePath: spec.handshakePath,
-        idleTimeoutMs: spec.idleTimeoutMs ?? DEFAULT_OMP_DAEMON_IDLE_TIMEOUT_MS,
-        publicationTimeoutMs,
-      }),
-    ],
-    { detached: true, stdio: 'ignore', cwd: spec.cwd },
-  )
-  keeper.unref()
-
   const { promise: published, resolve, reject } = Promise.withResolvers<OmpDaemonSession>()
   let timer: NodeJS.Timeout | undefined
-  const deadline = Date.now() + publicationTimeoutMs + 5_000
+  let deadline = 0
   const poll = (): void => {
     timer = undefined
     readFile(spec.handshakePath, 'utf8').then(
@@ -262,7 +240,50 @@ export function launchOmpDaemon(spec: OmpDaemonLaunchSpec): OmpDaemonLaunch {
       },
     )
   }
-  poll()
+  const fail = (error: Error): void => {
+    clearTimeout(timer)
+    reject(error)
+  }
+  const startKeeper = (): void => {
+    const keeper = spawn(
+      process.execPath,
+      [
+        '--input-type=module',
+        '-e',
+        KEEPER_SOURCE,
+        JSON.stringify({
+          argv: [executable, ...args],
+          cwd: spec.cwd,
+          env: spec.env ?? {},
+          publicationDir: spec.publicationDir,
+          runDirectory: spec.runDirectory,
+          handshakePath: spec.handshakePath,
+          idleTimeoutMs: spec.idleTimeoutMs ?? DEFAULT_OMP_DAEMON_IDLE_TIMEOUT_MS,
+          publicationTimeoutMs,
+        }),
+      ],
+      { detached: true, stdio: 'ignore', cwd: spec.cwd },
+    )
+    keeper.on('error', (error: Error) => { fail(new Error('cannot start OMP: ' + String(error))) })
+    keeper.unref()
+    deadline = Date.now() + publicationTimeoutMs + 5_000
+    poll()
+  }
+  void stat(spec.cwd).then(
+    (info) => {
+      if (!info.isDirectory()) {
+        fail(new Error(`workspace path ${spec.cwd} is not a directory; relocate this session to an existing directory or forget it`))
+        return
+      }
+      startKeeper()
+    },
+    (error: unknown) => {
+      const code = (error as NodeJS.ErrnoException).code
+      fail(code === 'ENOENT' || code === 'ENOTDIR'
+        ? new Error(`workspace directory ${spec.cwd} no longer exists; relocate this session to an existing directory or forget it`)
+        : new Error(`cannot read workspace directory ${spec.cwd}: ${String(error)}`))
+    },
+  ).catch(fail)
   return {
     published,
     async dispose(): Promise<void> {
