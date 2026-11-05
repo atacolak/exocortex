@@ -395,15 +395,15 @@ export class SessionLogRelationshipError extends Error {
 }
 
 /**
- * Find the longest decoded prefix that satisfies released relationships.
+ * Find the largest decoded-event count that satisfies released relationships.
  * Relationship checks only look backward, so validity is monotone over
  * prefixes and a binary search finds the cut in logarithmic validation passes.
- * A trailing `compaction/start` is dropped because an unterminated compaction
+ * A trailing `compaction/start` is excluded because an unterminated compaction
  * poisons every later turn event a recreated Session would append.
  * @param artifact - decoded artifact whose full event list was refused.
- * @returns the readable prefix, empty when even the first event is refused.
+ * @returns the readable prefix length, zero when even the first event is refused.
  */
-function salvageableEvents(artifact: SessionFormatArtifact): readonly SessionEvent[] {
+function salvageableEventCount(artifact: SessionFormatArtifact): number {
   const events = artifact.events
   let low = 0
   let high = events.length - 1
@@ -421,9 +421,8 @@ function salvageableEvents(artifact: SessionFormatArtifact): readonly SessionEve
       high = middle - 1
     }
   }
-  const salvaged = best < 0 ? [] : events.slice(0, best + 1)
-  while (salvaged.at(-1)?.type === 'compaction/start') salvaged.pop()
-  return salvaged as unknown as readonly SessionEvent[]
+  while (best >= 0 && events[best]?.type === 'compaction/start') best -= 1
+  return best + 1
 }
 
 /**
@@ -514,19 +513,20 @@ export class SessionLogScanner {
   finish(): SessionLogScan {
     this.finished = true
     const artifact = this.restore.finish()
+    const events = artifact.events as unknown as SessionEvent[]
     try {
       assertReleasedV4Relationships(artifact, KNOWN_SESSION_EVENT_TYPES)
     } catch (error: unknown) {
       throw new SessionLogRelationshipError(
         error instanceof Error ? error.message : String(error),
-        salvageableEvents(artifact),
+        events.slice(0, salvageableEventCount(artifact)),
         { cause: error },
       )
     }
     return {
       meta: this.meta,
       inheritedEventCount: SessionLogOffset(artifact.inheritedEventCount),
-      events: artifact.events as unknown as SessionEvent[],
+      events,
       committedBytes: this.committedBytes,
     }
   }
