@@ -10,7 +10,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { rename, stat } from 'node:fs/promises'
+import { rename, rm, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -19,7 +19,7 @@ import type {} from '@deepseek-ai/dsh-client-connection'
 import type {} from '@deepseek-ai/dsh-commands'
 import { modelSelectionProjectionDefinition, type Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
-import { Session, SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { Session, SessionId, type SessionEvent, type SessionHeader } from '@deepseek-ai/dsh-session'
 import { inboxProjectionDefinition, OmpAgentFactory, type OmpAgentHost, type OmpRecoveredSession } from './agent-factory.ts'
 import { OMP_LLM_PROVIDER, registerOmpLlmProvider } from './llm-catalog.ts'
 import type {} from '@deepseek-ai/dsh-session-query'
@@ -62,6 +62,7 @@ import {
   ompProfileOfPreset,
 } from './presets.ts'
 import {
+  hydrateOmpSession,
   OmpResumeError,
   probeOmpSessionLease,
   readOmpTranscriptHeader,
@@ -219,27 +220,35 @@ function salvagedPrefixOf(failure: Error): readonly SessionEvent[] {
 }
 
 /**
- * Set aside a persisted artifact that fails session-format validation.
+ * One artifact set aside for rebuild, with the paths needed to restore it.
+ */
+interface QuarantinedArtifact {
+  readonly header: SessionHeader
+  readonly salvagedEvents: readonly SessionEvent[]
+  readonly path: string
+  readonly quarantinedPath: string
+}
+
+/**
+ * Rename one refused artifact and clear the cursor that described it.
  *
  * The artifact is a derived mirror of an OMP transcript that still exists, so
- * it is renamed (never deleted) to keep the evidence while the caller recreates
- * the same session identity and rehydrates that identity from the transcript.
- * A backend that admitted a readable prefix before its corrupt tail hands that
- * prefix over on the failure; it carries committed events the transcript never
- * received, so it is returned with the header instead of being dropped with the
- * quarantined file.
+ * it is renamed (never deleted) to keep the evidence. A backend that admitted
+ * a readable prefix before its corrupt tail hands that prefix over on the
+ * failure; it carries committed events the transcript never received, so it is
+ * returned with the header instead of being dropped with the quarantined file.
  * @param ctx - context carrying session persistence and the logger.
  * @param id - persisted session whose open failed validation.
  * @param failure - format error that refused the artifact.
  * @param bindings - binding store whose hydration cursor described the refused artifact.
- * @returns the header to recreate the session from plus any salvaged prefix, or undefined to leave it in place.
+ * @returns the quarantined paths and salvaged prefix, or undefined to leave the artifact in place.
  */
-export async function quarantineCorruptSession(
+async function quarantineArtifact(
   ctx: Context,
   id: SessionId,
   failure: Error,
   bindings?: OmpBindings,
-): Promise<OmpRecoveredSession | undefined> {
+): Promise<QuarantinedArtifact | undefined> {
   try {
     const snapshot = await ctx.get('sessionPersistence')?.stat(id)
     const path = snapshot?.location?.path
@@ -252,12 +261,12 @@ export async function quarantineCorruptSession(
       ctx.logger.warn(`[omp-rpc] session "${id}" failed session-format validation and is fork-seeded; keeping ${path} untouched: ${failure.message}`)
       return undefined
     }
-    const quarantined = `${path}.corrupt-${new Date().toISOString().replaceAll(':', '-').replaceAll('.', '-')}`
-    await rename(path, quarantined)
+    const quarantinedPath = `${path}.corrupt-${new Date().toISOString().replaceAll(':', '-').replaceAll('.', '-')}`
+    await rename(path, quarantinedPath)
     await bindings?.resetCursor(id)
     const salvagedEvents = salvagedPrefixOf(failure)
-    ctx.logger.warn(`[omp-rpc] session "${id}" failed session-format validation; quarantined ${path} as ${quarantined} and rehydrating from its bound OMP transcript with ${salvagedEvents.length} salvaged event(s): ${failure.message}`)
-    return { ...snapshot.header, ...salvagedEvents.length === 0 ? {} : { salvagedEvents } }
+    ctx.logger.warn(`[omp-rpc] session "${id}" failed session-format validation; quarantined ${path} as ${quarantinedPath} and rehydrating from its bound OMP transcript with ${salvagedEvents.length} salvaged event(s): ${failure.message}`)
+    return { header: snapshot.header, salvagedEvents, path, quarantinedPath }
   } catch (error: unknown) {
     ctx.logger.warn(`[omp-rpc] cannot quarantine the unusable session artifact for "${id}": ${error instanceof Error ? error.message : String(error)}`)
     return undefined
@@ -265,11 +274,39 @@ export async function quarantineCorruptSession(
 }
 
 /**
+ * Set aside a persisted artifact that fails session-format validation.
+ * @param ctx - context carrying session persistence and the logger.
+ * @param id - persisted session whose open failed validation.
+ * @param failure - format error that refused the artifact.
+ * @param bindings - binding store whose hydration cursor described the refused artifact.
+ * @returns the header to recreate the session from plus any salvaged prefix, or undefined to leave it in place.
+ */
+export async function quarantineCorruptSession(
+  ctx: Context,
+  id: SessionId,
+  failure: Error,
+  bindings?: OmpBindings,
+): Promise<OmpRecoveredSession | undefined> {
+  const quarantined = await quarantineArtifact(ctx, id, failure, bindings)
+  if (quarantined === undefined) return undefined
+  return {
+    ...quarantined.header,
+    ...quarantined.salvagedEvents.length === 0 ? {} : { salvagedEvents: quarantined.salvagedEvents },
+  }
+}
+
+/**
  * Rebuild one corrupt mirror from its bound OMP transcript so a viewer read can retry.
  *
- * The artifact is a derived mirror of a transcript that still exists. Recovery
- * runs only when the session is bound to an existing transcript; an unbound or
- * fork-seeded artifact stays in place so its evidence is never discarded.
+ * The replacement is hydrated and checked in memory before the refused artifact
+ * is renamed, so an unreadable transcript, a header that names another OMP
+ * session, or a transcript that yields no turns leaves the artifact in place.
+ * The viewer rebuild replays the transcript from its first turn into a session
+ * with no salvaged seed: the cursor that described the refused artifact is
+ * stale by definition, and a salvaged prefix would either be renumbered under
+ * the transcript or silently truncate its tail. Salvaged events stay in the
+ * quarantined artifact as evidence. If writing the replacement fails after the
+ * rename, the quarantined artifact, its path, and the previous cursor are restored.
  * @param ctx - context carrying persistence, sessions, and the logger.
  * @param bindings - binding store holding the transcript path and hydration cursor.
  * @param id - persisted session whose open failed validation.
@@ -284,29 +321,50 @@ export async function recoverBoundMirror(
 ): Promise<boolean> {
   const persistence = ctx.get('sessionPersistence')
   if (persistence === undefined) return false
+  const snapshot = await persistence.stat(id).catch(() => undefined)
+  if (snapshot === undefined || snapshot.header.isSeeded || snapshot.location?.path === undefined) return false
+  const path = snapshot.location.path
   const binding = await bindings.get(id)
   if (binding === undefined || !(await existingFile(binding.path))) return false
-  const recovered = await quarantineCorruptSession(ctx, id, failure, bindings)
-  if (recovered === undefined) return false
-  const { salvagedEvents, ...header } = recovered
-  const seed = salvagedEvents ?? []
+  const transcriptHeader = await readOmpTranscriptHeader(binding.path).catch(() => undefined)
+  if (transcriptHeader === undefined || transcriptHeader.id !== binding.ompSessionId) {
+    ctx.logger.warn(`[omp-rpc] session "${id}" is bound to ${binding.path}, but its transcript header does not match "${binding.ompSessionId}"; keeping ${path} untouched`)
+    return false
+  }
   try {
-    const session = Session.create(
-      id,
-      seed.length === 0 ? undefined : [...seed],
-      header,
-    )
-    await hydrateOmpBinding({ bindings, session, binding })
-    const handle = await persistence.create(header)
-    try {
-      await handle.append(session.snapshotEvents())
-    } finally {
-      await handle.close()
+    const probe = Session.create(id, undefined, snapshot.header)
+    const hydration = await hydrateOmpSession(probe, binding.path, Number.POSITIVE_INFINITY, { hydratedTurns: 0 })
+    if (hydration.turns === 0) {
+      ctx.logger.warn(`[omp-rpc] session "${id}" is bound to ${binding.path}, but the transcript yielded no turns; keeping ${path} untouched`)
+      return false
     }
+  } catch (error: unknown) {
+    ctx.logger.warn(`[omp-rpc] cannot preflight the transcript rebuild for session "${id}"; keeping ${path} untouched: ${error instanceof Error ? error.message : String(error)}`)
+    return false
+  }
+  const quarantined = await quarantineArtifact(ctx, id, failure, bindings)
+  if (quarantined === undefined) return false
+  let handle: Awaited<ReturnType<typeof persistence.create>> | undefined
+  try {
+    const session = Session.create(id, undefined, quarantined.header)
+    await hydrateOmpBinding({
+      bindings,
+      session,
+      binding,
+      cursor: { hydratedTurns: 0 },
+    })
+    handle = await persistence.create(quarantined.header)
+    await handle.append(session.snapshotEvents())
+    await handle.close()
+    handle = undefined
     ctx.logger.warn(`[omp-rpc] session "${id}" rehydrated from its bound OMP transcript into a replacement artifact`)
     return true
   } catch (error: unknown) {
-    ctx.logger.warn(`[omp-rpc] cannot rehydrate the replacement for session "${id}": ${error instanceof Error ? error.message : String(error)}`)
+    if (handle !== undefined) await handle.close().catch(() => {})
+    await rm(path, { force: true }).catch(() => {})
+    await rename(quarantined.quarantinedPath, quarantined.path).catch(() => {})
+    await bindings.set(id, { ...binding, updatedAt: new Date().toISOString() }).catch(() => {})
+    ctx.logger.warn(`[omp-rpc] cannot rehydrate the replacement for session "${id}"; restored ${path}: ${error instanceof Error ? error.message : String(error)}`)
     return false
   }
 }

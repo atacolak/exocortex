@@ -19,6 +19,7 @@ import SessionStore, {
   type SessionHeader,
 } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
+import { SessionPersistenceCorruptionError } from '@deepseek-ai/dsh-session-persistence'
 import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { scopeOf } from '@deepseek-ai/dsh-scope'
 import { existsSync, readFileSync } from 'node:fs'
@@ -822,6 +823,116 @@ describe('OmpAgentFactory recovers the measured corrupt mirror shape', () => {
     const siblings = await readdir(dirname(fixture.path))
     expect(siblings.filter(name => name.includes('.corrupt-'))).toEqual([])
     expect(await readFile(fixture.path)).toEqual(fixture.original)
+  })
+
+  it('replays the whole transcript when a salvaged prefix precedes a stale cursor', async () => {
+    const h = await harness()
+    const store = new OmpBindings(join(h.cwd, 'bindings-salvaged.json'))
+    const turns = 6
+    const transcriptPath = await measuredTranscript(h, turns)
+    const id = SessionId('session-salvaged-prefix')
+    const fixture = await measuredCorruptMirror(h, id)
+    await store.set(id, {
+      ompSessionId: MEASURED_OMP_SESSION,
+      path: transcriptPath,
+      cwd: dirname(h.cwd),
+      hydratedTurns: 488,
+      hydratedLeafEntryId: (turns * 2).toString(16).padStart(8, '0'),
+      hydratedByteOffset: (await stat(transcriptPath)).size,
+      updatedAt: new Date(0).toISOString(),
+    })
+    const donor = Session.create(SessionId('salvaged-donor'), [], {
+      version: SESSION_FORMAT_VERSION,
+      id: SessionId('salvaged-donor'),
+      createdAt: 1,
+      cwd: h.cwd,
+      isSeeded: false,
+      delegationDepth: 0,
+      agentPreset: 'omp:argon',
+    })
+    for (let turn = 1; turn <= 3; turn += 1) {
+      donor.append('turn/start', { turn })
+      donor.append('user/message', userInput(`salvaged prefix ${String(turn)}`), { surfaceOp: 'append' })
+      donor.append('turn/end', { turn, reason: { kind: 'completed' } })
+    }
+    const salvaged = donor.snapshotEvents()
+    const failure = new SessionPersistenceCorruptionError('stored prefix failed validation', {
+      cause: new Error('SessionLogRelationshipError: turn/start does not open the expected turn'),
+      salvagedEvents: salvaged,
+    })
+
+    expect(await recoverBoundMirror(h.ctx, store, id, failure)).toBe(true)
+
+    const events = await coldRead(h.ctx, id)
+    const starts = events.flatMap(event => event.type === 'turn/start' ? [event.data.turn] : [])
+    expect(starts).toEqual([1, 2, 3, 4, 5, 6])
+    expect(conversationTexts(events)).toEqual(
+      Array.from({ length: turns }, (_, index) => `measured turn ${String(index + 1)}`),
+    )
+    expect((await store.get(id))?.hydratedTurns).toBe(turns)
+    const quarantined = (await readdir(dirname(fixture.path))).filter(name => name.startsWith(`${basename(fixture.path)}.corrupt-`))
+    expect(quarantined).toHaveLength(1)
+  })
+
+  it('refuses recovery when the transcript header names another session and keeps the artifact', async () => {
+    const h = await harness()
+    const store = new OmpBindings(join(h.cwd, 'bindings-mismatch.json'))
+    const transcriptPath = join(dirname(h.cwd), 'mismatched-transcript.jsonl')
+    await writeFile(transcriptPath, `${JSON.stringify({ type: 'session', version: 3, id: 'another-omp-session', cwd: dirname(h.cwd) })}\n`)
+    const id = SessionId('session-transcript-mismatch')
+    const fixture = await measuredCorruptMirror(h, id)
+    const cursor = {
+      ompSessionId: MEASURED_OMP_SESSION,
+      path: transcriptPath,
+      cwd: dirname(h.cwd),
+      hydratedTurns: 488,
+      hydratedLeafEntryId: '00000004',
+      hydratedByteOffset: 128,
+      updatedAt: new Date(0).toISOString(),
+    } as const
+    await store.set(id, cursor)
+    const corrupt = await h.ctx.sessionPersistence.open(id, 'read')
+      .then(() => undefined, (error: unknown) => error)
+
+    expect(await recoverBoundMirror(h.ctx, store, id, corrupt as Error)).toBe(false)
+
+    expect(await readFile(fixture.path)).toEqual(fixture.original)
+    const siblings = await readdir(dirname(fixture.path))
+    expect(siblings.filter(name => name.includes('.corrupt-'))).toEqual([])
+    expect(await store.get(id)).toMatchObject({ hydratedTurns: 488, hydratedLeafEntryId: '00000004' })
+  })
+
+  it('restores the quarantined artifact when writing the replacement fails', async () => {
+    const h = await harness()
+    const store = new OmpBindings(join(h.cwd, 'bindings-rollback.json'))
+    const turns = 4
+    const transcriptPath = await measuredTranscript(h, turns)
+    const id = SessionId('session-viewer-rollback')
+    const fixture = await measuredCorruptMirror(h, id)
+    await store.set(id, {
+      ompSessionId: MEASURED_OMP_SESSION,
+      path: transcriptPath,
+      cwd: dirname(h.cwd),
+      hydratedTurns: 488,
+      hydratedLeafEntryId: (turns * 2).toString(16).padStart(8, '0'),
+      hydratedByteOffset: (await stat(transcriptPath)).size,
+      updatedAt: new Date(0).toISOString(),
+    })
+    const persistence = h.ctx.sessionPersistence
+    const create = persistence.create.bind(persistence)
+    persistence.create = async () => {
+      throw new Error('replacement write refused')
+    }
+    const corrupt = await persistence.open(id, 'read')
+      .then(() => undefined, (error: unknown) => error)
+
+    expect(await recoverBoundMirror(h.ctx, store, id, corrupt as Error)).toBe(false)
+    persistence.create = create
+
+    expect(await readFile(fixture.path)).toEqual(fixture.original)
+    const siblings = await readdir(dirname(fixture.path))
+    expect(siblings.filter(name => name.includes('.corrupt-'))).toEqual([])
+    expect((await store.get(id))?.hydratedTurns).toBe(488)
   })
 })
 
