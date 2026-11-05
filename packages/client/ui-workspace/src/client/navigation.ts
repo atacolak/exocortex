@@ -291,7 +291,8 @@ class UiWorkspaceService extends Service implements UiWorkspace {
   }
 
   openSession(target: SessionTarget): void {
-    this.replaceMain(target, this.lifetime.signal, 'reveal')
+    const navigation = AbortSignal.any([this.ctx.layout.beginNavigation(), this.lifetime.signal])
+    this.replaceMain(target, navigation, 'reveal')
   }
 
   openWorkspace(
