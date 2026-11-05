@@ -49,11 +49,12 @@ import {
   interruptedTurnClosers,
   type Session,
   type SessionEventMap,
+  type SessionHeader,
   type SessionId,
   type SessionSeq,
   type TurnEndReason,
 } from '@deepseek-ai/dsh-session'
-import type { SessionHandle } from '@deepseek-ai/dsh-session-persistence'
+import type { SessionHandle, SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import type { ProjectionDefinition } from '@deepseek-ai/dsh-session-projection'
 import { z } from 'zod'
 import type { OmpBridge, OmpExternalWake } from './bridge.ts'
@@ -648,6 +649,21 @@ export interface OmpAgentFactoryOptions {
    * OMP wrote while the harness was detached.
    */
   readonly hydrate?: (agent: Agent) => Promise<void>
+  /**
+   * Set aside a persisted artifact that fails session-format validation and
+   * return the header to recreate. The bridge quarantines the unusable file and
+   * rehydrates the session from its bound OMP transcript, because the artifact
+   * is a derived mirror of a transcript that still exists.
+   * @param id - persisted session whose open failed validation.
+   * @param failure - format error that refused the artifact.
+   * @returns header to recreate the session from, or undefined to leave it untouched.
+   */
+  readonly recover?: (id: SessionId, failure: Error) => Promise<SessionHeader | undefined>
+}
+
+/** Session-format failures cross into this package without a direct dependency. */
+function isSessionFormatError(error: unknown): error is Error {
+  return error instanceof Error && error.name === 'SessionFormatError'
 }
 
 /** Agent factory registered through `ctx.agents.setFactory`. */
@@ -692,6 +708,18 @@ export class OmpAgentFactory implements Factory {
     const persistence = this.ctx.get("sessionPersistence")
     if (persistence === undefined) throw new Error("cannot resume: session persistence is not configured")
     const id = options.resumeSessionId
+    try {
+      return await this.resumeStored(persistence, ownerCtx, options)
+    } catch (error: unknown) {
+      if (!isSessionFormatError(error) || this.options.recover === undefined) throw error
+      const header = await this.options.recover(id, error)
+      if (header === undefined) throw error
+      return await this.recreate(persistence, ownerCtx, options, header)
+    }
+  }
+
+  private async resumeStored(persistence: SessionPersistence, ownerCtx: Context, options: ResumeAgentOptions): Promise<AgentHandle> {
+    const id = options.resumeSessionId
     const handle = await persistence.open(id, 'write', { ...options.signal === undefined ? {} : { signal: options.signal } })
     try {
       const coldRead = await handle.read(0, undefined, { ...options.signal === undefined ? {} : { signal: options.signal } })
@@ -707,6 +735,30 @@ export class OmpAgentFactory implements Factory {
       return await this.initialize(ownerCtx, {
         session,
         stored,
+        agentOptions: options.agentOptions ?? {},
+        ...options.setup === undefined ? {} : { setup: options.setup },
+        ...options.signal === undefined ? {} : { signal: options.signal },
+        source: 'resume',
+        ...options.parentAgent === undefined ? {} : { parentAgent: options.parentAgent },
+      })
+    } catch (error: unknown) {
+      await handle.close().catch(() => {})
+      throw error
+    }
+  }
+
+  private async recreate(
+    persistence: SessionPersistence,
+    ownerCtx: Context,
+    options: ResumeAgentOptions,
+    header: SessionHeader,
+  ): Promise<AgentHandle> {
+    const handle = await persistence.create(header, { ...options.signal === undefined ? {} : { signal: options.signal } })
+    try {
+      const session = this.ctx.sessions.prepare(options.resumeSessionId, { meta: structuredClone(header) })
+      return await this.initialize(ownerCtx, {
+        session,
+        stored: { handle, storedCount: 0 },
         agentOptions: options.agentOptions ?? {},
         ...options.setup === undefined ? {} : { setup: options.setup },
         ...options.signal === undefined ? {} : { signal: options.signal },

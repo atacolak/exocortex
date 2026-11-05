@@ -10,7 +10,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { stat } from 'node:fs/promises'
+import { rename, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -19,7 +19,7 @@ import type {} from '@deepseek-ai/dsh-client-connection'
 import type {} from '@deepseek-ai/dsh-commands'
 import { modelSelectionProjectionDefinition, type Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { SessionId, type SessionHeader } from '@deepseek-ai/dsh-session'
 import { inboxProjectionDefinition, OmpAgentFactory, type OmpAgentHost } from './agent-factory.ts'
 import { OMP_LLM_PROVIDER, registerOmpLlmProvider } from './llm-catalog.ts'
 import type {} from '@deepseek-ai/dsh-workspace'
@@ -327,14 +327,13 @@ export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
     readonly agent: Agent
     readonly binding: OmpBinding
     readonly cursor?: OmpBinding
-    readonly includeNewestTurn: boolean
   }) => {
     const hydration = await hydrateOmpBinding({
       bindings,
       session: request.agent.session,
       binding: request.binding,
       ...request.cursor === undefined ? {} : { cursor: request.cursor },
-      includeNewestTurn: request.includeNewestTurn,
+      includeNewestTurn: true,
     })
     bridge.seedDelivered(request.agent.id)
     return hydration
@@ -472,7 +471,6 @@ export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
             updatedAt: new Date().toISOString(),
           },
           ...binding === undefined ? {} : { cursor: binding },
-          includeNewestTurn: !(attachment?.session.streaming ?? served?.streaming ?? false),
         })
         return hydration.appended
       },
@@ -545,11 +543,7 @@ export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
     }
     if (binding?.path !== undefined && await existingFile(binding.path)) {
       try {
-        await hydrateBoundTranscript({
-          agent,
-          binding,
-          includeNewestTurn: !attachment.session.streaming,
-        })
+        await hydrateBoundTranscript({ agent, binding })
       } catch (error: unknown) {
         warn(`cannot tail-sync OMP transcript for session "${agent.id}"`, error)
       }
@@ -661,14 +655,28 @@ export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
     const binding = await readBinding(agent.id)
     if (binding === undefined || !(await existingFile(binding.path))) return
     try {
-      const wake = (await wakeDecisionOf(binding.ompSessionId))?.plan
-      await hydrateBoundTranscript({
-        agent,
-        binding,
-        includeNewestTurn: wake?.kind !== 'attach',
-      })
+      await hydrateBoundTranscript({ agent, binding })
     } catch (error: unknown) {
       warn(`cannot tail-sync OMP transcript for reopened session "${agent.id}"`, error)
+    }
+  }
+
+  const quarantineCorruptSession = async (id: SessionId, failure: Error): Promise<SessionHeader | undefined> => {
+    try {
+      const snapshot = await ctx.get('sessionPersistence')?.stat(id)
+      const path = snapshot?.location?.path
+      if (snapshot === undefined || path === undefined) return undefined
+      if (snapshot.header.isSeeded) {
+        warn(`session "${id}" failed session-format validation and is fork-seeded; keeping ${path} untouched`, failure)
+        return undefined
+      }
+      const quarantined = `${path}.corrupt-${new Date().toISOString().replaceAll(':', '-').replaceAll('.', '-')}`
+      await rename(path, quarantined)
+      warn(`session "${id}" failed session-format validation; quarantined ${path} as ${quarantined} and rehydrating from its bound OMP transcript`, failure)
+      return snapshot.header
+    } catch (error: unknown) {
+      warn(`cannot quarantine the unusable session artifact for "${id}"`, error)
+      return undefined
     }
   }
 
@@ -679,6 +687,7 @@ export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
     ctx,
     host: agentHost,
     hydrate: hydrateBoundSession,
+    recover: quarantineCorruptSession,
   })), 'omp-rpc agent factory')
 
   const hosted = new Map<string, SessionId>()
@@ -758,7 +767,6 @@ export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
           agent,
           binding: source,
           ...bound === undefined ? {} : { cursor: bound.binding },
-          includeNewestTurn: !attachment.session.streaming,
         })
       } catch (error: unknown) {
         warn(`cannot hydrate adopted session "${agent.id}"`, error)

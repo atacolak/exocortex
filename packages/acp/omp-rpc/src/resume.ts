@@ -511,10 +511,10 @@ export function projectedCompactionIds(session: Session): Set<string> {
 }
 
 /** The turn currently open in one event log, when the log ends inside an unfinished turn. */
-function openTurnStart(eventLog: readonly SessionEvent[]): SessionEvent['seq'] | undefined {
-  let open: SessionEvent['seq'] | undefined
+function openTurnStart(eventLog: readonly SessionEvent[]): { readonly seq: SessionEvent['seq']; readonly turn: number } | undefined {
+  let open: { readonly seq: SessionEvent['seq']; readonly turn: number } | undefined
   for (const event of eventLog) {
-    if (event.type === 'turn/start') open = event.seq
+    if (event.type === 'turn/start') open = { seq: event.seq, turn: event.data.turn }
     else if (event.type === 'turn/end') open = undefined
   }
   return open
@@ -544,15 +544,18 @@ export function appendOmpCompactionBoundary(
   const compactionId = CompactionId(`omp-${boundary.entryId}`)
   if (projectedCompactionIds(session).has(compactionId)) return undefined
   const eventLog = session.snapshotEvents()
-  const surface = foldSurface(eventLog).nodes
+  const nodes = foldSurface(eventLog).nodes
+  const head = nodes.at(0)
+  const surface = head !== undefined && eventLog[head]?.type === 'system/message' ? nodes.slice(1) : nodes
   const open = openTurnStart(eventLog)
-  const settled = open === undefined ? surface : surface.filter(seq => seq < open)
+  const settled = open === undefined ? surface : surface.filter(seq => seq < open.seq)
   const shadowed = settled.length > 0 ? settled : surface
   const start = shadowed.at(0)
   const end = shadowed.at(-1)
   if (start === undefined || end === undefined) return undefined
+  const owner = open?.turn ?? null
   const command = sourceCommandId === undefined ? {} : { sourceCommandId }
-  const startEvent = session.append('compaction/start', { compactionId, turn: null, ...command }, timing)
+  const startEvent = session.append('compaction/start', { compactionId, turn: owner, ...command }, timing)
   const summaryEvent = session.append('compaction/summary', {
     compactionId,
     summary: [{ type: 'text', text: boundary.summary }],
@@ -573,7 +576,7 @@ export function appendOmpCompactionBoundary(
     sourceEventSeqs: [startEvent.seq, summaryEvent.seq, ...shadowed],
     ...timing,
   })
-  session.append('compaction/end', { compactionId, turn: null, ...command }, timing)
+  session.append('compaction/end', { compactionId, turn: owner, ...command }, timing)
   return compactionId
 }
 
@@ -988,6 +991,111 @@ export interface OmpHydrationOutcome {
   readonly hydratedByteOffset?: number
 }
 
+/** Content one session already carries from its live turn, used to absorb a re-read prefix. */
+interface LiveTurnDedupe {
+  readonly userTexts: Set<string>
+  readonly callIds: Set<string>
+  readonly resultIds: Set<string>
+  readonly assistantKeys: Map<string, number>
+}
+
+/**
+ * Collect what a session already projects, so a re-read of the turn OMP is
+ * still writing adds only the events the live socket has not delivered.
+ * Tool identities are global to the log because a resumed harness turn keeps
+ * the calls it already advertised; prompts and assistant bodies are bounded to
+ * the newest harness turn, where live projection lands.
+ * @param session - session a transcript is about to be hydrated into.
+ * @returns the content identities already present.
+ */
+function liveTurnDedupeOf(session: Session): LiveTurnDedupe {
+  const events = session.snapshotEvents()
+  let newestTurnStart = events.length
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    if (events[index]?.type === 'turn/start') {
+      newestTurnStart = index
+      break
+    }
+  }
+  const userTexts = new Set<string>()
+  const callIds = new Set<string>()
+  const resultIds = new Set<string>()
+  const assistantKeys = new Map<string, number>()
+  for (const [index, event] of events.entries()) {
+    switch (event.type) {
+      case 'tool/call':
+        callIds.add(event.data.callId)
+        break
+      case 'tool/result':
+        resultIds.add(event.data.message.toolCallId)
+        break
+      case 'user/message':
+        if (index >= newestTurnStart) {
+          userTexts.add(event.data.content.map(block => block.type === 'text' ? block.text : '').join('\n'))
+        }
+        break
+      case 'assistant/message': {
+        if (index < newestTurnStart) break
+        for (const block of event.data.message.content) {
+          if (block.type === 'tool-call') callIds.add(block.id)
+        }
+        const key = JSON.stringify(event.data.message.content.map(block =>
+          block.type === 'text' ? ['text', block.text] : [block.type, block.type === 'tool-call' ? block.id : '']))
+        assistantKeys.set(key, (assistantKeys.get(key) ?? 0) + 1)
+        break
+      }
+    }
+  }
+  return { userTexts, callIds, resultIds, assistantKeys }
+}
+
+/**
+ * Drop the events one live turn already projects and re-embed the remaining
+ * tool-call blocks of a re-read assistant message without the calls the
+ * session already advertised.
+ * @param events - one transcript turn's events, in log order.
+ * @param dedupe - content identities already present, consumed as they match.
+ * @returns the events that still need appending.
+ */
+function dedupeLiveTurn(events: readonly OmpHydrationEvent[], dedupe: LiveTurnDedupe): OmpHydrationEvent[] {
+  const kept: OmpHydrationEvent[] = []
+  for (const event of events) {
+    switch (event.type) {
+      case 'user/message':
+        if (!dedupe.userTexts.delete(event.data.content.map(block => block.type === 'text' ? block.text : '').join('\n'))) kept.push(event)
+        break
+      case 'assistant/message': {
+        const content = event.data.message.content.filter(block => block.type !== 'tool-call' || !dedupe.callIds.has(block.id))
+        if (content.length === 0) break
+        const key = JSON.stringify(content.map(block =>
+          block.type === 'text' ? ['text', block.text] : [block.type, block.type === 'tool-call' ? block.id : '']))
+        const remaining = dedupe.assistantKeys.get(key) ?? 0
+        if (remaining > 0) {
+          dedupe.assistantKeys.set(key, remaining - 1)
+          break
+        }
+        kept.push({
+          ...event,
+          data: {
+            ...event.data,
+            message: createAssistantMessage({ content, source: event.data.message.source }),
+          },
+        })
+        break
+      }
+      case 'tool/call':
+        if (!dedupe.callIds.has(event.data.callId)) kept.push(event)
+        break
+      case 'tool/result':
+        if (!dedupe.resultIds.has(event.data.message.toolCallId)) kept.push(event)
+        break
+      default:
+        kept.push(event)
+    }
+  }
+  return kept
+}
+
 /**
  * Append a transcript's recorded title and surface events to a harness
  * session, filling only the turns the session does not already project.
@@ -1099,8 +1207,13 @@ export async function hydrateOmpSession(
   for (const boundary of matchedTurn?.boundariesAfter ?? []) emitBoundary(boundary)
   for (const boundary of admitted[0]?.boundariesBefore ?? []) emitBoundary(boundary)
   let appendedEvents = 0
+  const newestRecorded = turns.at(-1)
+  const liveTurn = selected.length === 0 ? undefined : liveTurnDedupeOf(session)
   for (const [index, events] of selected.entries()) {
-    for (const event of events) {
+    const batch = liveTurn === undefined || admitted[index] !== newestRecorded
+      ? events
+      : dedupeLiveTurn(events, liveTurn)
+    for (const event of batch) {
       appendedEvents += 1
       switch (event.type) {
         case 'turn/start':
