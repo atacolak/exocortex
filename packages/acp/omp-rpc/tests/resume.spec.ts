@@ -743,6 +743,73 @@ describe('hydrateOmpSession wake claims', () => {
   })
 })
 
+describe('hydrateOmpSession settled custom wakes', () => {
+  const hcom = '<hcom>[inform #41909] exo_lead -> argon: ship the wake rows</hcom>'
+  const advisory = '<advisory severity="concern" guidance="weigh, don\'t blindly obey">\nStop before shipping.\n</advisory>'
+  const settledWakes: unknown[] = [
+    { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'ship it' }] } },
+    { type: 'message', message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'shipping' }] } },
+    { type: 'custom_message', customType: 'hcom', display: true, attribution: 'agent', content: hcom },
+    { type: 'message', message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'woke' }] } },
+    { type: 'custom_message', customType: 'advisor', display: true, attribution: 'agent', content: advisory },
+    { type: 'message', message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'advised' }] } },
+  ]
+
+  it('opens a turn for each custom wake that follows a settled reply', async () => {
+    const path = await transcript(settledWakes)
+
+    const turns = await ompTranscriptTurns(path)
+
+    expect(turns.map(turn => turn.turn)).toEqual([1, 2, 3])
+    expect(turnUserTexts(turns)).toEqual(['ship it', hcom, advisory])
+  })
+
+  it('claims every hydrated settled custom wake so Chat promotes it', async () => {
+    const path = await transcript(settledWakes)
+    const session = Session.create(SessionId('hydrated-settled-custom-wakes'))
+
+    await hydrateOmpSession(session, path)
+
+    const events = session.snapshotEvents()
+    expect(sessionTurnOpeningMessages(events).map(event => event.data.source)).toEqual([
+      { kind: 'user' },
+      { kind: 'omp-agent-message', form: 'relay' },
+      { kind: 'omp-wake', form: 'notice', summary: 'Stop before shipping.' },
+    ])
+    const splices = events.filter((event): event is SessionEvent<'agent/inbox/spliced'> =>
+      event.type === 'agent/inbox/spliced')
+    expect(splices).toHaveLength(4)
+    expect(splices.filter(splice => splice.data.removedCount === 1)).toHaveLength(2)
+  })
+
+  it('keeps a custom wake inside a turn whose tool call is still open', async () => {
+    const path = await transcript([
+      { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'inspect' }] } },
+      {
+        type: 'message',
+        message: {
+          role: 'assistant',
+          stopReason: 'toolUse',
+          content: [{ type: 'toolCall', id: 'call-1', name: 'read', arguments: { path: '/tmp/a' } }],
+        },
+      },
+      { type: 'custom_message', customType: 'hcom', display: true, attribution: 'agent', content: hcom },
+      { type: 'message', message: { role: 'toolResult', toolCallId: 'call-1', content: [{ type: 'text', text: 'a' }] } },
+      { type: 'message', message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'done' }] } },
+    ])
+
+    const turns = await ompTranscriptTurns(path)
+    expect(turns.map(turn => turn.turn)).toEqual([1])
+    expect(turnUserTexts(turns)).toEqual(['inspect'])
+
+    const session = Session.create(SessionId('hydrated-midturn-custom-wake'))
+    await hydrateOmpSession(session, path)
+    const events = session.snapshotEvents()
+    expect(sessionTurnOpeningMessages(events).map(event => event.data.source)).toEqual([{ kind: 'user' }])
+    expect(events.filter(event => event.type === 'agent/inbox/spliced')).toEqual([])
+  })
+})
+
 describe('ompTranscriptTurns canonical branch', () => {
   it('walks parentId from the active leaf and ignores an abandoned retry branch', async () => {
     const path = await transcript([

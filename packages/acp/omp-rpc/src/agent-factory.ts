@@ -442,6 +442,13 @@ export class OmpSessionAgent implements Agent {
     this.attachPromise = undefined
   }
 
+  /**
+   * Project one OMP-initiated run into the session. An idle wake queues on the inbox before the
+   * Turn opens because `runTurn` claims only when it starts without an initial message; handing
+   * the wake to `startTurn` would leave it unclaimed and therefore hidden from Chat. A wake that
+   * arrives mid-Turn is recorded without a claim so it stays in Trajectory.
+   * @param wake - the waking input and its trigger attribution.
+   */
   projectExternalWake(wake: OmpExternalWake): void {
     if (this.disposed) return
     const message = createUserMessage({
