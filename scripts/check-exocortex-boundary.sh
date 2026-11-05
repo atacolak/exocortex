@@ -16,7 +16,8 @@ set -uo pipefail
 FORBIDDEN='^(packages/client/|packages/core/|packages/host/|docs/persistence-schema\.json$|docs/persistence-catalog\.)'
 
 if [ "${1:-}" = "--staged" ]; then
-  changed=$(git diff --cached --name-only)
+  # A deletion or revert of a forbidden path REMOVES the violation; never block that.
+  changed=$(git diff --cached --name-status | awk '$1 != "D" {print $NF}')
 else
   base="${1:?usage: $0 <base-ref>|--staged}"
   changed=$(git diff --name-only "$base"..HEAD)
