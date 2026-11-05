@@ -1193,10 +1193,12 @@ export async function hydrateOmpSession(
   limit = Number.POSITIVE_INFINITY,
   cursorOrHydratedTurns: number | OmpHydrationCursor = 0,
 ): Promise<OmpHydrationOutcome> {
-  const cursor: OmpHydrationCursor = typeof cursorOrHydratedTurns === 'number'
-    ? { hydratedTurns: cursorOrHydratedTurns }
-    : cursorOrHydratedTurns
   const projected = projectedTurnCount(session)
+  const cursor: OmpHydrationCursor = projected === 0
+    ? { hydratedTurns: 0 }
+    : typeof cursorOrHydratedTurns === 'number'
+      ? { hydratedTurns: cursorOrHydratedTurns }
+      : cursorOrHydratedTurns
   const recorded = cursor.hydratedTurns ?? 0
   const info = await stat(path).catch(() => undefined)
   const byteOffset = info !== undefined && info.isFile() ? info.size : undefined

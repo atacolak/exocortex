@@ -19,6 +19,7 @@ import type {
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { describe, expect, it, vi } from 'vitest'
 import { SessionObservationReader } from '../src/observation.ts'
+import { TestSessionQueryEngine } from './test-service.ts'
 
 function header(id: string): SessionHeader {
   return { version: SESSION_FORMAT_VERSION, id: SessionId(id), createdAt: 1, isSeeded: false, cwd: '/workspace' }
@@ -786,6 +787,60 @@ describe('SessionObservationReader cold projections', () => {
       code: 'SESSION_QUERY_CORRUPT_SESSION',
       message: expect.stringContaining('failed to project') as string,
     })
+    await ctx.fiber.dispose()
+  })
+})
+
+describe('corrupt mirror recovery', () => {
+  it('retries one refused read through the registered recovery handler', async () => {
+    const ctx = await readerContext()
+    const meta = header('recovery-retry')
+    const store = new Map([[meta.id, {
+      header: meta,
+      events: [messageEvent(0, 'healed')],
+      revision: 'r1',
+    }]])
+    const hooks: StubHooks = {}
+    ctx.provide('sessionPersistence', stubPersistence(store, { stat: 0, open: 0, read: 0 }, hooks))
+    const failure = new SessionPersistenceCorruptionError('stored prefix failed validation', {})
+    hooks.readFailure = failure
+    const engine = new TestSessionQueryEngine(ctx)
+    const attempts: SessionIdType[] = []
+    const unregister = engine.registerRecovery(async (id, cause) => {
+      attempts.push(id)
+      expect(cause).toBe(failure)
+      hooks.readFailure = undefined
+      store.set(meta.id, { header: meta, events: [messageEvent(0, 'healed')], revision: 'r2' })
+      return true
+    })
+
+    using observed = await engine.observeSession(meta.id)
+
+    expect(attempts).toEqual([meta.id])
+    expect(observed.source).toBe('prepared')
+    expect(observed.header.id).toBe(meta.id)
+    unregister()
+    await ctx.fiber.dispose()
+  })
+
+  it('surfaces the corruption when the recovery handler declines', async () => {
+    const ctx = await readerContext()
+    const meta = header('recovery-declined')
+    const store = new Map([[meta.id, {
+      header: meta,
+      events: [messageEvent(0, 'torn')],
+      revision: 'r1',
+    }]])
+    const hooks: StubHooks = {}
+    ctx.provide('sessionPersistence', stubPersistence(store, { stat: 0, open: 0, read: 0 }, hooks))
+    hooks.readFailure = new SessionPersistenceCorruptionError('stored prefix failed validation', {})
+    const engine = new TestSessionQueryEngine(ctx)
+    const unregister = engine.registerRecovery(async () => false)
+
+    await expect(engine.observeSession(meta.id)).rejects.toMatchObject({
+      code: 'SESSION_QUERY_CORRUPT_SESSION',
+    })
+    unregister()
     await ctx.fiber.dispose()
   })
 })

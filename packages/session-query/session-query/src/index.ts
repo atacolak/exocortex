@@ -89,6 +89,14 @@ declare module '@deepseek-ai/cordis' {
 }
 
 /**
+ * Repair one corrupt persisted artifact so a refused read can be retried once.
+ * @param sessionId - session whose stored log failed validation.
+ * @param failure - the corruption that refused the read.
+ * @returns whether the stored log was rebuilt and the read may be retried.
+ */
+export type SessionRecoveryHandler = (sessionId: SessionId, failure: Error) => Promise<boolean>
+
+/**
  * Unified live-preferred session query service.
  *
  * Exact reads, filters, and traces are backend-independent concrete behavior.
@@ -101,6 +109,7 @@ export abstract class SessionQueryEngine extends Service {
   private readonly _readWindowMax: number
   private readonly _corpus: SessionCorpus
   private readonly _observations: SessionObservationReader
+  private _recovery: SessionRecoveryHandler | undefined
 
   constructor(ctx: Context, config: Config = {}) {
     super(ctx, 'sessionQuery')
@@ -137,11 +146,30 @@ export abstract class SessionQueryEngine extends Service {
    * @param options - cancellation and projection selection for this read.
    * @returns a caller-owned observation lease.
    */
-  observeSession(
+  async observeSession(
     sessionId: SessionId,
     options: SessionObservationOptions = {},
   ): Promise<SessionObservation> {
-    return this._observations.read(sessionId, options)
+    try {
+      return await this._observations.read(sessionId, options)
+    } catch (error: unknown) {
+      const failure = corruptSourceOf(error)
+      if (failure === undefined || this._recovery === undefined) throw error
+      if (!(await this._recovery(sessionId, failure))) throw error
+      return await this._observations.read(sessionId, options)
+    }
+  }
+
+  /**
+   * Install the handler that may rebuild one corrupt stored log before a read retries.
+   * @param handler - repair attempt; resolves false when the artifact must stay as it is.
+   * @returns an uninstall callback scoped to this registration.
+   */
+  registerRecovery(handler: SessionRecoveryHandler): () => void {
+    this._recovery = handler
+    return () => {
+      if (this._recovery === handler) this._recovery = undefined
+    }
   }
 
   /**
@@ -403,6 +431,18 @@ export abstract class SessionQueryEngine extends Service {
     }
     return value
   }
+}
+
+function corruptSourceOf(error: unknown): Error | undefined {
+  const seen = new Set<unknown>()
+  let current: unknown = error
+  for (let depth = 0; depth < 8; depth += 1) {
+    if (!(current instanceof Error) || seen.has(current)) return undefined
+    seen.add(current)
+    if (current.name === 'SessionPersistenceCorruptionError') return current
+    current = current.cause
+  }
+  return undefined
 }
 
 export default SessionQueryEngine
