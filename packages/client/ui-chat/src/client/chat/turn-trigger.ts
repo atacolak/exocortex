@@ -47,6 +47,16 @@ export function turnTriggerDetails(node: ContextMessageNode): {
       icon = 'subagent'
       break
     }
+    case 'omp-advisor': {
+      title = 'message.trigger.advisor'
+      icon = 'agent'
+      break
+    }
+    case 'omp-system': {
+      title = 'message.trigger.system'
+      icon = 'request'
+      break
+    }
     case 'webhook': {
       const github = field(source, 'provider') === 'github'
       title = github ? 'message.trigger.github' : 'message.trigger.webhook'

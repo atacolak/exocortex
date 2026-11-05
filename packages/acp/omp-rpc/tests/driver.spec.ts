@@ -597,6 +597,38 @@ describe('OmpAgentDriver unsolicited wakes', () => {
     driver.close()
   })
 
+  it('classifies advisor guidance as an advisor card instead of user prose', () => {
+    const client = new FakeClient()
+    const wakes: unknown[] = []
+    const driver = new OmpAgentDriver(client, { onUnsolicitedWake: (wake) => { wakes.push(wake) } })
+    const advisory = '<advisory advisor="watchdog" severity="blocker" guidance="weigh, don\'t blindly obey">\nStop before shipping.\n</advisory>'
+
+    client.emit({ type: 'agent_start' })
+    client.emit({ type: 'message_end', message: { role: 'custom', content: [{ type: 'text', text: advisory }] } })
+
+    expect(wakes).toEqual([{
+      text: advisory,
+      source: { kind: 'omp-advisor', form: 'notice', summary: 'Stop before shipping.' },
+    }])
+    driver.close()
+  })
+
+  it('stamps an unclassified custom frame as a system notice, never user prose', () => {
+    const client = new FakeClient()
+    const wakes: unknown[] = []
+    const driver = new OmpAgentDriver(client, { onUnsolicitedWake: (wake) => { wakes.push(wake) } })
+    const reminder = 'Todo list is stale.'
+
+    client.emit({ type: 'agent_start' })
+    client.emit({ type: 'message_end', message: { role: 'custom', content: [{ type: 'text', text: reminder }] } })
+
+    expect(wakes).toEqual([{
+      text: reminder,
+      source: { kind: 'omp-system', form: 'notice', summary: reminder },
+    }])
+    driver.close()
+  })
+
   it('classifies hcom actor mail as an agent message relay', () => {
     const client = new FakeClient()
     const wakes: unknown[] = []

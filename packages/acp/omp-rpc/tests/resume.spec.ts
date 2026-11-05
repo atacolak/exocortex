@@ -94,6 +94,21 @@ function sessionUserTimes(session: Session): number[] {
     .map(event => event.time)
 }
 
+function sessionTurnOpeningMessages(events: readonly SessionEvent[]): SessionEvent<'user/message'>[] {
+  const openings: SessionEvent<'user/message'>[] = []
+  let awaiting = true
+  for (const event of events) {
+    if (event.type === 'turn/start') {
+      awaiting = true
+      continue
+    }
+    if (!awaiting || !isSessionUserMessage(event)) continue
+    openings.push(event)
+    awaiting = false
+  }
+  return openings
+}
+
 function sessionTurnNumbers(session: Session): number[] {
   return session.snapshotEvents()
     .filter(event => event.type === 'turn/start')
@@ -641,6 +656,26 @@ describe('ompHydrationEvents trigger cards', () => {
       { kind: 'user' },
     ])
   })
+
+  it('hydrates advisor guidance as an advisor card instead of a user message', async () => {
+    const advisory = '<advisory severity="blocker" guidance="weigh, don\'t blindly obey">\nStop before shipping.\n</advisory>'
+    const path = await transcript([
+      { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'ship it' }] } },
+      { type: 'message', message: { role: 'assistant', content: [{ type: 'text', text: 'shipping' }] } },
+      { type: 'message', message: { role: 'user', content: [{ type: 'text', text: advisory }] } },
+      { type: 'custom_message', customType: 'advisor', display: true, attribution: 'agent', content: [{ type: 'text', text: advisory }] },
+      { type: 'custom_message', customType: 'todo', display: true, attribution: 'agent', content: 'Todo list is stale.' },
+    ])
+
+    const users = (await ompHydrationEvents(path)).filter(event => event.type === 'user/message')
+
+    expect(users.map(event => event.data.source)).toEqual([
+      { kind: 'user' },
+      { kind: 'omp-advisor', form: 'notice', summary: 'Stop before shipping.' },
+      { kind: 'omp-advisor', form: 'notice', summary: 'Stop before shipping.' },
+      { kind: 'omp-system', form: 'notice', summary: 'Todo list is stale.' },
+    ])
+  })
 })
 
 describe('ompTranscriptTurns canonical branch', () => {
@@ -906,17 +941,22 @@ describe.skipIf(!existsSync(REAL_TRANSCRIPT))('real OMP transcript hydration', (
 
     const session = Session.create(SessionId('real-transcript'))
     const outcome = await hydrateOmpSession(session, REAL_TRANSCRIPT)
-    const users = sessionUserTexts(session)
+    const openings = sessionTurnOpeningMessages(session.snapshotEvents())
+    const wakes = session.snapshotEvents()
+      .filter(isSessionUserMessage)
+      .filter(event => event.data.source.kind !== 'user')
 
     expect(outcome.turns).toBe(turns.length)
-    expect(users).toHaveLength(turns.length)
-    expect(users.filter(text => text?.trimStart().startsWith('omp:continue'))).toEqual([])
-    expect(users.filter(text => text?.trimStart().startsWith('<memories>')
-      || text?.trimStart().startsWith('<system-reminder>'))).toEqual([])
+    expect(openings.map(event => firstText(event.data.content))).toEqual(turnUserTexts(turns))
+    expect(wakes.length).toBeGreaterThan(0)
 
     const recordedUserTimes = turns.map(turn => turn.events.find(event => event.type === 'user/message')?.time)
     expect(recordedUserTimes.every(time => time !== undefined)).toBe(true)
-    expect(sessionUserTimes(session)).toEqual(recordedUserTimes)
+    expect(openings.map(event => event.time)).toEqual(recordedUserTimes)
+    const users = openings.map(event => firstText(event.data.content))
+    expect(users.filter(text => text?.trimStart().startsWith('omp:continue'))).toEqual([])
+    expect(users.filter(text => text?.trimStart().startsWith('<memories>')
+      || text?.trimStart().startsWith('<system-reminder>'))).toEqual([])
     const checkpoints = session.snapshotEvents().filter(event => event.type === 'compaction/summary')
     expect(checkpoints.length).toBeGreaterThan(0)
     for (const checkpoint of checkpoints) expect(checkpoint.data.shadowedSeqs.length).toBeGreaterThan(0)
@@ -943,8 +983,7 @@ describe.skipIf(!existsSync(REAL_TRANSCRIPT))('real OMP transcript hydration', (
     try {
       const stored = await reopened.read()
       expect(stored.events.filter(event => event.type === 'turn/start')).toHaveLength(turns.length)
-      const storedUsers = stored.events.filter(event => event.type === 'user/message'
-        && !isCompactCheckpointSource(event.data.source))
+      const storedUsers = sessionTurnOpeningMessages(stored.events)
       expect(storedUsers).toHaveLength(turns.length)
       expect(stored.events.filter(event => event.type === 'turn/start').map(event => event.data.turn))
         .toEqual(turns.map(turn => turn.turn))
