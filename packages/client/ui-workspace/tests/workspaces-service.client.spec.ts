@@ -430,6 +430,76 @@ describe('UiWorkspaceService', () => {
     expect(b.sessions.refreshProjections).not.toHaveBeenCalled()
   })
 
+  it('opens a Session as one navigation action', () => {
+    const b = bench()
+    const beginNavigation = vi.spyOn(b.layout, 'beginNavigation')
+    b.uiWorkspace.openSession(sid('target'))
+    expect(beginNavigation).toHaveBeenCalledOnce()
+    expect(b.sessions.retain).toHaveBeenCalledExactlyOnceWith(sid('target'), { source: 'mainView' })
+    expect(b.selectPanel).toHaveBeenCalledWith(null)
+  })
+
+  it('supersedes a pending navigation before retaining the opened Session', () => {
+    const b = bench()
+    const pending = b.layout.beginNavigation()
+    const order: string[] = []
+    pending.addEventListener('abort', () => { order.push('abort') })
+    const retain = b.sessions.retain.getMockImplementation()!
+    b.sessions.retain.mockImplementationOnce((...args) => {
+      order.push('retain')
+      return retain(...args)
+    })
+    b.uiWorkspace.openSession(sid('target'))
+    expect(order).toEqual(['abort', 'retain'])
+    expect(b.sessions.retain).toHaveBeenCalledExactlyOnceWith(sid('target'), { source: 'mainView' })
+  })
+
+  it('aborts an in-flight startup restoration when a Session opens', async () => {
+    const backing = persistSelection({ sessionId: sid('saved') })
+    const acquired = Promise.withResolvers<SessionId>()
+    const b = bench({
+      sessions: sessionState([summary('saved', { blank: true, cwd: '/w/a' })]),
+      workspaces: workspaceState([workspace('a', [sid('saved')])]),
+      configureSessions: (sessions) => { sessions.create.mockReturnValueOnce(acquired.promise) },
+    })
+    await vi.waitFor(() => { expect(b.sessions.create).toHaveBeenCalledOnce() })
+
+    b.uiWorkspace.openSession(sid('target'))
+    acquired.resolve(sid('saved'))
+    await setImmediate()
+
+    expect(b.sessions.retain.mock.calls.map(([target]) => target)).toEqual([sid('target')])
+    expect(JSON.parse(backing.get('dsh.sessions.current')!)).toEqual({ sessionId: sid('target') })
+  })
+
+  it('supersedes the pending restoration even when opening the Session fails', async () => {
+    const backing = persistSelection({ sessionId: sid('saved') })
+    const acquired = Promise.withResolvers<SessionId>()
+    const b = bench({
+      sessions: sessionState([summary('saved', { blank: true, cwd: '/w/a' })]),
+      workspaces: workspaceState([workspace('a', [sid('saved')])]),
+      configureSessions: (sessions) => { sessions.create.mockReturnValueOnce(acquired.promise) },
+    })
+    await vi.waitFor(() => { expect(b.sessions.create).toHaveBeenCalledOnce() })
+    b.sessions.retain.mockImplementationOnce(() => { throw new Error('open failed') })
+
+    expect(() => { b.uiWorkspace.openSession(sid('target')) }).toThrow('open failed')
+    backing.clear()
+    acquired.resolve(sid('saved'))
+    await setImmediate()
+
+    expect(b.sessions.retain.mock.calls.map(([target]) => target)).toEqual([sid('target')])
+    expect(backing.has('dsh.sessions.current')).toBe(false)
+  })
+
+  it('keeps Workspace opening on a navigation of its own', async () => {
+    const b = bench({ workspaces: workspaceState([workspace('a')]) })
+    const beginNavigation = vi.spyOn(b.layout, 'beginNavigation')
+    await b.uiWorkspace.openWorkspace(wid('a'))
+    expect(beginNavigation).toHaveBeenCalledOnce()
+    expect(b.sessions.retain).toHaveBeenCalledExactlyOnceWith(sid('created-a'), { source: 'mainView' })
+  })
+
   it('keeps the current panel when retaining the target fails', () => {
     const b = bench()
     b.sessions.retain.mockImplementationOnce(() => { throw new Error('open failed') })
