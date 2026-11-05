@@ -988,6 +988,7 @@ export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
       if (controller === undefined) return
       sessionCtx.effect(() => watchOmpRunDirectory({
         runDir: watchDir,
+        sessionsRoot,
         ...config.watchIntervalMs === undefined ? {} : { intervalMs: config.watchIntervalMs },
         onSession: (live) => { onLiveSession(controller, live) },
       }), 'omp-rpc live session adoption')
