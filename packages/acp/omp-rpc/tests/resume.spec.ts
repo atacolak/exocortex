@@ -657,7 +657,7 @@ describe('ompHydrationEvents trigger cards', () => {
     ])
   })
 
-  it('hydrates advisor guidance as an advisor card instead of a user message', async () => {
+  it('hydrates advisor and custom cards through already-registered wake kinds', async () => {
     const advisory = '<advisory severity="blocker" guidance="weigh, don\'t blindly obey">\nStop before shipping.\n</advisory>'
     const path = await transcript([
       { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'ship it' }] } },
@@ -671,9 +671,9 @@ describe('ompHydrationEvents trigger cards', () => {
 
     expect(users.map(event => event.data.source)).toEqual([
       { kind: 'user' },
-      { kind: 'omp-advisor', form: 'notice', summary: 'Stop before shipping.' },
-      { kind: 'omp-advisor', form: 'notice', summary: 'Stop before shipping.' },
-      { kind: 'omp-system', form: 'notice', summary: 'Todo list is stale.' },
+      { kind: 'omp-wake', form: 'notice', summary: 'Stop before shipping.' },
+      { kind: 'omp-wake', form: 'notice', summary: 'Stop before shipping.' },
+      { kind: 'omp-wake', form: 'notice', summary: 'Todo list is stale.' },
     ])
   })
 })

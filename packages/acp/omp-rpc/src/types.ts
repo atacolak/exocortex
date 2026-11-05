@@ -257,38 +257,13 @@ export interface OmpAgentMessageSource {
   readonly form: 'relay'
 }
 
-/** Durable attribution for advice an OMP advisor model injected into the run. */
-export interface OmpAdvisorSource {
-  readonly kind: 'omp-advisor'
-  /** A one-line account shown without expanding the trigger row (`notice` context form). */
-  readonly form: 'notice'
-  /** One-line account of the advice. */
-  readonly summary: string
-}
-
-/** Durable attribution for a system-authored OMP injection with no more specific trigger. */
-export interface OmpSystemSource {
-  readonly kind: 'omp-system'
-  /** A one-line account shown without expanding the trigger row (`notice` context form). */
-  readonly form: 'notice'
-  /** One-line account of what OMP injected. */
-  readonly summary: string
-}
-
 /** Trigger-card source an OMP-initiated run is presented under. */
-export type OmpTriggerSource =
-  | OmpSubagentSettledSource
-  | OmpAgentMessageSource
-  | OmpWakeSource
-  | OmpAdvisorSource
-  | OmpSystemSource
+export type OmpTriggerSource = OmpSubagentSettledSource | OmpAgentMessageSource | OmpWakeSource
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
     'omp-wake': OmpWakeSource
     'omp-subagent-settled': OmpSubagentSettledSource
     'omp-agent-message': OmpAgentMessageSource
-    'omp-advisor': OmpAdvisorSource
-    'omp-system': OmpSystemSource
   }
 }

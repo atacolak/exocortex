@@ -597,37 +597,39 @@ describe('OmpAgentDriver unsolicited wakes', () => {
     driver.close()
   })
 
-  it('classifies advisor guidance as an advisor card instead of user prose', () => {
+  it.each([
+    ['<advisory advisor="watchdog" severity="blocker" guidance="weigh, don\'t blindly obey">\nStop before shipping.\n</advisory>', 'Stop before shipping.'],
+    ['Todo list is stale.', 'Todo list is stale.'],
+  ])('attributes %j to an already-registered wake kind, never user prose', (injected, summary) => {
     const client = new FakeClient()
-    const wakes: unknown[] = []
+    const wakes: { source?: { kind?: string } }[] = []
     const driver = new OmpAgentDriver(client, { onUnsolicitedWake: (wake) => { wakes.push(wake) } })
-    const advisory = '<advisory advisor="watchdog" severity="blocker" guidance="weigh, don\'t blindly obey">\nStop before shipping.\n</advisory>'
 
     client.emit({ type: 'agent_start' })
-    client.emit({ type: 'message_end', message: { role: 'custom', content: [{ type: 'text', text: advisory }] } })
+    client.emit({ type: 'message_end', message: { role: 'custom', content: [{ type: 'text', text: injected }] } })
 
     expect(wakes).toEqual([{
-      text: advisory,
-      source: { kind: 'omp-advisor', form: 'notice', summary: 'Stop before shipping.' },
+      text: injected,
+      source: { kind: 'omp-wake', form: 'notice', summary },
     }])
+    expect(['omp-wake', 'omp-agent-message', 'omp-subagent-settled']).toContain(wakes[0]?.source?.kind)
     driver.close()
   })
 
-  it('stamps an unclassified custom frame as a system notice, never user prose', () => {
-    const client = new FakeClient()
-    const wakes: unknown[] = []
-    const driver = new OmpAgentDriver(client, { onUnsolicitedWake: (wake) => { wakes.push(wake) } })
-    const reminder = 'Todo list is stale.'
+  it.each(['<memories>\nEarlier decision: ship after review.\n</memories>', '<system-reminder>\nTodo list is stale.\n</system-reminder>'])(
+    'keeps %j in the injection lane instead of waking the run',
+    (injected) => {
+      const client = new FakeClient()
+      const wakes: unknown[] = []
+      const driver = new OmpAgentDriver(client, { onUnsolicitedWake: (wake) => { wakes.push(wake) } })
 
-    client.emit({ type: 'agent_start' })
-    client.emit({ type: 'message_end', message: { role: 'custom', content: [{ type: 'text', text: reminder }] } })
+      client.emit({ type: 'agent_start' })
+      client.emit({ type: 'message_end', message: { role: 'custom', content: [{ type: 'text', text: injected }] } })
 
-    expect(wakes).toEqual([{
-      text: reminder,
-      source: { kind: 'omp-system', form: 'notice', summary: reminder },
-    }])
-    driver.close()
-  })
+      expect(wakes).toEqual([])
+      driver.close()
+    },
+  )
 
   it('classifies hcom actor mail as an agent message relay', () => {
     const client = new FakeClient()
