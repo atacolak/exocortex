@@ -43,6 +43,17 @@ recorded title, and attaches the socket. Any OMP agent running anywhere on
 the machine therefore appears in the sidebar with live status and opens into
 its running conversation without typing a command.
 
+## Missing workspace directories
+
+The detached launcher `stat`s the workspace directory before it spawns the
+keeper that owns OMP. A Session whose recorded directory no longer exists is
+refused instead of started: opening it fails with `workspace directory <path>
+no longer exists; relocate this session to an existing directory or forget it`.
+The refusal belongs to that Session; the Host and every other Session keep
+running. A directory that disappears between the check and the spawn still
+arrives as the same per-Session failure because the keeper's `error` event is
+observed.
+
 ## Slash palette
 
 The bridge publishes no `omp`-prefixed slash command. Live adoption replaces
