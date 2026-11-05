@@ -449,7 +449,8 @@ export class OmpSessionAgent implements Agent {
       source: wake.source ?? { kind: 'user' },
     })
     if (this.phase === undefined) {
-      this.startTurn(message)
+      this.inbox.append('next-turn', message)
+      this.startTurn(undefined)
       return
     }
     this.session.append('user/message', message, { surfaceOp: 'append' })
@@ -523,8 +524,9 @@ export class OmpSessionAgent implements Agent {
     let outcomeFailure: { readonly message: string; readonly code: string } | undefined
     try {
       this.session.append('turn/start', { turn: phase.turn })
-      if (initial !== undefined) {
-        this.session.append('user/message', initial, { surfaceOp: 'append' })
+      const prompt = initial ?? this.inbox.claimNextTurn(phase.turn)
+      if (prompt !== undefined) {
+        this.session.append('user/message', prompt, { surfaceOp: 'append' })
       }
       const driver = await this.ensureDriver()
       phase.controller.signal.throwIfAborted()

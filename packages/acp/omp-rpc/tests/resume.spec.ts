@@ -678,6 +678,70 @@ describe('ompHydrationEvents trigger cards', () => {
   })
 })
 
+describe('hydrateOmpSession wake claims', () => {
+  const openers = [
+    {
+      name: 'hcom mail',
+      text: '<hcom>[inform #41909] exo_lead -> argon: ship the wake rows</hcom>',
+      source: { kind: 'omp-agent-message', form: 'relay' },
+    },
+    {
+      name: 'advisor guidance',
+      text: '<advisory severity="concern" guidance="weigh, don\'t blindly obey">\nStop before shipping.\n</advisory>',
+      source: { kind: 'omp-wake', form: 'notice', summary: 'Stop before shipping.' },
+    },
+    {
+      name: 'settled background work',
+      text: '<system-notice>\nBackground job abc has completed. Resume your work.\n</system-notice>',
+      source: {
+        kind: 'omp-subagent-settled',
+        form: 'notice',
+        summary: 'Background job abc has completed. Resume your work.',
+      },
+    },
+  ] as const
+
+  it.each(openers)('claims a hydrated $name opener before logging it so Chat promotes it', async ({ text, source }) => {
+    const path = await transcript([
+      { type: 'message', message: { role: 'user', content: [{ type: 'text', text }] } },
+      { type: 'message', message: { role: 'assistant', content: [{ type: 'text', text: 'acknowledged' }] } },
+    ])
+    const session = Session.create(SessionId('hydrated-wake-claim'))
+
+    const outcome = await hydrateOmpSession(session, path)
+    const events = session.snapshotEvents()
+    const logged = events.find((event): event is SessionEvent<'user/message'> => event.type === 'user/message')
+    const splices = events.filter((event): event is SessionEvent<'agent/inbox/spliced'> =>
+      event.type === 'agent/inbox/spliced')
+    const insert = splices.find(splice => splice.data.removedCount === undefined)
+    const claim = splices.find(splice => splice.data.removedCount === 1)
+
+    expect(logged?.data.source).toEqual(source)
+    expect(logged?.data.content).toEqual([{ type: 'text', text }])
+    expect(insert, 'the opener is queued for the Turn that consumes it').toBeDefined()
+    expect(claim, 'the hydrated Turn claims its opener').toBeDefined()
+    expect(insert!.data).toMatchObject({ target: 'next-turn', start: 0 })
+    expect(insert!.data.inserted.map(message => message.id)).toEqual([logged?.data.id])
+    expect(claim!.data).toMatchObject({ target: 'next-turn', start: 0, removedCount: 1, inserted: [] })
+    expect(claim!.data.outcome).toBeUndefined()
+    expect(insert!.seq).toBeLessThan(claim!.seq)
+    expect(claim!.seq).toBeLessThan(logged!.seq)
+    expect(outcome.appended).toBe(events.length)
+  })
+
+  it('leaves a hydrated human opener unclaimed', async () => {
+    const path = await transcript([
+      { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'plain question' }] } },
+      { type: 'message', message: { role: 'assistant', content: [{ type: 'text', text: 'answer' }] } },
+    ])
+    const session = Session.create(SessionId('hydrated-human-opener'))
+
+    await hydrateOmpSession(session, path)
+
+    expect(session.snapshotEvents().filter(event => event.type === 'agent/inbox/spliced')).toEqual([])
+  })
+})
+
 describe('ompTranscriptTurns canonical branch', () => {
   it('walks parentId from the active leaf and ignores an abandoned retry branch', async () => {
     const path = await transcript([
