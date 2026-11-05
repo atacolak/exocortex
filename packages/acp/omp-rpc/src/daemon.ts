@@ -7,6 +7,15 @@ export const DEFAULT_OMP_DAEMON_IDLE_TIMEOUT_MS = 60 * 60_000
 /** How long a keeper waits for OMP to publish its session socket. */
 export const DEFAULT_OMP_DAEMON_PUBLICATION_TIMEOUT_MS = 30_000
 
+/**
+ * Operator-facing refusal for a session whose workspace directory vanished.
+ * @param cwd - workspace directory recorded by the session.
+ * @returns the message shared by the open route and the daemon pre-flight.
+ */
+export function missingWorkspaceMessage(cwd: string): string {
+  return `workspace directory ${cwd} no longer exists; relocate this session to an existing directory or forget it`
+}
+
 /** One detached session daemon request: how to start OMP and where it publishes. */
 export interface OmpDaemonLaunchSpec {
   /** Executable followed by its arguments. */
@@ -163,7 +172,7 @@ function start() {
   child.stdin.on('error', () => {})
   child.on('error', (error) => {
     clearTimeout(idle)
-    void writeHandshake({ error: 'cannot start OMP: ' + String(error) }).catch(() => {})
+    void writeHandshake({ error: 'cannot start OMP in workspace ' + spec.cwd + ': ' + String(error) + '; if the workspace directory no longer exists, relocate this session to an existing directory or forget it' }).catch(() => {})
       .then(() => process.exit(0))
   })
   child.on('exit', () => {
@@ -264,7 +273,9 @@ export function launchOmpDaemon(spec: OmpDaemonLaunchSpec): OmpDaemonLaunch {
       ],
       { detached: true, stdio: 'ignore', cwd: spec.cwd },
     )
-    keeper.on('error', (error: Error) => { fail(new Error('cannot start OMP: ' + String(error))) })
+    keeper.on('error', (error: Error) => {
+      fail(new Error(`cannot start the OMP daemon in workspace ${spec.cwd}: ${String(error)}; if the workspace directory no longer exists, relocate this session to an existing directory or forget it`))
+    })
     keeper.unref()
     deadline = Date.now() + publicationTimeoutMs + 5_000
     poll()
@@ -280,7 +291,7 @@ export function launchOmpDaemon(spec: OmpDaemonLaunchSpec): OmpDaemonLaunch {
     (error: unknown) => {
       const code = (error as NodeJS.ErrnoException).code
       fail(code === 'ENOENT' || code === 'ENOTDIR'
-        ? new Error(`workspace directory ${spec.cwd} no longer exists; relocate this session to an existing directory or forget it`)
+        ? new Error(missingWorkspaceMessage(spec.cwd))
         : new Error(`cannot read workspace directory ${spec.cwd}: ${String(error)}`))
     },
   ).catch(fail)
