@@ -20,7 +20,7 @@ async function mountedPlugin(options: MountOptions = {}): Promise<Context> {
   await ctx.plugin(SessionStore)
   await ctx.plugin(CommandRuntime)
   ctx.provide('tools', { definitions: () => [] } as never)
-  ctx.provide('subprocess', {} as never)
+  ctx.provide('subprocess', { resolveExecutable: async (path: string) => path } as never)
   ctx.provide('llm', { registerAdapter: () => () => {} } as never)
   ctx.provide('agents', { setFactory: () => {} } as never)
   ctx.provide('sessionProjections', {

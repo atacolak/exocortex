@@ -794,6 +794,7 @@ export async function ompTranscriptTurns(path: string): Promise<OmpTranscriptTur
   let stepHasAssistant = false
   let suppressed = false
   let lastTime: number | undefined
+  let lastStopTerminal = false
   const openCalls = new Set<string>()
 
   const closeTurn = (): void => {
@@ -827,6 +828,7 @@ export async function ompTranscriptTurns(path: string): Promise<OmpTranscriptTur
       ...userEntryId === undefined ? {} : { userEntryId, leafEntryId: userEntryId },
     }
     openCalls.clear()
+    lastStopTerminal = false
     return events
   }
   const openStep = (events: OmpHydrationEvent[], time: number | undefined): void => {
@@ -855,7 +857,10 @@ export async function ompTranscriptTurns(path: string): Promise<OmpTranscriptTur
         if (draft !== undefined && id !== undefined) draft.leafEntryId = id
         continue
       }
-      if (current === undefined) current = openTurn(time, id)
+      if (current === undefined || lastStopTerminal) {
+        closeTurn()
+        current = openTurn(time, id)
+      }
       current.push(timed({
         type: 'user/message',
         data: createUserMessage({ content, source: customMessageSource(content) }),
@@ -931,6 +936,7 @@ export async function ompTranscriptTurns(path: string): Promise<OmpTranscriptTur
         }, time))
         openCalls.add(block.id)
       }
+      lastStopTerminal = message.stopReason !== 'toolUse' && openCalls.size === 0
       lastTime = time ?? lastTime
       if (draft !== undefined && id !== undefined) draft.leafEntryId = id
       continue
