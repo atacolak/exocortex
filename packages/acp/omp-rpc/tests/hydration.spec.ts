@@ -2,7 +2,8 @@ import { appendFile, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/prom
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
-import { Session, SessionId } from '@deepseek-ai/dsh-session'
+import { KNOWN_SESSION_EVENT_TYPES, SESSION_FORMAT_VERSION, Session, SessionId, type SessionHeader } from '@deepseek-ai/dsh-session'
+import { assertReleasedV4Relationships } from '@deepseek-ai/dsh-session-format-v3-to-v4'
 import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { afterEach, describe, expect, it } from 'vitest'
 import { hydrateOmpBinding, OmpBindings, type OmpBinding } from '../src/bindings.ts'
@@ -182,6 +183,100 @@ describe('hydrateOmpBinding', () => {
     expect(again.hydratedByteOffset).toBe(first.hydratedByteOffset)
     expect(session.snapshotEvents()).toHaveLength(before)
   })
+
+  it('ignores a remembered cursor when the target session projects no turns', async () => {
+    const path = await transcript([
+      { type: 'title', v: 1, title: 'PLUG: measured recovery' },
+      sessionLine(),
+      ...turnEntries(1, 3),
+    ])
+    const file = join(await sandbox(), 'omp', 'bindings.json')
+    const bindings = new OmpBindings(file)
+    const session = Session.create(SESSION_ID)
+
+    const outcome = await hydrateOmpBinding({
+      bindings,
+      session,
+      binding: {
+        ...bindingOf(path),
+        hydratedTurns: 488,
+        hydratedLeafEntryId: entryId(6),
+        hydratedByteOffset: (await stat(path)).size,
+      },
+    })
+
+    const events = session.snapshotEvents()
+    expect(events[0]).toMatchObject({ type: 'session/title', seq: 0 })
+    expect(events[1]).toMatchObject({ type: 'turn/start', seq: 1, data: { turn: 1 } })
+    expect(userTexts(session)).toEqual(['turn 1', 'turn 2', 'turn 3'])
+    expect(outcome.turns).toBe(3)
+    const stored = await storedBinding(file)
+    expect(stored.hydratedTurns).toBe(3)
+    expect(stored.hydratedLeafEntryId).toBe(entryId(6))
+  })
+
+  it.each([86, 488])('persists a stale cursor of %i turns from turn 1 in a validated zstd log', async (turns) => {
+    const root = await sandbox()
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(JsonlSessionPersistence, { root, compression: 'zstd' })
+    const path = await transcript([
+      { type: 'title', v: 1, title: 'PLUG: measured recovery' },
+      sessionLine(),
+      ...turnEntries(1, 3),
+    ])
+    const id = SessionId('session-stale-cursor-zstd')
+    const header: SessionHeader = {
+      version: SESSION_FORMAT_VERSION,
+      id,
+      createdAt: 1,
+      cwd: '/work',
+      isSeeded: false,
+      delegationDepth: 0,
+    }
+    const handle = await ctx.sessionPersistence.create(header)
+    try {
+      const session = Session.create(id, [], header)
+      await hydrateOmpBinding({
+        bindings: new OmpBindings(join(root, 'omp', 'bindings.json')),
+        session,
+        binding: {
+          ...bindingOf(path),
+          hydratedTurns: turns,
+          hydratedLeafEntryId: entryId(6),
+          hydratedByteOffset: (await stat(path)).size,
+        },
+      })
+      await handle.append(session.snapshotEvents())
+    } finally {
+      await handle.close()
+    }
+    await ctx.sessionPersistence.flush()
+    const artifactPath = (await ctx.sessionPersistence.stat(id))?.location?.path
+    expect(artifactPath?.endsWith('.jsonl.zstd')).toBe(true)
+
+    const reopened = await ctx.sessionPersistence.open(id, 'read')
+    try {
+      const { events } = await reopened.read(0, undefined)
+      expect(events[2]).toMatchObject({ type: 'turn/start', seq: 2, data: { turn: 1 } })
+      const starts = events.flatMap(event => event.type === 'turn/start' ? [event.data.turn] : [])
+      expect(new Set(starts).size).toBe(3)
+      expect(starts).toEqual([1, 2, 3])
+      const firstPrompt = events.find(event => event.type === 'user/message')
+      const firstBlock = firstPrompt?.type === 'user/message' ? firstPrompt.data.content[0] : undefined
+      expect(firstBlock?.type === 'text' ? firstBlock.text : undefined).toBe('turn 1')
+      expect(() => assertReleasedV4Relationships(
+        {
+          header,
+          inheritedEventCount: 0,
+          events,
+        } as unknown as Parameters<typeof assertReleasedV4Relationships>[0],
+        KNOWN_SESSION_EVENT_TYPES,
+      )).not.toThrow()
+    } finally {
+      await reopened.close()
+    }
+  })
 })
 
 describe('OMP compaction boundaries', () => {
@@ -308,5 +403,38 @@ describe('OMP compaction boundaries', () => {
     const boundary = stored.events.filter(event => event.type === 'compaction/summary')
     expect(boundary.map(event => event.time)).toEqual([boundaryTime])
     expect(stored.events.every(event => event.time < Date.now())).toBe(true)
+  })
+})
+
+describe('OmpBindings cursor lifecycle', () => {
+  it('preserves a cursor set() omits and clears it only through resetCursor()', async () => {
+    const file = join(await sandbox(), 'omp', 'bindings.json')
+    const path = await transcript([sessionLine(), ...turnEntries(1, 2)])
+    const id = SESSION_ID
+    const bindings = new OmpBindings(file)
+    await bindings.set(id, bindingOf(path))
+    await bindings.set(id, {
+      ...bindingOf(path),
+      hydratedTurns: 2,
+      hydratedLeafEntryId: entryId(4),
+      hydratedByteOffset: (await stat(path)).size,
+    })
+
+    await bindings.set(id, { ...bindingOf(path), updatedAt: new Date().toISOString() })
+    const preserved = await storedBinding(file)
+    expect(preserved.hydratedTurns).toBe(2)
+    expect(preserved.hydratedLeafEntryId).toBe(entryId(4))
+
+    await bindings.resetCursor(id)
+    const cleared = await bindings.get(id)
+    expect(cleared).toMatchObject({ ompSessionId: OMP_SESSION, path })
+    expect(cleared?.hydratedTurns).toBeUndefined()
+    expect(cleared?.hydratedLeafEntryId).toBeUndefined()
+    expect(cleared?.hydratedByteOffset).toBeUndefined()
+
+    const replay = Session.create(id)
+    await hydrateOmpBinding({ bindings, session: replay, binding: cleared! })
+    expect(userTexts(replay)).toEqual(['turn 1', 'turn 2'])
+    expect((await storedBinding(file)).hydratedTurns).toBe(2)
   })
 })

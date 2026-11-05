@@ -19,9 +19,10 @@ import type {} from '@deepseek-ai/dsh-client-connection'
 import type {} from '@deepseek-ai/dsh-commands'
 import { modelSelectionProjectionDefinition, type Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
-import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { Session, SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { inboxProjectionDefinition, OmpAgentFactory, type OmpAgentHost, type OmpRecoveredSession } from './agent-factory.ts'
 import { OMP_LLM_PROVIDER, registerOmpLlmProvider } from './llm-catalog.ts'
+import type {} from '@deepseek-ai/dsh-session-query'
 import type {} from '@deepseek-ai/dsh-workspace'
 import Schema from '@deepseek-ai/schemastery'
 import { bindingFactsOf, defaultOmpBindingsFile, hydrateOmpBinding, OmpBindings, rememberOmpBinding, type OmpBinding } from './bindings.ts'
@@ -230,29 +231,83 @@ function salvagedPrefixOf(failure: Error): readonly SessionEvent[] {
  * @param ctx - context carrying session persistence and the logger.
  * @param id - persisted session whose open failed validation.
  * @param failure - format error that refused the artifact.
+ * @param bindings - binding store whose hydration cursor described the refused artifact.
  * @returns the header to recreate the session from plus any salvaged prefix, or undefined to leave it in place.
  */
 export async function quarantineCorruptSession(
   ctx: Context,
   id: SessionId,
   failure: Error,
+  bindings?: OmpBindings,
 ): Promise<OmpRecoveredSession | undefined> {
   try {
     const snapshot = await ctx.get('sessionPersistence')?.stat(id)
     const path = snapshot?.location?.path
     if (snapshot === undefined || path === undefined) return undefined
+    if (bindings !== undefined && await bindings.get(id) === undefined) {
+      ctx.logger.warn(`[omp-rpc] session "${id}" failed session-format validation with no bound OMP transcript; keeping ${path} untouched: ${failure.message}`)
+      return undefined
+    }
     if (snapshot.header.isSeeded) {
       ctx.logger.warn(`[omp-rpc] session "${id}" failed session-format validation and is fork-seeded; keeping ${path} untouched: ${failure.message}`)
       return undefined
     }
     const quarantined = `${path}.corrupt-${new Date().toISOString().replaceAll(':', '-').replaceAll('.', '-')}`
     await rename(path, quarantined)
+    await bindings?.resetCursor(id)
     const salvagedEvents = salvagedPrefixOf(failure)
     ctx.logger.warn(`[omp-rpc] session "${id}" failed session-format validation; quarantined ${path} as ${quarantined} and rehydrating from its bound OMP transcript with ${salvagedEvents.length} salvaged event(s): ${failure.message}`)
     return { ...snapshot.header, ...salvagedEvents.length === 0 ? {} : { salvagedEvents } }
   } catch (error: unknown) {
     ctx.logger.warn(`[omp-rpc] cannot quarantine the unusable session artifact for "${id}": ${error instanceof Error ? error.message : String(error)}`)
     return undefined
+  }
+}
+
+/**
+ * Rebuild one corrupt mirror from its bound OMP transcript so a viewer read can retry.
+ *
+ * The artifact is a derived mirror of a transcript that still exists. Recovery
+ * runs only when the session is bound to an existing transcript; an unbound or
+ * fork-seeded artifact stays in place so its evidence is never discarded.
+ * @param ctx - context carrying persistence, sessions, and the logger.
+ * @param bindings - binding store holding the transcript path and hydration cursor.
+ * @param id - persisted session whose open failed validation.
+ * @param failure - format error that refused the artifact.
+ * @returns whether the replacement artifact was written and the read may retry.
+ */
+export async function recoverBoundMirror(
+  ctx: Context,
+  bindings: OmpBindings,
+  id: SessionId,
+  failure: Error,
+): Promise<boolean> {
+  const persistence = ctx.get('sessionPersistence')
+  if (persistence === undefined) return false
+  const binding = await bindings.get(id)
+  if (binding === undefined || !(await existingFile(binding.path))) return false
+  const recovered = await quarantineCorruptSession(ctx, id, failure, bindings)
+  if (recovered === undefined) return false
+  const { salvagedEvents, ...header } = recovered
+  const seed = salvagedEvents ?? []
+  try {
+    const session = Session.create(
+      id,
+      seed.length === 0 ? undefined : [...seed],
+      header,
+    )
+    await hydrateOmpBinding({ bindings, session, binding })
+    const handle = await persistence.create(header)
+    try {
+      await handle.append(session.snapshotEvents())
+    } finally {
+      await handle.close()
+    }
+    ctx.logger.warn(`[omp-rpc] session "${id}" rehydrated from its bound OMP transcript into a replacement artifact`)
+    return true
+  } catch (error: unknown) {
+    ctx.logger.warn(`[omp-rpc] cannot rehydrate the replacement for session "${id}": ${error instanceof Error ? error.message : String(error)}`)
+    return false
   }
 }
 
@@ -275,6 +330,20 @@ export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
   const warn = (message: string, error?: unknown): void => {
     ctx.logger.warn(`[omp-rpc] ${message}${error === undefined ? '' : `: ${error instanceof Error ? error.message : String(error)}`}`)
   }
+  ctx.inject(['sessionQuery'], (queryCtx) => {
+    const query = queryCtx.get('sessionQuery')
+    if (query === undefined) return
+    const unregister = query.registerRecovery(async (id, failure) => {
+      try {
+        return await recoverBoundMirror(ctx, bindings, id, failure)
+      } catch (error: unknown) {
+        warn(`cannot recover the corrupt mirror for session "${id}"`, error)
+        return false
+      }
+    })
+    queryCtx.effect(() => unregister, 'omp-rpc corrupt mirror recovery')
+  })
+
   const advanceOmpHydrationCursor = (
     sessionId: SessionId,
     cursor: { readonly entryId: string; readonly byteOffset: number },
@@ -732,7 +801,7 @@ export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
     ctx,
     host: agentHost,
     hydrate: hydrateBoundSession,
-    recover: (id, failure) => quarantineCorruptSession(ctx, id, failure),
+    recover: (id, failure) => quarantineCorruptSession(ctx, id, failure, bindings),
   })), 'omp-rpc agent factory')
 
   const hosted = new Map<string, SessionId>()

@@ -325,6 +325,42 @@ export class OmpBindings {
   }
 
   /**
+   * Clear one session's hydration cursor without dropping its transcript binding.
+   *
+   * A quarantined or recreated artifact no longer holds the events that cursor
+   * described, so the next hydration must replay the bound transcript from its
+   * first admitted turn. The three cursor fields leave the cached state and the
+   * file together; `set` cannot clear them because it merges omitted fields
+   * forward, so clearing stays an explicit operation.
+   * @param id - Harness session identity.
+   */
+  async resetCursor(id: SessionId): Promise<void> {
+    await this.enqueue(async () => {
+      const state = await this.load()
+      const key = String(canonicalOmpHarnessSessionId(id))
+      const binding = state.sessions[key]
+      if (binding === undefined) return
+      if (binding.hydratedTurns === undefined
+        && binding.hydratedLeafEntryId === undefined
+        && binding.hydratedByteOffset === undefined) return
+      const cleared: OmpBinding = {
+        ompSessionId: binding.ompSessionId,
+        path: binding.path,
+        cwd: binding.cwd,
+        ...binding.profile === undefined ? {} : { profile: binding.profile },
+        updatedAt: new Date().toISOString(),
+      }
+      const next: OmpBindingsFile = {
+        version: BINDINGS_VERSION,
+        sessions: { ...state.sessions, [key]: cleared },
+        forks: state.forks,
+      }
+      await this.write(next)
+      this.state = next
+    })
+  }
+
+  /**
    * Forget one session binding.
    * @param id - Harness session identity.
    */
