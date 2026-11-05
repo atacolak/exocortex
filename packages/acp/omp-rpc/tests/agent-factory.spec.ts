@@ -1,15 +1,29 @@
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry, { modelSelectionProjectionDefinition, type Agent } from '@deepseek-ai/dsh-agent'
 import LlmRuntime from '@deepseek-ai/dsh-llm'
-import { createToolResultMessage, createUserMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
-import SessionStore, { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
+import {
+  createAssistantMessage,
+  createSystemMessage,
+  createToolResultMessage,
+  createUserMessage,
+  ToolCallId,
+} from '@deepseek-ai/dsh-llm'
+import { CompactionId } from '@deepseek-ai/dsh-compaction'
+import { isCompactCheckpointSource } from '@deepseek-ai/dsh-compaction/checkpoint'
+import SessionStore, {
+  SESSION_FORMAT_VERSION,
+  Session,
+  SessionId,
+  type SessionEvent,
+  type SessionHeader,
+} from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { scopeOf } from '@deepseek-ai/dsh-scope'
 import { existsSync, readFileSync } from 'node:fs'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
@@ -17,7 +31,9 @@ import {
   inboxProjectionDefinition,
   type OmpAgentHost,
 } from '../src/agent-factory.ts'
+import { quarantineCorruptSession } from '../src/index.ts'
 import { OmpAgentDriver, type OmpToolEvent } from '../src/driver.ts'
+import { hydrateOmpSession, type OmpHydrationCursor } from '../src/resume.ts'
 import { rpcHarness, tick, type RpcHarness } from './harness.ts'
 
 interface Harness {
@@ -34,7 +50,12 @@ afterEach(async () => {
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true })
 })
 
-async function harness(): Promise<Harness> {
+interface HarnessOverrides {
+  readonly hydrate?: (agent: Agent) => Promise<void>
+  readonly recover?: (ctx: Context, id: SessionId, failure: Error) => Promise<SessionHeader | undefined>
+}
+
+async function harness(overrides: HarnessOverrides = {}): Promise<Harness> {
   const root = await mkdtemp(join(tmpdir(), 'omp-factory-'))
   roots.push(root)
   const cwd = join(root, 'project')
@@ -98,7 +119,14 @@ async function harness(): Promise<Harness> {
     name: 'omp-rpc factory harness',
     inject: ['agents', 'sessions', 'sessionProjections'],
     apply(pluginCtx: Context) {
-      pluginCtx.agents.setFactory(new OmpAgentFactory({ ctx: pluginCtx, host }))
+      pluginCtx.agents.setFactory(new OmpAgentFactory({
+        ctx: pluginCtx,
+        host,
+        ...overrides.hydrate === undefined ? {} : { hydrate: overrides.hydrate },
+        ...overrides.recover === undefined
+          ? {}
+          : { recover: (id, failure) => overrides.recover!(pluginCtx, id, failure) },
+      }))
     },
   })
   return { ctx, rpc, driver, toolCalls, host, cwd }
@@ -433,6 +461,170 @@ describe('OmpAgentFactory publishes the shared scope module', () => {
     expect(source).not.toMatch(/node_modules\/\.pnpm\/zod@/)
     expect(source).toMatch(/from\s+["']@deepseek-ai\/dsh-scope["']/)
     expect(source).toMatch(/from\s+["']zod["']/)
+  })
+})
+
+function conversationTexts(events: readonly SessionEvent[]): string[] {
+  return events
+    .filter((event): event is Extract<SessionEvent, { type: 'user/message' }> =>
+      event.type === 'user/message' && !isCompactCheckpointSource(event.data.source))
+    .map(event => event.data.content.map(block => block.type === 'text' ? block.text : '').join('\n'))
+}
+
+function inboxTexts(h: Harness, agent: Agent): string[] {
+  return h.host.inbox(agent.session)()['next-turn']
+    .map(message => message.content.map(block => block.type === 'text' ? block.text : '').join('\n'))
+}
+
+/**
+ * Build the mirror shape the preserved backup recorded: a protected system head
+ * in turn 1, a queued inbox splice, a trailing user message whose turn never
+ * ended, and a compaction summary that shadows the protected head.
+ */
+async function corruptMirror(h: Harness, id: SessionId): Promise<{ path: string; header: SessionHeader }> {
+  const header: SessionHeader = {
+    version: SESSION_FORMAT_VERSION,
+    id,
+    createdAt: 1,
+    cwd: h.cwd,
+    isSeeded: false,
+    agentPreset: 'omp:argon',
+  }
+  const session = Session.create(id, [], header)
+  session.append('session/title', {
+    title: 'PLUG: Debug and restore CPA session crash',
+    messageSeqs: [],
+    source: { kind: 'user' },
+  })
+  session.append('turn/start', { turn: 1 })
+  session.append('step/start', { turn: 1, step: 1 })
+  session.append('system/message', {
+    turn: 1,
+    step: 1,
+    message: createSystemMessage('You are Argon.'),
+  }, { surfaceOp: 'append' })
+  session.append('user/message', userInput('one'), { surfaceOp: 'append' })
+  session.append('assistant/message', {
+    turn: 1,
+    step: 1,
+    message: createAssistantMessage({
+      content: [{ type: 'text', text: 'reply 1' }],
+      source: { provider: 'omp', model: 'omp' },
+    }),
+    stream: [],
+  }, { surfaceOp: 'append' })
+  session.append('step/end', { turn: 1, step: 1 })
+  session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  session.append('agent/inbox/spliced', {
+    target: 'next-turn',
+    start: 0,
+    inserted: [userInput('queued while detached')],
+  })
+  session.append('turn/start', { turn: 2 })
+  session.append('user/message', userInput('un-delivered prompt'), { surfaceOp: 'append' })
+
+  const surface = [...session.surface.nodes]
+  const compactionId = CompactionId('omp-corrupt')
+  session.append('compaction/start', { compactionId, turn: 2 })
+  session.append('compaction/summary', {
+    compactionId,
+    summary: [{ type: 'text', text: 'Earlier turns summarized' }],
+    shadowedRange: { start: surface[0]!, end: surface.at(-1)! },
+    shadowedSeqs: surface,
+    shadowedTokenCount: 5000,
+    provider: 'omp',
+    model: 'omp',
+  })
+
+  const handle = await h.ctx.sessionPersistence.create(header)
+  try {
+    await handle.append(session.snapshotEvents())
+  } finally {
+    await handle.close()
+  }
+  await h.ctx.sessionPersistence.flush()
+  const snapshot = await h.ctx.sessionPersistence.stat(id)
+  const path = snapshot?.location?.path
+  if (path === undefined) throw new Error('the corrupt artifact has no resolved location path')
+  return { path, header }
+}
+
+async function recoveryTranscript(h: Harness): Promise<{ path: string; cursor: OmpHydrationCursor }> {
+  const sessionId = '01a0c88e-7521-7000-bb6a-67527d2b6806'
+  const cwd = dirname(h.cwd)
+  const path = join(cwd, 'recovery-transcript.jsonl')
+  await writeFile(path, [
+    { type: 'title', v: 1, title: 'PLUG: Debug and restore CPA session crash' },
+    { type: 'session', version: 3, id: sessionId, cwd },
+    { type: 'message', id: '00000001', parentId: sessionId, message: { role: 'user', content: [{ type: 'text', text: 'one' }] } },
+    { type: 'message', id: '00000002', parentId: '00000001', message: { role: 'assistant', content: [{ type: 'text', text: 'reply 1' }] } },
+  ].map(line => JSON.stringify(line)).join('\n') + '\n')
+  const { size } = await stat(path)
+  return { path, cursor: { hydratedTurns: 1, hydratedLeafEntryId: '00000002', hydratedByteOffset: size } }
+}
+
+describe('OmpAgentFactory recovers a corrupt session-format mirror', () => {
+  it('quarantines the artifact, keeps identity and undelivered input, and never replays hydrated history', async () => {
+    let recoveries = 0
+    let transcriptPath = ''
+    let cursor: OmpHydrationCursor | undefined
+    const h = await harness({
+      hydrate: async (agent) => {
+        if (transcriptPath === '') return
+        await hydrateOmpSession(agent.session, transcriptPath, Number.POSITIVE_INFINITY, cursor)
+      },
+      recover: async (ctx, id, failure) => {
+        recoveries += 1
+        return await quarantineCorruptSession(ctx, id, failure)
+      },
+    })
+    const prepared = await recoveryTranscript(h)
+    transcriptPath = prepared.path
+    cursor = prepared.cursor
+    const id = SessionId('session-corrupt-recovery')
+    await corruptMirror(h, id)
+
+    const resumed = await h.ctx.agents.resume({ resumeSessionId: id })
+
+    expect(recoveries).toBe(1)
+    expect(resumed.agent.id).toBe(id)
+    const events = resumed.agent.session.snapshotEvents()
+    expect(resumed.agent.session.header).toMatchObject({ cwd: h.cwd, agentPreset: 'omp:argon' })
+    expect(conversationTexts(events)).toEqual(['one', 'un-delivered prompt'])
+    expect(inboxSplices(events)).toHaveLength(1)
+    expect(inboxTexts(h, resumed.agent)).toEqual(['queued while detached'])
+
+    await resumed.dispose()
+    const again = await h.ctx.agents.resume({ resumeSessionId: id })
+    const replayed = again.agent.session.snapshotEvents()
+    expect(conversationTexts(replayed)).toEqual(['one', 'un-delivered prompt'])
+    expect(inboxSplices(replayed)).toHaveLength(1)
+    expect(inboxTexts(h, again.agent)).toEqual(['queued while detached'])
+    await again.dispose()
+  })
+
+  it('renames the corrupt artifact and returns its header', async () => {
+    const h = await harness()
+    const id = SessionId('session-quarantine-helper')
+    const artifact = await corruptMirror(h, id)
+    const original = await readFile(artifact.path)
+
+    let failure: unknown
+    try {
+      await h.ctx.sessionPersistence.open(id, 'read')
+    } catch (error: unknown) {
+      failure = error
+    }
+    expect(failure).toMatchObject({ name: 'SessionPersistenceCorruptionError' })
+
+    const header = await quarantineCorruptSession(h.ctx, id, failure as Error)
+
+    expect(header).toMatchObject({ id, cwd: h.cwd, agentPreset: 'omp:argon' })
+    await expect(stat(artifact.path)).rejects.toMatchObject({ code: 'ENOENT' })
+    const dir = dirname(artifact.path)
+    const quarantined = (await readdir(dir)).filter(name => name.startsWith(`${basename(artifact.path)}.corrupt-`))
+    expect(quarantined).toHaveLength(1)
+    expect(await readFile(join(dir, quarantined[0]!))).toEqual(original)
   })
 })
 
