@@ -27,6 +27,13 @@ and why it cannot express the behavior.
 Check `ctx.slots.inject(...)` and the slot table below **before** concluding a slot is missing.
 "It was easier in core" is not a reason. A wrong core edit costs more than a slow bundle.
 
+**Never leave `node_modules` inside a bundle.** A bundle's dependencies resolve from
+the profile, not from a local tree. A `node_modules` directory there — especially one
+whose entries symlink back into the DSH monorepo — makes the filesystem watcher crawl
+the entire monorepo: on 2026-11-06 two such symlinks leaked ~67 MB/2.5 s and pinned a
+core until production aborted every few minutes. If a bundle needs types for a local
+`tsc`, point `tsconfig` at the profile's `@types` instead of installing one.
+
 ## 3. Slot rules
 
 - **Lowest numeric `priority` wins.** Use `-100`. `priority: 0` collides and throws
