@@ -179,13 +179,17 @@ export const Config: Schema<OmpRpcConfig> = Schema.object({
 
 function attachmentSummary(attachment: OmpAttachment): string {
   const version = attachment.client.protocol
-  const catalog = attachment.catalog.status === 'applied'
-    ? `model ${attachment.catalog.model.id}`
-    : attachment.catalog.status === 'not-offered'
-      ? 'harness model not offered by the OMP gateway'
-      : 'OMP default model'
+  const { catalog } = attachment
+  const authority = catalog.active === undefined
+    ? 'model unread'
+    : `model ${catalog.active.provider}/${catalog.active.model}`
+  const model = catalog.status === 'applied'
+    ? `minted ${catalog.model.id}`
+    : catalog.status === 'not-offered'
+      ? `harness model not offered by the OMP gateway; kept ${authority}`
+      : `adopted OMP ${authority}`
   const transport = attachment.launched === undefined ? ' on its live session socket' : ''
-  return `attached OMP RPC v${String(version)} (${catalog})${transport}`
+  return `attached OMP RPC v${String(version)} (${model})${transport}`
 }
 
 async function existingFile(path: string): Promise<boolean> {
@@ -454,11 +458,9 @@ export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
     const cwd = options.cwd ?? agent.session.header.cwd ?? config.cwd
     if (cwd === undefined) throw new Error('OMP bridge has no working directory: set omp-rpc cwd or start the session in one')
     const preset = options.preset ?? config.preset
-    const selection = agent.model.current()
     return {
       ...options,
       ...preset === undefined ? {} : { preset },
-      ...selection === undefined ? {} : { selection },
       sessionDir: config.sessionDir ?? sessionsRoot,
       hostTools: config.hostTools ?? DEFAULT_OMP_HOST_TOOLS,
       managedStreams: true,
