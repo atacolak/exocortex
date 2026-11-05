@@ -427,8 +427,6 @@ export interface OmpBindingHydration {
   readonly binding: OmpBinding
   /** Cursor a previous pass recorded, when it is not already on `binding`. */
   readonly cursor?: OmpHydrationCursor
-  /** false leaves the last transcript turn out because OMP is still streaming it. */
-  readonly includeNewestTurn: boolean
 }
 
 /**
@@ -447,7 +445,6 @@ export async function hydrateOmpBinding(request: OmpBindingHydration): Promise<O
     request.binding.path,
     Number.POSITIVE_INFINITY,
     request.cursor ?? request.binding,
-    request.includeNewestTurn,
   )
   await request.bindings.set(request.session.id, {
     ...request.binding,

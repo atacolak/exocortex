@@ -844,6 +844,30 @@ describe('hydrateOmpSession canonical cursor', () => {
     expect(sessionUserTexts(session)).toEqual(['turn 1', 'turn 2', 'turn 3', 'turn 4'])
     expect(sessionTurnNumbers(session)).toEqual([1, 2, 3, 4])
   })
+
+  it('keeps a new turn whose prompt repeats the last completed turn', async () => {
+    const path = await transcript([
+      sessionLine(),
+      userEntry(entryId(1), SESSION_UUID, 'go'),
+      assistantEntry(entryId(2), entryId(1), 'reply 1'),
+      userEntry(entryId(3), entryId(2), 'go'),
+      assistantEntry(entryId(4), entryId(3), 'reply 2'),
+    ])
+    const session = boundarySession('repeated-prompt')
+    closedTurn(session, 1, 'go')
+
+    const outcome = await hydrateOmpSession(session, path, Number.POSITIVE_INFINITY, {
+      hydratedTurns: 1,
+      hydratedLeafEntryId: entryId(2),
+      hydratedByteOffset: 0,
+    })
+
+    expect(outcome.appended).toBeGreaterThan(0)
+    expect(sessionUserTexts(session)).toEqual(['go', 'go'])
+    expect(sessionTurnNumbers(session)).toEqual([1, 2])
+    expect(assistantTexts(session)).toEqual(['reply 1', 'reply 2'])
+    await expect(persistAndReopen(session)).resolves.toBeDefined()
+  })
 })
 
 describe.skipIf(!existsSync(REAL_TRANSCRIPT))('real OMP transcript hydration', () => {
@@ -1206,7 +1230,7 @@ describe('hydrateOmpSession against a live streaming turn', () => {
       hydratedTurns: 1,
       hydratedLeafEntryId: entryId(2),
       hydratedByteOffset: 0,
-    }, true)
+    })
 
     expect(outcome.appended).toBeGreaterThan(0)
     expect(sessionTurnNumbers(session)).toEqual([1, 2])

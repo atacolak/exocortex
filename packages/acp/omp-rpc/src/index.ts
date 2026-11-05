@@ -398,7 +398,6 @@ export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
       session: request.agent.session,
       binding: request.binding,
       ...request.cursor === undefined ? {} : { cursor: request.cursor },
-      includeNewestTurn: true,
     })
     bridge.seedDelivered(request.agent.id)
     return hydration

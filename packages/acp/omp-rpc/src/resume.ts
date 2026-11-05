@@ -1052,13 +1052,15 @@ interface LiveTurnDedupe {
 }
 
 /**
- * Collect what a session already projects, so a re-read of the turn OMP is
- * still writing adds only the events the live socket has not delivered.
- * Tool identities are global to the log because a resumed harness turn keeps
- * the calls it already advertised; prompts and assistant bodies are bounded to
- * the newest harness turn, where live projection lands.
- * @param session - session a transcript is about to be hydrated into.
- * @returns the content identities already present.
+ * Collect what a session's open turn already projects, so a re-read of the
+ * turn OMP is still writing adds only the events the live socket has not
+ * delivered. Prompt and assistant-body identities are bounded to that open
+ * turn: a completed turn is never the live projection, and the next transcript
+ * turn may legitimately repeat the prompt text it was opened with. Tool
+ * identities are global to the log because a resumed harness turn keeps the
+ * calls it already advertised.
+ * @param session - session whose open turn a transcript turn is about to be merged into.
+ * @returns the content identities the open turn already projects.
  */
 function liveTurnDedupeOf(session: Session): LiveTurnDedupe {
   const events = session.snapshotEvents()
@@ -1183,7 +1185,6 @@ function dedupeLiveTurn(events: readonly OmpHydrationEvent[], dedupe: LiveTurnDe
  * @param path - transcript path.
  * @param limit - maximum events selected by one pass; at least one turn is always included.
  * @param cursorOrHydratedTurns - saved cursor, or the legacy turn count a previous hydration recorded.
- * @param includeNewestTurn - false leaves the last transcript turn out because OMP is still streaming it.
  * @returns the appended event count, the contiguous turn count, and the cursor to persist.
  */
 export async function hydrateOmpSession(
@@ -1191,7 +1192,6 @@ export async function hydrateOmpSession(
   path: string,
   limit = Number.POSITIVE_INFINITY,
   cursorOrHydratedTurns: number | OmpHydrationCursor = 0,
-  includeNewestTurn = true,
 ): Promise<OmpHydrationOutcome> {
   const cursor: OmpHydrationCursor = typeof cursorOrHydratedTurns === 'number'
     ? { hydratedTurns: cursorOrHydratedTurns }
@@ -1201,7 +1201,7 @@ export async function hydrateOmpSession(
   const info = await stat(path).catch(() => undefined)
   const byteOffset = info !== undefined && info.isFile() ? info.size : undefined
 
-  if (projected > 0 && includeNewestTurn
+  if (projected > 0
     && cursor.hydratedLeafEntryId !== undefined
     && cursor.hydratedByteOffset !== undefined
     && byteOffset === cursor.hydratedByteOffset) {
@@ -1246,13 +1246,13 @@ export async function hydrateOmpSession(
 
   const pending = turns.slice(matched + 1)
   const openTurnNumber = openTurnStart(session.snapshotEvents())?.turn
-  const newestPending = includeNewestTurn && openTurnNumber !== undefined && pending.length === 1 ? pending[0] : undefined
+  const newestPending = openTurnNumber !== undefined && pending.length === 1 ? pending[0] : undefined
   const mergedInto = newestPending !== undefined && openTurnNumber !== undefined
     && opensWithSamePrompt(session, openTurnNumber, newestPending)
     ? newestPending
     : undefined
   const mergeTurn = mergedInto === undefined ? undefined : openTurnNumber
-  const admissible = includeNewestTurn && (mergedInto !== undefined || openTurnNumber === undefined)
+  const admissible = mergedInto !== undefined || openTurnNumber === undefined
     ? pending
     : pending.slice(0, -1)
   const admitted = base === 0 ? newestTurns(admissible, limit) : oldestTurns(admissible, limit)
@@ -1287,10 +1287,9 @@ export async function hydrateOmpSession(
   for (const boundary of matchedTurn?.boundariesAfter ?? []) emitBoundary(boundary)
   for (const boundary of admitted[0]?.boundariesBefore ?? []) emitBoundary(boundary)
   let appendedEvents = 0
-  const newestRecorded = turns.at(-1)
-  const liveTurn = selected.length === 0 ? undefined : liveTurnDedupeOf(session)
+  const liveTurn = mergedInto === undefined ? undefined : liveTurnDedupeOf(session)
   for (const [index, events] of selected.entries()) {
-    const batch = liveTurn === undefined || admitted[index] !== newestRecorded
+    const batch = liveTurn === undefined || admitted[index] !== mergedInto
       ? events
       : dedupeLiveTurn(events, liveTurn)
     for (const event of batch) {
