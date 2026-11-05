@@ -254,6 +254,8 @@ interface TranscriptMessage {
   readonly model?: unknown
   readonly toolCallId?: unknown
   readonly isError?: unknown
+  readonly stopReason?: unknown
+  readonly errorMessage?: unknown
 }
 
 interface TranscriptMessageEntry {
@@ -781,6 +783,7 @@ export async function ompTranscriptTurns(path: string): Promise<OmpTranscriptTur
     leafEntryId?: string
     events: OmpHydrationEvent[]
     boundaries?: OmpTranscriptCompaction[]
+    failure?: { message: string; code: string }
   }
   const beforeFirst: OmpTranscriptCompaction[] = []
   const drafts: TurnDraft[] = []
@@ -796,7 +799,15 @@ export async function ompTranscriptTurns(path: string): Promise<OmpTranscriptTur
   const closeTurn = (): void => {
     if (current === undefined || draft === undefined) return
     current.push(timed({ type: 'step/end', data: { turn, step } }, lastTime))
-    current.push(timed({ type: 'turn/end', data: { turn, reason: { kind: 'completed' } } }, lastTime))
+    current.push(timed({
+      type: 'turn/end',
+      data: {
+        turn,
+        reason: draft.failure === undefined
+          ? { kind: 'completed' }
+          : { kind: 'error', error: draft.failure },
+      },
+    }, lastTime))
     drafts.push(draft)
     current = undefined
     draft = undefined
@@ -885,6 +896,12 @@ export async function ompTranscriptTurns(path: string): Promise<OmpTranscriptTur
       continue
     }
     if (message.role === 'assistant') {
+      if (message.stopReason === 'error' && draft !== undefined) {
+        const reported = typeof message.errorMessage === 'string' && message.errorMessage.trim().length > 0
+          ? message.errorMessage
+          : 'The OMP provider reported an error without a message.'
+        draft.failure = draft.failure ?? { message: reported, code: 'PROVIDER_ERROR' }
+      }
       const results = resultsBefore(position)
       const content = assistantBlocks(message.content, toolStarts)
         .filter(block => block.type !== 'tool-call' || results.has(block.id))

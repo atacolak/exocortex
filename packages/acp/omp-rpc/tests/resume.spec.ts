@@ -802,6 +802,62 @@ describe('ompTranscriptTurns canonical branch', () => {
       Date.parse('2026-11-04T11:00:00.000Z'),
     ])
   })
+
+  it('records an empty assistant error as the turn failure instead of completing the turn', async () => {
+    const path = await transcript([
+      sessionLine(),
+      userEntry(entryId(1), SESSION_UUID, 'switch to deepseek'),
+      {
+        type: 'message',
+        id: entryId(2),
+        parentId: entryId(1),
+        message: {
+          role: 'assistant',
+          content: [],
+          stopReason: 'error',
+          errorMessage: '400 Upstream request failed: Model is unavailable',
+        },
+      },
+    ])
+
+    const turns = await ompTranscriptTurns(path)
+
+    expect(turns).toHaveLength(1)
+    expect(turns[0]?.events.filter(event => event.type === 'assistant/message')).toEqual([])
+    const end = turns[0]?.events.find(event => event.type === 'turn/end')
+    expect(end?.data.reason).toEqual({
+      kind: 'error',
+      error: { message: '400 Upstream request failed: Model is unavailable', code: 'PROVIDER_ERROR' },
+    })
+  })
+
+  it('keeps the assistant text of an errored message and marks the turn failed', async () => {
+    const path = await transcript([
+      sessionLine(),
+      userEntry(entryId(1), SESSION_UUID, 'switch to deepseek'),
+      {
+        type: 'message',
+        id: entryId(2),
+        parentId: entryId(1),
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'The provider refused the request.' }],
+          stopReason: 'error',
+          errorMessage: 'Model is unavailable',
+        },
+      },
+    ])
+
+    const session = Session.create(SessionId('hydrate-errored-assistant'))
+    await hydrateOmpSession(session, path)
+    const events = session.snapshotEvents()
+
+    expect(events.filter(event => event.type === 'assistant/message')).toHaveLength(1)
+    expect(events.find(event => event.type === 'turn/end')?.data.reason).toEqual({
+      kind: 'error',
+      error: { message: 'Model is unavailable', code: 'PROVIDER_ERROR' },
+    })
+  })
 })
 
 describe('hydrateOmpSession canonical cursor', () => {
