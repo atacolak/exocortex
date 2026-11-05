@@ -11,6 +11,7 @@ import {
 import { CompactionId } from '@deepseek-ai/dsh-compaction'
 import { isCompactCheckpointSource } from '@deepseek-ai/dsh-compaction/checkpoint'
 import SessionStore, {
+  KNOWN_SESSION_EVENT_TYPES,
   SESSION_FORMAT_VERSION,
   Session,
   SessionId,
@@ -31,7 +32,9 @@ import {
   inboxProjectionDefinition,
   type OmpAgentHost,
 } from '../src/agent-factory.ts'
-import { quarantineCorruptSession } from '../src/index.ts'
+import { assertReleasedV4Relationships } from '@deepseek-ai/dsh-session-format-v3-to-v4'
+import { hydrateOmpBinding, OmpBindings } from '../src/bindings.ts'
+import { quarantineCorruptSession, recoverBoundMirror } from '../src/index.ts'
 import { OmpAgentDriver, type OmpToolEvent } from '../src/driver.ts'
 import { hydrateOmpSession, type OmpHydrationCursor } from '../src/resume.ts'
 import { rpcHarness, tick, type RpcHarness } from './harness.ts'
@@ -625,6 +628,200 @@ describe('OmpAgentFactory recovers a corrupt session-format mirror', () => {
     const quarantined = (await readdir(dir)).filter(name => name.startsWith(`${basename(artifact.path)}.corrupt-`))
     expect(quarantined).toHaveLength(1)
     expect(await readFile(join(dir, quarantined[0]!))).toEqual(original)
+  })
+})
+
+const MEASURED_TITLE = 'PLUG: measured recovery'
+const MEASURED_OMP_SESSION = '01a0c88e-7521-7000-bb6a-67527d2b6f00'
+
+/**
+ * Build the mirror shape a real 488-turn session persisted: 413 `turn/start`
+ * events with 412 unique turns, the first one turn 87, and turn 488 twice. Raw
+ * JSONL is required because no valid Session can append a start at turn 87.
+ */
+async function measuredCorruptMirror(h: Harness, id: SessionId): Promise<{ path: string; original: Buffer }> {
+  const header: SessionHeader = {
+    version: SESSION_FORMAT_VERSION,
+    id,
+    createdAt: 1,
+    cwd: h.cwd,
+    isSeeded: false,
+    delegationDepth: 0,
+    agentPreset: 'omp:argon',
+  }
+  const seed = Session.create(id, [], header)
+  seed.append('session/title', { title: MEASURED_TITLE, messageSeqs: [], source: { kind: 'user' } })
+  const handle = await h.ctx.sessionPersistence.create(header)
+  try {
+    await handle.append(seed.snapshotEvents())
+  } finally {
+    await handle.close()
+  }
+  const snapshot = await h.ctx.sessionPersistence.stat(id)
+  const path = snapshot?.location?.path
+  if (path === undefined) throw new Error('the measured artifact has no resolved location path')
+
+  const turnNumbers = Array.from({ length: 412 }, (_, index) => 87 + index)
+  const duplicated = turnNumbers.flatMap(turn => turn === 488 ? [turn, turn] : [turn])
+  const rows: unknown[] = [
+    { type: 'session', ...header },
+    { type: 'session/title', seq: 0, time: 1, data: { title: MEASURED_TITLE, messageSeqs: [], source: { kind: 'user' } } },
+  ]
+  let seq = 1
+  for (const turn of duplicated) {
+    rows.push({ type: 'turn/start', seq, time: seq + 1, data: { turn } })
+    seq += 1
+    rows.push({ type: 'turn/end', seq, time: seq + 1, data: { turn, reason: { kind: 'completed' } } })
+    seq += 1
+  }
+  const original = Buffer.from(`${rows.map(row => JSON.stringify(row)).join('\n')}\n`)
+  await writeFile(path, original)
+  return { path, original }
+}
+
+async function measuredTranscript(h: Harness, turns: number): Promise<string> {
+  const path = join(dirname(h.cwd), 'measured-transcript.jsonl')
+  const rows: unknown[] = [
+    { type: 'title', v: 1, title: MEASURED_TITLE },
+    { type: 'session', version: 3, id: MEASURED_OMP_SESSION, cwd: dirname(h.cwd) },
+  ]
+  for (let turn = 1; turn <= turns; turn += 1) {
+    const user = (turn * 2 - 1).toString(16).padStart(8, '0')
+    const assistant = (turn * 2).toString(16).padStart(8, '0')
+    const parent = turn === 1 ? MEASURED_OMP_SESSION : (turn * 2 - 2).toString(16).padStart(8, '0')
+    rows.push({
+      type: 'message',
+      id: user,
+      parentId: parent,
+      message: { role: 'user', content: [{ type: 'text', text: `measured turn ${String(turn)}` }] },
+    })
+    rows.push({
+      type: 'message',
+      id: assistant,
+      parentId: user,
+      message: { role: 'assistant', content: [{ type: 'text', text: `measured reply ${String(turn)}` }] },
+    })
+  }
+  await writeFile(path, `${rows.map(row => JSON.stringify(row)).join('\n')}\n`)
+  return path
+}
+
+describe('OmpAgentFactory recovers the measured corrupt mirror shape', () => {
+  it('rehydrates a bound mirror from turn 1 into a released-valid artifact', async () => {
+    let store: OmpBindings | undefined
+    const h = await harness({
+      hydrate: async (agent) => {
+        const bindings = store
+        const binding = await bindings?.get(agent.id)
+        if (bindings === undefined || binding === undefined) return
+        await hydrateOmpBinding({ bindings, session: agent.session, binding })
+      },
+      recover: async (ctx, id, failure) => quarantineCorruptSession(ctx, id, failure, store),
+    })
+    store = new OmpBindings(join(h.cwd, 'bindings.json'))
+    const turns = 5
+    const transcriptPath = await measuredTranscript(h, turns)
+    const id = SessionId('session-measured-corrupt')
+    const fixture = await measuredCorruptMirror(h, id)
+    await store.set(id, {
+      ompSessionId: MEASURED_OMP_SESSION,
+      path: transcriptPath,
+      cwd: dirname(h.cwd),
+      profile: 'argon',
+      hydratedTurns: 488,
+      hydratedLeafEntryId: (turns * 2).toString(16).padStart(8, '0'),
+      hydratedByteOffset: (await stat(transcriptPath)).size,
+      updatedAt: new Date(0).toISOString(),
+    })
+
+    const resumed = await h.ctx.agents.resume({ resumeSessionId: id })
+    const events = resumed.agent.session.snapshotEvents()
+    const starts = events.flatMap(event => event.type === 'turn/start' ? [event.data.turn] : [])
+    expect(starts[0]).toBe(1)
+    expect(new Set(starts).size).toBe(starts.length)
+    expect(events[2]).toMatchObject({ type: 'turn/start', seq: 2, data: { turn: 1 } })
+    expect(conversationTexts(events)).toEqual(
+      Array.from({ length: turns }, (_, index) => `measured turn ${String(index + 1)}`),
+    )
+    await resumed.dispose()
+    expect((await store.get(id))?.hydratedTurns).toBe(turns)
+
+    const dir = dirname(fixture.path)
+    const quarantined = (await readdir(dir)).filter(name => name.startsWith(`${basename(fixture.path)}.corrupt-`))
+    expect(quarantined).toHaveLength(1)
+    expect(await readFile(join(dir, quarantined[0]!))).toEqual(fixture.original)
+
+    const replacement = await h.ctx.sessionPersistence.stat(id)
+    expect(replacement?.location?.path).toBe(fixture.path)
+    const header = replacement?.header
+    if (header === undefined) throw new Error('the recovered mirror has no header')
+    const stored = await coldRead(h.ctx, id)
+    expect(() => assertReleasedV4Relationships(
+      { header, inheritedEventCount: 0, events: stored } as unknown as Parameters<typeof assertReleasedV4Relationships>[0],
+      KNOWN_SESSION_EVENT_TYPES,
+    )).not.toThrow()
+  })
+
+
+  it('rebuilds a bound mirror for a viewer read without attaching an agent', async () => {
+    const h = await harness()
+    const store = new OmpBindings(join(h.cwd, 'bindings-viewer.json'))
+    const turns = 4
+    const transcriptPath = await measuredTranscript(h, turns)
+    const id = SessionId('session-viewer-recovered')
+    const fixture = await measuredCorruptMirror(h, id)
+    await store.set(id, {
+      ompSessionId: MEASURED_OMP_SESSION,
+      path: transcriptPath,
+      cwd: dirname(h.cwd),
+      hydratedTurns: 86,
+      hydratedLeafEntryId: (turns * 2).toString(16).padStart(8, '0'),
+      hydratedByteOffset: (await stat(transcriptPath)).size,
+      updatedAt: new Date(0).toISOString(),
+    })
+    const corrupt = await h.ctx.sessionPersistence.open(id, 'read')
+      .then(() => undefined, (error: unknown) => error)
+    expect(corrupt).toBeInstanceOf(Error)
+
+    expect(await recoverBoundMirror(h.ctx, store, id, corrupt as Error)).toBe(true)
+
+    const events = await coldRead(h.ctx, id)
+    const starts = events.flatMap(event => event.type === 'turn/start' ? [event.data.turn] : [])
+    expect(starts).toEqual([1, 2, 3, 4])
+    expect(new Set(starts).size).toBe(turns)
+    const firstPrompt = events.find(event => event.type === 'user/message')
+    const block = firstPrompt?.type === 'user/message' ? firstPrompt.data.content[0] : undefined
+    expect(block?.type === 'text' ? block.text : undefined).toBe('measured turn 1')
+    expect((await store.get(id))?.hydratedTurns).toBe(turns)
+    const quarantined = (await readdir(dirname(fixture.path))).filter(name => name.startsWith(`${basename(fixture.path)}.corrupt-`))
+    expect(quarantined).toHaveLength(1)
+    const header = (await h.ctx.sessionPersistence.stat(id))?.header
+    expect(() => assertReleasedV4Relationships(
+      { header, inheritedEventCount: 0, events } as unknown as Parameters<typeof assertReleasedV4Relationships>[0],
+      KNOWN_SESSION_EVENT_TYPES,
+    )).not.toThrow()
+  })
+
+  it('leaves an unbound corrupt artifact in place and refuses the read', async () => {
+    const h = await harness({
+      recover: async (ctx, id, failure) => quarantineCorruptSession(
+        ctx, id, failure, new OmpBindings(join(h.cwd, 'bindings-unbound.json')),
+      ),
+    })
+    const id = SessionId('session-measured-unbound')
+    const fixture = await measuredCorruptMirror(h, id)
+
+    let failure: Error | undefined
+    try {
+      await h.ctx.agents.resume({ resumeSessionId: id })
+    } catch (error: unknown) {
+      failure = error instanceof Error ? error : undefined
+    }
+    expect(failure?.name).toBe('SessionPersistenceCorruptionError')
+    expect((await stat(fixture.path)).isFile()).toBe(true)
+    const siblings = await readdir(dirname(fixture.path))
+    expect(siblings.filter(name => name.includes('.corrupt-'))).toEqual([])
+    expect(await readFile(fixture.path)).toEqual(fixture.original)
   })
 })
 

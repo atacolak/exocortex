@@ -602,7 +602,7 @@ describe('hydrateOmpSession tail sync', () => {
     expect(session.snapshotEvents().length).toBe(before)
   })
 
-  it('trusts a recorded hydration count when the session log carries fewer turns', async () => {
+  it('replays every transcript turn when the session log carries none', async () => {
     const path = await transcript([
       userLine('one'),
       assistantLine('one reply'),
@@ -617,7 +617,9 @@ describe('hydrateOmpSession tail sync', () => {
 
     expect(outcome.turns).toBe(3)
     expect(session.snapshotEvents().filter(event => event.type === 'user/message').map(event => firstText(event.data.content)))
-      .toEqual(['three'])
+      .toEqual(['one', 'two', 'three'])
+    expect(session.snapshotEvents().filter(event => event.type === 'turn/start').map(event => event.data.turn))
+      .toEqual([1, 2, 3])
   })
 })
 
