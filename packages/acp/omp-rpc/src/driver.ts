@@ -118,19 +118,21 @@ export interface OmpUnsolicitedWake {
 
 /**
  * Map one waking input onto the trigger-card source it is presented under.
+ * Advisor guidance rides the registered `omp-wake` kind; the `<advisory>` tag
+ * prefix in the injected text is what the trigger card reads to distinguish it.
  * @param text - the exact input text OMP received for the unasked run.
  * @returns the trigger-card source, or undefined for real user prose.
  */
 export function ompTriggerSource(text: string): OmpTriggerSource | undefined {
   const head = text.trimStart()
-  if (head.startsWith('<advisory')) {
-    return { kind: 'omp-advisor', form: 'notice', summary: boundContextSummary(firstMeaningfulLine(text)) }
-  }
   if (head.startsWith('<system-notice') || text.includes('<task-result')) {
     return { kind: 'omp-subagent-settled', form: 'notice', summary: boundContextSummary(firstMeaningfulLine(text)) }
   }
   if (head.startsWith('<hcom') || head.startsWith('[hcom')) {
     return { kind: 'omp-agent-message', form: 'relay' }
+  }
+  if (head.startsWith('<advisory')) {
+    return { kind: 'omp-wake', form: 'notice', summary: boundContextSummary(firstMeaningfulLine(text)) }
   }
   return undefined
 }
@@ -138,10 +140,10 @@ export function ompTriggerSource(text: string): OmpTriggerSource | undefined {
 /**
  * Attribute an OMP-authored injection that matches no specific trigger.
  * @param text - the exact input text OMP injected.
- * @returns the system notice source.
+ * @returns the background wake source.
  */
-export function ompSystemSource(text: string): OmpTriggerSource {
-  return { kind: 'omp-system', form: 'notice', summary: boundContextSummary(firstMeaningfulLine(text)) }
+export function ompGenericWakeSource(text: string): OmpTriggerSource {
+  return { kind: 'omp-wake', form: 'notice', summary: boundContextSummary(firstMeaningfulLine(text)) }
 }
 
 function firstMeaningfulLine(text: string): string {
@@ -849,7 +851,7 @@ export class OmpAgentDriver {
     }
     if (text === undefined) return
     this.markExternalUserMessage(text)
-    this.onUnsolicitedWake?.({ text, source: ompTriggerSource(text) ?? ompSystemSource(text) })
+    this.onUnsolicitedWake?.({ text, source: ompTriggerSource(text) ?? ompGenericWakeSource(text) })
   }
 
   /** One announcement per OMP message id, bounded so a long attach does not grow without limit. */

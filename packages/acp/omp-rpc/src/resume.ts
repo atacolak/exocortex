@@ -22,7 +22,7 @@ import {
 import { foldSurface, type Session, type SessionAppendTiming, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { normalizeSessionTitle } from '@deepseek-ai/dsh-session-title'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
-import { ompSystemSource, ompTriggerSource } from './driver.ts'
+import { ompGenericWakeSource, ompTriggerSource } from './driver.ts'
 import type { OmpTriggerSource } from './types.ts'
 
 /** A resume or open request the HTTP surface can report with a stable status. */
@@ -305,7 +305,7 @@ function userMessageSource(content: readonly ContentBlock[]): MessageSourceMap['
 /** Attribution for a custom card OMP recorded; it is never operator prose. */
 function customMessageSource(content: readonly ContentBlock[]): OmpTriggerSource {
   const text = content.map(block => block.type === 'text' ? block.text : '').join('\n')
-  return ompTriggerSource(text) ?? ompSystemSource(text)
+  return ompTriggerSource(text) ?? ompGenericWakeSource(text)
 }
 
 /** Read a `custom_message` entry's content, which OMP records as a string or parts. */

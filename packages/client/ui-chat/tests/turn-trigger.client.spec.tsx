@@ -49,31 +49,6 @@ describe('Turn trigger notices', () => {
   })
 
   it.each([
-    [
-      { kind: 'omp-advisor', form: 'notice', summary: 'Stop before shipping.' },
-      { title: 'message.trigger.advisor', icon: 'agent' },
-      'Advisor guidance',
-    ],
-    [
-      { kind: 'omp-system', form: 'notice', summary: 'Todo list is stale.' },
-      { title: 'message.trigger.system', icon: 'request' },
-      'System notice',
-    ],
-  ] as const)('presents an OMP %j card collapsed in the system lane', (source, expected, title) => {
-    const node = trigger(source)
-    node.data.content = [{ type: 'text', text: 'Stop before shipping.' }]
-    expect(turnTriggerDetails(node.data)).toEqual(expected)
-    const view = render(<TurnTriggerNodeView node={node} t={makeTranslate(en)} />)
-    const button = view.getByRole('button')
-    expect(button.textContent).toContain(title)
-    expect(button.getAttribute('aria-expanded')).toBe('false')
-    expect(view.container.querySelector('[data-context-text]')).toBeNull()
-    fireEvent.click(button)
-    expect(view.container.querySelector('[data-context-text]')?.textContent).toBe('Stop before shipping.')
-    expect(view.container.querySelector('[data-turn-trigger]')?.textContent).toContain(title)
-  })
-
-  it.each([
     [en, 'Task message received'],
     [zh, '收到任务消息'],
   ])('presents Team relays as Agent messages while retaining the sender name', (locale, title) => {

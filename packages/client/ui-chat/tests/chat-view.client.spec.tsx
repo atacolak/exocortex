@@ -188,16 +188,6 @@ const context = (seq: number, text: string, turn?: number): ContextMessageNode &
   producer: { role: 'inject', label: null }, form: null,
   ...(turn === undefined ? {} : { turn }),
 })
-const advisorWake = (seq: number, turn: number): ContextMessageNode & { turn: number } => ({
-  kind: 'context',
-  seq,
-  time: seq * 1_000,
-  content: [{ type: 'text', text: 'Stop before shipping.' }],
-  source: { kind: 'omp-advisor', form: 'notice', summary: 'Stop before shipping.' },
-  producer: { role: 'inject', label: 'omp-advisor' },
-  form: 'notice',
-  turn,
-})
 const steering = (seq: number, text: string, turn: number): SteeringMessageNode & { turn: number } => ({
   kind: 'steering', messageId: `steering-${String(seq)}` as SteeringMessageNode['messageId'],
   seq, time: seq * 1_000, turn, content: [{ type: 'text', text }], source: null,
@@ -4123,26 +4113,6 @@ describe('ChatView', () => {
       })
     })
     expect(scroller.scrollTop).toBe(1200)
-  })
-
-  it('leaves a reader in place when an advisor wake lands instead of operator words', () => {
-    const h = makeHarness({ nodes: [user(1, 'q'), assistant(2, 'a')] })
-    const view = render(<h.ChatView {...h.props} />)
-    const scroller = view.container.querySelector('[data-chat-flow]')!.parentElement as HTMLDivElement
-    Object.defineProperty(scroller, 'scrollHeight', { value: 1_000, writable: true })
-    Object.defineProperty(scroller, 'clientHeight', { value: 300, writable: true })
-    readerScroll(scroller, 100)
-    expect(view.getByLabelText('回到底部')).toBeTruthy()
-
-    Object.defineProperty(scroller, 'scrollHeight', { value: 1_400, writable: true })
-    act(() => {
-      h.setChat({ nodes: [user(1, 'q'), assistant(2, 'a'), advisorWake(3, 1)] })
-      h.setSession({ running: true })
-    })
-
-    expect(scroller.scrollTop).toBe(100)
-    expect(renderedFlowKinds(view.container).filter(kind => kind === 'user')).toHaveLength(1)
-    expect(view.getByLabelText('回到底部')).toBeTruthy()
   })
 
   it('back-to-bottom cancels an in-flight paging anchor', () => {
