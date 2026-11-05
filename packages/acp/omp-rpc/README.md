@@ -35,13 +35,17 @@ so `/omp-resume` works against an active OMP session instead of returning
 transcript, and every other terminal stay alive.
 
 The bridge also polls the run directory (default 1500 ms, immediate startup
-scan) and adopts every live publication: it resolves the Harness Session
-already bound to that OMP session (never minting a duplicate), otherwise
-creates one under the OMP `cwd` workspace with the transcript's `rootAgent`
-preset, hydrates the recorded bubbles when the Session is blank, sets the
-recorded title, and attaches the socket. Any OMP agent running anywhere on
-the machine therefore appears in the sidebar with live status and opens into
-its running conversation without typing a command.
+scan) and adopts every live publication whose `sessionFile` resolves under
+this instance's sessions root: a shared run directory can carry publications
+from another instance, and adopting one would bind a foreign transcript
+locally. A sidecar with no `sessionFile` is still adopted, since OMP writes
+that field as nullable. For each adopted session it resolves the Harness
+Session already bound to that OMP session (never minting a duplicate),
+otherwise creates one under the OMP `cwd` workspace with the transcript's
+`rootAgent` preset, hydrates the recorded bubbles when the Session is blank,
+sets the recorded title, and attaches the socket. Any OMP agent running
+anywhere on the machine therefore appears in the sidebar with live status and
+opens into its running conversation without typing a command.
 
 ## Missing workspace directories
 
