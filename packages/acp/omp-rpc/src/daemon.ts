@@ -98,20 +98,29 @@ async function linkMirror(target, source) {
   mirrors.push(target)
 }
 
-async function publicationOf(childPid) {
+async function publicationIn(directory, childPid) {
   let names
-  try { names = await readdir(publicationDir) } catch { return undefined }
+  try { names = await readdir(directory) } catch { return undefined }
   for (const name of names) {
     if (!name.endsWith('.json')) continue
     let record
-    try { record = JSON.parse(await readFile(join(publicationDir, name), 'utf8')) } catch { continue }
+    try { record = JSON.parse(await readFile(join(directory, name), 'utf8')) } catch { continue }
     if (record === null || typeof record !== 'object' || record.pid !== childPid) continue
     const sessionId = record.sessionId
     if (typeof sessionId !== 'string' || sessionId.length === 0) continue
-    const socketPath = join(publicationDir, sessionId + '.sock')
+    const socketPath = join(directory, sessionId + '.sock')
     const info = await stat(socketPath).catch(() => undefined)
     if (info === undefined) continue
-    return { sessionId, socketPath }
+    return { sessionId, socketPath, directory }
+  }
+  return undefined
+}
+
+async function publicationOf(childPid) {
+  const directories = new Set([runDirectory, publicationDir])
+  for (const directory of directories) {
+    const found = await publicationIn(directory, childPid)
+    if (found !== undefined) return found
   }
   return undefined
 }
@@ -123,10 +132,10 @@ async function publish() {
     const found = await publicationOf(child.pid)
     if (found !== undefined) {
       let socketPath = found.socketPath
-      if (runDirectory !== publicationDir) {
+      if (found.directory !== runDirectory) {
         socketPath = join(runDirectory, found.sessionId + '.sock')
         await linkMirror(socketPath, found.socketPath)
-        await linkMirror(join(runDirectory, found.sessionId + '.json'), join(publicationDir, found.sessionId + '.json'))
+        await linkMirror(join(runDirectory, found.sessionId + '.json'), join(found.directory, found.sessionId + '.json'))
       }
       await writeHandshake({ ompSessionId: found.sessionId, pid: child.pid, socketPath })
       published = true
@@ -143,7 +152,7 @@ async function publish() {
 
 function start() {
   const executable = spec.argv[0]
-  const environment = Object.assign({}, process.env, spec.env)
+  const environment = Object.assign({}, process.env, spec.env, { OMP_RUN_DIR: runDirectory })
   child = spawn(executable, spec.argv.slice(1), {
     detached: false,
     stdio: ['pipe', 'pipe', 'ignore'],

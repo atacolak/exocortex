@@ -83,6 +83,32 @@ describe('omp launch extensions', () => {
       HCOM_LAUNCHED: '1',
     })
   })
+
+  it('pins the OMP run directory so the child cannot publish under the process home', () => {
+    expect(ompLaunchEnvironment({ runDirectory: '/stage/omp-run' })).toEqual({
+      EXOCORTEX_ENV: '1',
+      OMP_RUN_DIR: '/stage/omp-run',
+    })
+  })
+})
+
+describe('OmpBridge run directory pinning', () => {
+  it('carries the bridge run directory into the launched OMP environment', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'omp-pin-'))
+    onTestFinished(() => rm(root, { recursive: true, force: true }))
+    const runDirectory = join(root, 'omp-run')
+    const { ctx, bridge, spawned } = await mountedBridge((frame) => {
+      if (frame.type === 'get_state') return { sessionId: 'omp-pinned-1', cwd: root }
+      if (frame.type === 'get_available_models') return { models: [] }
+      if (frame.type === 'get_available_commands') return { commands: [] }
+      return {}
+    }, { runDirectory })
+    const agent = await scopedAgent(ctx, 'harness-pinned')
+    await bridge.attach(agent, { mode: 'attach', sessionDir: join(root, 'sessions'), cwd: root })
+
+    expect(spawned).toHaveLength(1)
+    expect(spawned[0]?.env.OMP_RUN_DIR).toBe(runDirectory)
+  })
 })
 
 describe('omp transcript planning', () => {
@@ -201,16 +227,25 @@ describe('omp todo projection', () => {
 interface FakeOmp {
   readonly subprocess: SubprocessRuntime
   readonly requests: Record<string, unknown>[]
+  /** Every process the bridge asked the provider to start. */
+  readonly spawned: { readonly argv: readonly string[]; readonly env: Record<string, string> }[]
   /** Push one unsolicited frame, as a lifecycle or model switch event does. */
   readonly send: (frame: unknown) => void
+}
+
+interface FakeSpawnRequest {
+  readonly argv: readonly string[]
+  readonly env?: Record<string, string> | undefined
 }
 
 function fakeOmp(reply: (frame: Record<string, unknown>, send: (frame: unknown) => void) => unknown): FakeOmp {
   const requests: Record<string, unknown>[] = []
   const outputs: PassThrough[] = []
+  const spawned: { readonly argv: readonly string[]; readonly env: Record<string, string> }[] = []
   const subprocess = {
     resolveExecutable: async (command: string) => command,
-    spawn: (): SubprocessHandle => {
+    spawn: (request: FakeSpawnRequest): SubprocessHandle => {
+      spawned.push({ argv: request.argv, env: request.env ?? {} })
       const stdin = new PassThrough()
       const stdout = new PassThrough()
       outputs.push(stdout)
@@ -264,18 +299,23 @@ function fakeOmp(reply: (frame: Record<string, unknown>, send: (frame: unknown) 
   return {
     subprocess,
     requests,
+    spawned,
     send: (frame) => {
       for (const output of outputs) output.write(`${JSON.stringify(frame)}\n`)
     },
   }
 }
 
-async function mountedBridge(reply: Parameters<typeof fakeOmp>[0]): Promise<{
+async function mountedBridge(
+  reply: Parameters<typeof fakeOmp>[0],
+  options: { readonly runDirectory?: string } = {},
+): Promise<{
   ctx: Context
   bridge: OmpBridge
   bridgeCtx: Context
   subprocess: SubprocessRuntime
   requests: Record<string, unknown>[]
+  spawned: FakeOmp['spawned']
   send: FakeOmp['send']
 }> {
   const ctx = new Context()
@@ -283,15 +323,21 @@ async function mountedBridge(reply: Parameters<typeof fakeOmp>[0]): Promise<{
   await ctx.plugin(SessionStore)
   await ctx.plugin(CommandRuntime)
   ctx.provide('tools', { definitions: () => [] } as never)
-  const { subprocess, requests, send } = fakeOmp(reply)
+  const { subprocess, requests, spawned, send } = fakeOmp(reply)
   ctx.provide('subprocess', subprocess as never)
   let bridgeCtx!: Context
   await ctx.plugin(Object.assign((inner: Context) => { bridgeCtx = inner }, {
     inject: ['commands', 'subprocess', 'tools'],
   }))
-  const bridge = new OmpBridge({ ctx: bridgeCtx, subprocess, executable: 'omp', detachedDaemon: false })
+  const bridge = new OmpBridge({
+    ctx: bridgeCtx,
+    subprocess,
+    executable: 'omp',
+    detachedDaemon: false,
+    ...options.runDirectory === undefined ? {} : { runDirectory: options.runDirectory },
+  })
   onTestFinished(() => bridge.dispose())
-  return { ctx, bridge, bridgeCtx, subprocess, requests, send }
+  return { ctx, bridge, bridgeCtx, subprocess, requests, spawned, send }
 }
 
 async function scopedAgent(ctx: Context, id: string): Promise<Agent> {

@@ -93,21 +93,23 @@ export async function readOmpTranscriptHeader(path: string): Promise<OmpTranscri
 }
 
 /**
- * List the transcripts directly under one OMP session root's project
- * directories, newest file first.
+ * List the transcripts under one OMP session root: the session root itself and
+ * one project level below it, newest file first.
  * @param root - OMP session root (`~/.omp/agent/sessions`).
  * @returns transcript paths; unreadable directories contribute nothing.
  */
 export async function listOmpTranscripts(root: string): Promise<string[]> {
-  const projects = await readdir(root, { withFileTypes: true }).catch(() => [])
   const paths: string[] = []
-  for (const project of projects) {
-    if (!project.isDirectory() && !project.isSymbolicLink()) continue
-    const dir = join(root, project.name)
-    const entries = await readdir(dir, { withFileTypes: true }).catch(() => [])
-    for (const entry of entries) {
-      if (!(entry.isFile() || entry.isSymbolicLink()) || !entry.name.endsWith('.jsonl')) continue
-      paths.push(join(dir, entry.name))
+  for (const entry of await readdir(root, { withFileTypes: true }).catch(() => [])) {
+    const path = join(root, entry.name)
+    if (entry.name.endsWith('.jsonl') && (entry.isFile() || entry.isSymbolicLink())) {
+      paths.push(path)
+      continue
+    }
+    if (!entry.isDirectory() && !entry.isSymbolicLink()) continue
+    for (const nested of await readdir(path, { withFileTypes: true }).catch(() => [])) {
+      if (!nested.name.endsWith('.jsonl') || !(nested.isFile() || nested.isSymbolicLink())) continue
+      paths.push(join(path, nested.name))
     }
   }
   return paths.sort((left, right) => right.localeCompare(left))

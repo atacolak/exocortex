@@ -1,6 +1,6 @@
 import { mkdir, stat } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
-import { homedir, tmpdir } from 'node:os'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentStepStream, ModelSelection } from '@deepseek-ai/dsh-agent'
@@ -34,7 +34,7 @@ import { OmpHostToolBridge } from './host-tools.ts'
 import { launchOmp, type LaunchedOmp } from './launch.ts'
 import { CLIENT_OWNED_COMMANDS, ompCompactCommand, ompNativeCommandLine } from './native-commands.ts'
 import { appendOmpCompactionBoundary, tailOmpTranscriptCompaction } from './resume.ts'
-import { connectOmpSocket, ompRunDirectory, resolveOmpRunDirectory, type OmpSocketConnection } from './socket.ts'
+import { connectOmpSocket, resolveOmpRunDirectory, type OmpSocketConnection } from './socket.ts'
 import { OmpUiBridge, type OmpUiAsker } from './ui.ts'
 import type { OmpExtensionUiRequest, OmpPromptResultFrame, OmpRpcCommand } from './types.ts'
 
@@ -194,7 +194,7 @@ export interface OmpBridgeOptions {
   readonly daemonIdleTimeoutMs?: number
   /** Directory the bridge watches for published sockets; defaults to `$OMP_RUN_DIR` then `<home>/.omp/run`. */
   readonly runDirectory?: string
-  /** Directory OMP itself publishes under; defaults to `$HOME/.omp/run`. */
+  /** Directory OMP itself publishes under; defaults to the watched run directory. */
   readonly publicationDir?: string
 }
 
@@ -237,10 +237,14 @@ export function ompLaunchArgv(options: {
  * @param options - whether the mounted extensions include the hcom binder.
  * @returns the environment additions for the OMP child process.
  */
-export function ompLaunchEnvironment(options: { readonly hcom?: boolean } = {}): Record<string, string> {
+export function ompLaunchEnvironment(options: {
+  readonly hcom?: boolean
+  readonly runDirectory?: string
+} = {}): Record<string, string> {
   return {
     EXOCORTEX_ENV: '1',
     ...options.hcom === true ? { HCOM_LAUNCHED: '1' } : {},
+    ...options.runDirectory === undefined ? {} : { OMP_RUN_DIR: options.runDirectory },
   }
 }
 
@@ -472,7 +476,11 @@ export class OmpBridge {
           executable,
           ...hcomExtension === undefined ? {} : { extensions: [hcomExtension] },
         })
-        const env = ompLaunchEnvironment({ hcom: hcomExtension !== undefined })
+        const runDirectory = this.options.runDirectory ?? resolveOmpRunDirectory(undefined, undefined)
+        const env = ompLaunchEnvironment({
+          hcom: hcomExtension !== undefined,
+          runDirectory,
+        })
         if (this.options.detachedDaemon === false) {
           launched = launchOmp(this.options.subprocess, { argv, cwd: options.cwd, env })
           await launched.ready
@@ -482,8 +490,8 @@ export class OmpBridge {
             argv,
             cwd: options.cwd,
             env,
-            publicationDir: this.options.publicationDir ?? ompRunDirectory(homedir()),
-            runDirectory: this.options.runDirectory ?? resolveOmpRunDirectory(undefined, undefined),
+            publicationDir: this.options.publicationDir ?? runDirectory,
+            runDirectory,
             handshakePath: join(tmpdir(), `dsh-omp-daemon-${randomUUID()}.json`),
             idleTimeoutMs: this.options.daemonIdleTimeoutMs ?? DEFAULT_OMP_DAEMON_IDLE_TIMEOUT_MS,
           })

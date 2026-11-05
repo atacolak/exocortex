@@ -11,7 +11,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import SessionStore, { Session, SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SubprocessHandle, SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
-import { afterEach, describe, expect, it, onTestFinished } from 'vitest'
+import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { bindingFactsOf, OmpBindings, rememberOmpBinding } from '../src/bindings.ts'
 import { OmpBridge } from '../src/bridge.ts'
 import * as ompRpc from '../src/index.ts'
@@ -626,6 +626,7 @@ async function mountedOmpPlugin(options: {
   readonly bindingsFile: string
   readonly runtime: SubprocessRuntime
   readonly agents: ReadonlyMap<string, Agent>
+  readonly watchRunDir?: string | false | undefined
 }): Promise<MountedOmpPlugin> {
   const ctx = new Context()
   onTestFinished(() => ctx.fiber.dispose())
@@ -653,9 +654,10 @@ async function mountedOmpPlugin(options: {
       },
     },
   } as never)
+  const watchOverride = 'watchRunDir' in options ? options.watchRunDir : options.runDir
   await ctx.plugin(ompRpc, {
     home: options.home,
-    watchRunDir: options.runDir,
+    ...watchOverride === undefined ? {} : { watchRunDir: watchOverride },
     bindingsFile: options.bindingsFile,
     ompSessionsRoot: options.home,
     cwd: '/work',
@@ -855,5 +857,65 @@ describe('repeated transcript opens', () => {
     })
     expect(opened).toEqual({ hydrated: 3, reused: false })
     expect(attaches).toBe(1)
+  })
+})
+
+describe('OMP publication directory isolation', () => {
+  it('collects only the run directory a pinned OMP_RUN_DIR names', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'omp-isolation-'))
+    directories.add(root)
+    const home = join(root, 'home')
+    const runDir = join(root, 'stage-omp-run')
+    const publicationDir = join(home, '.omp', 'run')
+    await mkdir(runDir, { recursive: true })
+    await mkdir(publicationDir, { recursive: true })
+    vi.stubEnv('OMP_RUN_DIR', runDir)
+    onTestFinished(() => { vi.unstubAllEnvs() })
+    const dead = await deadPid()
+    const transcriptPath = await transcriptOf([sessionLine(root), userEntry(1, OMP_SESSION), assistantEntry(1)])
+    const publishDead = async (directory: string): Promise<void> => {
+      await writeFile(join(directory, `${OMP_SESSION}.json`), JSON.stringify({
+        pid: dead,
+        sessionId: OMP_SESSION,
+        sessionFile: transcriptPath,
+        cwd: root,
+      }))
+      await writeFile(ompSocketPath(directory, OMP_SESSION), 'stale')
+      await writeFile(join(directory, `${OMP_SESSION}.sock.bind.lock`), 'stale')
+    }
+    await publishDead(runDir)
+    await publishDead(publicationDir)
+
+    const probe: PublicationProbe = { argv: [], lease: [], launch: [] }
+    const current = { transcriptPath }
+    const opened = Session.create(SessionId('session-isolated-open'))
+    const agents = new Map<string, Agent>([
+      ['session-isolated-open', {
+        id: opened.id,
+        session: opened,
+        model: { current: () => undefined },
+      } as unknown as Agent],
+    ])
+    const plugin = await mountedOmpPlugin({
+      home,
+      runDir,
+      watchRunDir: undefined,
+      bindingsFile: join(root, 'bindings.json'),
+      runtime: publicationRuntime({
+        probe,
+        sidecars: [join(runDir, `${OMP_SESSION}.json`), join(publicationDir, `${OMP_SESSION}.json`)],
+        current,
+      }),
+      agents,
+    })
+    const agent = agents.get('session-isolated-open')!
+    ;(agent as unknown as { ctx: Context }).ctx = createScope(plugin.ctx, agent).ctx
+    const response = await plugin.open({ ompSession: transcriptPath, sessionId: 'session-isolated-open' })
+    expect(response.status).toBe(200)
+
+    await expect(readFile(join(runDir, `${OMP_SESSION}.json`))).rejects.toThrow()
+    await expect(readFile(join(runDir, `${OMP_SESSION}.sock.bind.lock`))).rejects.toThrow()
+    await expect(readFile(join(publicationDir, `${OMP_SESSION}.json`))).resolves.toBeDefined()
+    await expect(readFile(join(publicationDir, `${OMP_SESSION}.sock.bind.lock`))).resolves.toBeDefined()
   })
 })

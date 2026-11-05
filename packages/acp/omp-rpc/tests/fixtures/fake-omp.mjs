@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 import { appendFileSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 
-const publicationDir = process.env.OMP_TEST_PUBLICATION_DIR
+const publicationDir = process.env.OMP_TEST_PUBLICATION_DIR || process.env.OMP_RUN_DIR
+  || join(process.env.HOME ?? homedir(), '.omp', 'run')
 const transcriptPath = process.env.OMP_TEST_TRANSCRIPT
 const markers = process.env.OMP_TEST_MARKERS
 const sessionId = process.env.OMP_TEST_SESSION_ID ?? randomUUID()

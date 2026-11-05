@@ -343,3 +343,73 @@ describe('detached OMP session daemon', () => {
     onTestFinished(() => { try { process.kill(publishedPid(published), 'SIGTERM') } catch {} })
   }, 20_000)
 })
+
+describe('OMP run directory inheritance', () => {
+  it('pins OMP_RUN_DIR for the child so it publishes into the watched run directory', async () => {
+    const root = await sandbox()
+    const home = join(root, 'home')
+    const runDirectory = join(root, 'omp-run')
+    const publicationDir = join(root, 'unused-publication')
+    const markers = join(root, 'markers')
+    const sessionId = 'omp-run-dir-session'
+    const handshakePath = join(root, 'handshake.json')
+    vi.stubEnv('HOME', home)
+    vi.stubEnv('OMP_RUN_DIR', '')
+    vi.stubEnv('OMP_TEST_PUBLICATION_DIR', '')
+    vi.stubEnv('OMP_TEST_TRANSCRIPT', join(root, 'session.jsonl'))
+    vi.stubEnv('OMP_TEST_MARKERS', markers)
+    vi.stubEnv('OMP_TEST_SESSION_ID', sessionId)
+
+    const launch = launchOmpDaemon({
+      argv: [FIXTURE, '--mode', 'rpc', '--session-dir', join(root, 'sessions')],
+      cwd: root,
+      publicationDir,
+      runDirectory,
+      handshakePath,
+      idleTimeoutMs: 60_000,
+      publicationTimeoutMs: 1_500,
+    })
+    const published = await launch.published
+    onTestFinished(() => { try { process.kill(published.pid, 'SIGTERM') } catch {} })
+    await launch.dispose()
+
+    expect(published.socketPath).toBe(join(runDirectory, `${sessionId}.sock`))
+    expect((await lstat(published.socketPath)).isSocket()).toBe(true)
+    expect(await missing(join(publicationDir, `${sessionId}.sock`))).toBe(true)
+    const environ = await readFile(`/proc/${String(published.pid)}/environ`, 'utf8')
+    expect(environ.split('\0')).toContain(`OMP_RUN_DIR=${runDirectory}`)
+  }, 20_000)
+
+  it('finds a publication that landed in the watched directory when OMP publishes elsewhere', async () => {
+    const root = await sandbox()
+    const runDirectory = join(root, 'omp-run')
+    const publicationDir = join(root, 'unused-publication')
+    const sessionId = 'omp-watched-session'
+    vi.stubEnv('OMP_TEST_PUBLICATION_DIR', '')
+    vi.stubEnv('OMP_TEST_TRANSCRIPT', join(root, 'session.jsonl'))
+    vi.stubEnv('OMP_TEST_MARKERS', join(root, 'markers'))
+    vi.stubEnv('OMP_TEST_SESSION_ID', sessionId)
+
+    const launch = launchOmpDaemon({
+      argv: [FIXTURE, '--mode', 'rpc', '--session-dir', join(root, 'sessions')],
+      cwd: root,
+      env: { OMP_RUN_DIR: runDirectory },
+      publicationDir,
+      runDirectory,
+      handshakePath: join(root, 'handshake.json'),
+      idleTimeoutMs: 60_000,
+      publicationTimeoutMs: 1_500,
+    })
+    const published = await launch.published
+    onTestFinished(() => { try { process.kill(published.pid, 'SIGTERM') } catch {} })
+    await launch.dispose()
+
+    expect(published).toEqual({
+      ompSessionId: sessionId,
+      pid: expect.any(Number) as number,
+      socketPath: join(runDirectory, `${sessionId}.sock`),
+    })
+    expect((await lstat(published.socketPath)).isSocket()).toBe(true)
+    expect(await missing(join(publicationDir, `${sessionId}.json`))).toBe(true)
+  }, 20_000)
+})

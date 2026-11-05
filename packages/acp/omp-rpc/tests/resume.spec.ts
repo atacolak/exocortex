@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs'
-import { appendFile, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -28,6 +28,7 @@ import {
   ompHydrationEvents,
   ompTranscriptTurns,
   readOmpTranscriptTitle,
+  resolveOmpTranscript,
   type OmpHydrationCursor,
   type OmpHydrationOutcome,
   type OmpTranscriptTurn,
@@ -1340,5 +1341,31 @@ describe('hydrateOmpSession against a live streaming turn', () => {
       .map(event => event.data.turn)).toEqual([1, 2])
 
     await expect(persistAndReopen(session)).resolves.toBeDefined()
+  })
+})
+
+describe('resolveOmpTranscript session layouts', () => {
+  it('resolves a transcript stored directly under a flat session root', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'omp-flat-root-'))
+    roots.push(root)
+    const id = '01a1abad-8738-77e1-8d30-f0c29eee42e2'
+    const path = join(root, `2026-11-05T12-27-18-712Z_${id}.jsonl`)
+    await writeFile(path, `${JSON.stringify({ type: 'session', version: 3, id, cwd: '/work' })}\n`)
+
+    const match = await resolveOmpTranscript(root, id.slice(0, 8))
+    expect(match).toMatchObject({ id, path })
+  })
+
+  it('resolves a transcript nested in a project directory', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'omp-project-root-'))
+    roots.push(root)
+    const project = join(root, '-work')
+    await mkdir(project, { recursive: true })
+    const path = join(project, `2026-11-05T12-27-18-712Z_${SESSION_UUID}.jsonl`)
+    await writeFile(path, `${JSON.stringify(sessionLine())}
+`)
+
+    const match = await resolveOmpTranscript(root, SESSION_UUID.slice(0, 8))
+    expect(match).toMatchObject({ id: SESSION_UUID, path })
   })
 })
