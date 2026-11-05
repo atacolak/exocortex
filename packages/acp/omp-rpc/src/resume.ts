@@ -521,6 +521,52 @@ function openTurnStart(eventLog: readonly SessionEvent[]): { readonly seq: Sessi
 }
 
 /**
+ * Flatten the text a message carries, matching how hydration compares prompts.
+ * @param content - message content blocks.
+ * @returns the text blocks joined by newlines.
+ */
+function promptText(content: readonly ContentBlock[]): string {
+  return content.map(block => block.type === 'text' ? block.text : '').join('\n')
+}
+
+/**
+ * Read the prompt that opened one turn in a session.
+ * @param eventLog - session events to scan.
+ * @param turn - turn whose first user message is sought.
+ * @returns the prompt text, or undefined when the turn recorded none.
+ */
+function turnPrompt(eventLog: readonly SessionEvent[], turn: number): string | undefined {
+  let inside = false
+  for (const event of eventLog) {
+    if (event.type === 'turn/start' && event.data.turn === turn) {
+      inside = true
+      continue
+    }
+    if (!inside) continue
+    if (event.type === 'turn/end' && event.data.turn === turn) return undefined
+    if (event.type === 'user/message') return promptText(event.data.content)
+  }
+  return undefined
+}
+
+/**
+ * Decide whether a pending transcript turn is the turn the harness holds open,
+ * so its committed prefix can be merged into that turn instead of forking it.
+ * The prompts must match; a transcript turn the harness never opened has to be
+ * renumbered and would collide with the open turn's number.
+ * @param session - session whose open turn is compared.
+ * @param turn - number of the harness's open turn.
+ * @param entry - newest pending transcript turn.
+ * @returns whether both turns were opened by the same prompt text.
+ */
+function opensWithSamePrompt(session: Session, turn: number, entry: OmpTranscriptTurn): boolean {
+  const harnessPrompt = turnPrompt(session.snapshotEvents(), turn)
+  const candidate = entry.events.find(event => event.type === 'user/message')
+  if (harnessPrompt === undefined || candidate?.type !== 'user/message') return false
+  return harnessPrompt === promptText(candidate.data.content)
+}
+
+/**
  * Append one compaction boundary to a session's surface.
  *
  * This is the single projection every compaction path uses: transcript
@@ -997,6 +1043,12 @@ interface LiveTurnDedupe {
   readonly callIds: Set<string>
   readonly resultIds: Set<string>
   readonly assistantKeys: Map<string, number>
+  /**
+   * Steps the harness already started inside its still-open turn. Present only
+   * while that turn is open: its `turn/start` and those `step/start` events are
+   * already projected, so re-reading them would fork the turn being merged.
+   */
+  readonly openSteps?: Set<number>
 }
 
 /**
@@ -1021,6 +1073,8 @@ function liveTurnDedupeOf(session: Session): LiveTurnDedupe {
   const callIds = new Set<string>()
   const resultIds = new Set<string>()
   const assistantKeys = new Map<string, number>()
+  const openTurn = openTurnStart(events)
+  const openSteps = openTurn === undefined ? undefined : new Set<number>()
   for (const [index, event] of events.entries()) {
     switch (event.type) {
       case 'tool/call':
@@ -1029,9 +1083,12 @@ function liveTurnDedupeOf(session: Session): LiveTurnDedupe {
       case 'tool/result':
         resultIds.add(event.data.message.toolCallId)
         break
+      case 'step/start':
+        if (openSteps !== undefined && index >= newestTurnStart) openSteps.add(event.data.step)
+        break
       case 'user/message':
         if (index >= newestTurnStart) {
-          userTexts.add(event.data.content.map(block => block.type === 'text' ? block.text : '').join('\n'))
+          userTexts.add(promptText(event.data.content))
         }
         break
       case 'assistant/message': {
@@ -1039,14 +1096,15 @@ function liveTurnDedupeOf(session: Session): LiveTurnDedupe {
         for (const block of event.data.message.content) {
           if (block.type === 'tool-call') callIds.add(block.id)
         }
-        const key = JSON.stringify(event.data.message.content.map(block =>
+        const retained = event.data.message.content.filter(block => block.type !== 'tool-call' || !callIds.has(block.id))
+        const key = JSON.stringify(retained.map(block =>
           block.type === 'text' ? ['text', block.text] : [block.type, block.type === 'tool-call' ? block.id : '']))
         assistantKeys.set(key, (assistantKeys.get(key) ?? 0) + 1)
         break
       }
     }
   }
-  return { userTexts, callIds, resultIds, assistantKeys }
+  return { userTexts, callIds, resultIds, assistantKeys, ...openSteps === undefined ? {} : { openSteps } }
 }
 
 /**
@@ -1062,7 +1120,7 @@ function dedupeLiveTurn(events: readonly OmpHydrationEvent[], dedupe: LiveTurnDe
   for (const event of events) {
     switch (event.type) {
       case 'user/message':
-        if (!dedupe.userTexts.delete(event.data.content.map(block => block.type === 'text' ? block.text : '').join('\n'))) kept.push(event)
+        if (!dedupe.userTexts.delete(promptText(event.data.content))) kept.push(event)
         break
       case 'assistant/message': {
         const content = event.data.message.content.filter(block => block.type !== 'tool-call' || !dedupe.callIds.has(block.id))
@@ -1094,6 +1152,12 @@ function dedupeLiveTurn(events: readonly OmpHydrationEvent[], dedupe: LiveTurnDe
         break
       case 'tool/result':
         if (!dedupe.resultIds.has(event.data.message.toolCallId)) kept.push(event)
+        break
+      case 'turn/start':
+        if (dedupe.openSteps === undefined) kept.push(event)
+        break
+      case 'step/start':
+        if (dedupe.openSteps?.delete(event.data.step) !== true) kept.push(event)
         break
       default:
         kept.push(event)
@@ -1181,10 +1245,19 @@ export async function hydrateOmpSession(
   if (matched === -1) matched = projected > 0 ? turns.length - 1 : recorded - 1
 
   const pending = turns.slice(matched + 1)
-  const harnessTurnOpen = openTurnStart(session.snapshotEvents()) !== undefined
-  const admissible = includeNewestTurn && !harnessTurnOpen ? pending : pending.slice(0, -1)
+  const openTurnNumber = openTurnStart(session.snapshotEvents())?.turn
+  const newestPending = includeNewestTurn && openTurnNumber !== undefined && pending.length === 1 ? pending[0] : undefined
+  const mergedInto = newestPending !== undefined && openTurnNumber !== undefined
+    && opensWithSamePrompt(session, openTurnNumber, newestPending)
+    ? newestPending
+    : undefined
+  const mergeTurn = mergedInto === undefined ? undefined : openTurnNumber
+  const admissible = includeNewestTurn && (mergedInto !== undefined || openTurnNumber === undefined)
+    ? pending
+    : pending.slice(0, -1)
   const admitted = base === 0 ? newestTurns(admissible, limit) : oldestTurns(admissible, limit)
-  const selected = admitted.map((entry, index) => renumberTurn(entry.events, base + index + 1))
+  const selected = admitted.map((entry, index) =>
+    renumberTurn(entry.events, mergeTurn !== undefined && entry === mergedInto ? mergeTurn : base + index + 1))
   const title = await readOmpTranscriptTitle(path)
   const appendedTitle = title !== undefined && title !== projectedTitle(session) ? title : undefined
   const sessionFloor = session.snapshotEvents().at(-1)?.time
