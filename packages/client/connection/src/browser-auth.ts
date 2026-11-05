@@ -122,6 +122,16 @@ function header(
   return typeof value === 'string' ? value : undefined
 }
 
+/** Render the same-directory redirect target carrying every query parameter except the launch token. */
+function cleanRedirectTarget(url: URL): string {
+  const kept = new URLSearchParams()
+  for (const [key, value] of url.searchParams) {
+    if (key !== TOKEN_QUERY) kept.append(key, value)
+  }
+  const query = kept.toString()
+  return query.length === 0 ? './' : `./?${query}`
+}
+
 /** Protocol-scoped cookie audience; HTTP retains its existing authority-only spelling. */
 function requestAudience(headers: ConnectionTrustRequest['headers'], secure: boolean): string | undefined {
   const host = header(headers, 'host')
@@ -302,10 +312,10 @@ export class BrowserAuth {
 
   /**
    * Authenticate an index request. A valid root query token mints the cookie
-   * and redirects to the directory-relative clean `./`; a valid cookie lets
-   * the caller serve the index; a root request from a trusted mesh subnet
-   * mints the same cookie; every other request receives the same minimal 401
-   * response.
+   * and redirects to the directory-relative target carrying the request's own
+   * query with the launch token removed; a valid cookie lets the caller serve
+   * the index; a root request from a trusted mesh subnet mints the same
+   * cookie; every other request receives the same minimal 401 response.
    * @param req - incoming root or configured-index request.
    * @param res - response owned when this method returns false.
    * @param secure - whether the listener receiving this request serves TLS; the
@@ -322,16 +332,16 @@ export class BrowserAuth {
       const authority = requestAudience(req.headers, secure)
       if (req.method === 'GET' && url.pathname === '/' && tokens.length === 1
         && authority !== undefined && tokenMatches(tokens.join(''), this.launchToken)) {
-        this.writeSessionRedirect(req, res, secure)
+        this.writeSessionRedirect(req, res, url, secure)
         return false
       }
       if (req.method === 'GET' && url.pathname === '/' && this.isAuthenticated(req, secure)) {
-        this.writeCleanRedirect(res)
+        this.writeCleanRedirect(res, url)
         return false
       }
     } else if (this.isAuthenticated(req, secure)) return true
     if (this.trustsMeshIndex(req, url)) {
-      this.writeSessionRedirect(req, res, secure)
+      this.writeSessionRedirect(req, res, url, secure)
       return false
     }
     this.writeUnauthorized(req, res)
@@ -354,7 +364,12 @@ export class BrowserAuth {
     return address !== undefined && this.meshCidrs.some(cidr => ((address & cidr.mask) >>> 0) === cidr.network)
   }
 
-  private writeSessionRedirect(req: ConnectionIndexRequest, res: ConnectionIndexResponse, secure: boolean): void {
+  private writeSessionRedirect(
+    req: ConnectionIndexRequest,
+    res: ConnectionIndexResponse,
+    url: URL,
+    secure: boolean,
+  ): void {
     const authority = requestAudience(req.headers, secure)
     if (authority === undefined) {
       this.writeUnauthorized(req, res)
@@ -370,7 +385,7 @@ export class BrowserAuth {
     }, this.secret)
     res.writeHead(303, {
       'cache-control': 'no-store',
-      'location': './',
+      'location': cleanRedirectTarget(url),
       'referrer-policy': 'no-referrer',
       'set-cookie': sessionCookie(
         cookieName(authority), value, expiresAt, Math.floor(this.maxAgeMilliseconds / 1000), secure,
@@ -379,10 +394,10 @@ export class BrowserAuth {
     res.end()
   }
 
-  private writeCleanRedirect(res: ConnectionIndexResponse): void {
+  private writeCleanRedirect(res: ConnectionIndexResponse, url: URL): void {
     res.writeHead(303, {
       'cache-control': 'no-store',
-      'location': './',
+      'location': cleanRedirectTarget(url),
       'referrer-policy': 'no-referrer',
     })
     res.end()

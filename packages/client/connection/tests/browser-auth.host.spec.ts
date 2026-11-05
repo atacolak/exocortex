@@ -372,6 +372,85 @@ describe('BrowserAuth', () => {
   })
 })
 
+describe('deep-link redirect', () => {
+  const MESH_CIDRS_ENV = 'DSH_TRUST_MESH_CIDRS'
+  const authority = '127.0.0.1:3080'
+
+  it('redirects a mesh-trusted index visit to the same query', async () => {
+    vi.stubEnv(MESH_CIDRS_ENV, '127.0.0.0/8')
+    const auth = await createAuth(new RecordCredentials())
+    const res = response()
+
+    expect(auth.authorizeIndex(request('/?s=abc', authority, { remoteAddress: '127.0.0.1' }), res.value)).toBe(false)
+
+    expect(res.state.status).toBe(303)
+    expect(res.state.headers?.location).toBe('./?s=abc')
+  })
+
+  it('drops the launch token and keeps the remaining query', async () => {
+    const auth = await createAuth(new RecordCredentials())
+    const token = new URL(auth.authenticatedUrl(`http://${authority}`)).searchParams.get('token')
+    const res = response()
+
+    expect(auth.authorizeIndex(request(`/?token=${String(token)}&s=abc`, authority), res.value)).toBe(false)
+
+    expect(res.state.status).toBe(303)
+    expect(res.state.headers?.location).toBe('./?s=abc')
+    expect(res.state.headers?.['set-cookie']).toMatch(/^dsh-auth-/u)
+  })
+
+  it('emits the bare directory redirect when the query carries nothing to keep', async () => {
+    vi.stubEnv(MESH_CIDRS_ENV, '127.0.0.0/8')
+    const auth = await createAuth(new RecordCredentials())
+    const bare = response()
+
+    expect(auth.authorizeIndex(request('/', authority, { remoteAddress: '127.0.0.1' }), bare.value)).toBe(false)
+
+    expect(bare.state.headers?.location).toBe('./')
+
+    const launch = new URL(auth.authenticatedUrl(`http://${authority}`))
+    const exchanged = response()
+    expect(auth.authorizeIndex(request(`${launch.pathname}${launch.search}`, authority), exchanged.value)).toBe(false)
+
+    expect(exchanged.state.headers?.location).toBe('./')
+  })
+
+  it('preserves every non-token parameter in request order', async () => {
+    const auth = await createAuth(new RecordCredentials())
+    const token = new URL(auth.authenticatedUrl(`http://${authority}`)).searchParams.get('token')
+    const kept = 's=abc&panel=right&new=1&ws=w1&preview=p&exo_overlay=1'
+    const res = response()
+
+    expect(auth.authorizeIndex(request(`/?token=${String(token)}&${kept}`, authority), res.value)).toBe(false)
+
+    expect(res.state.headers?.location).toBe(`./?${kept}`)
+  })
+
+  it('preserves the query when a stale token is cleaned after authentication', async () => {
+    const auth = await createAuth(new RecordCredentials())
+    const { cookie } = exchange(auth)
+    const res = response()
+
+    expect(auth.authorizeIndex(request('/?token=stale&s=abc', authority, { cookie }), res.value)).toBe(false)
+
+    expect(res.state.status).toBe(303)
+    expect(res.state.headers?.location).toBe('./?s=abc')
+    expect(res.state.headers?.['set-cookie']).toBeUndefined()
+  })
+
+  it('keeps the redirect relative under a hostile Host header', async () => {
+    const auth = await createAuth(new RecordCredentials())
+    const token = new URL(auth.authenticatedUrl(`http://${authority}`)).searchParams.get('token')
+    const res = response()
+
+    expect(auth.authorizeIndex(request(`/?s=abc&token=${String(token)}`, 'evil.example'), res.value)).toBe(false)
+
+    expect(res.state.status).toBe(303)
+    expect(res.state.headers?.location).toBe('./?s=abc')
+    expect(res.state.headers?.location).not.toContain('evil.example')
+  })
+})
+
 describe('mesh subnet trust', () => {
   const MESH_CIDRS_ENV = 'DSH_TRUST_MESH_CIDRS'
   const authority = '10.77.67.147:3080'
