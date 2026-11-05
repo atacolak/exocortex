@@ -123,6 +123,9 @@ export interface OmpUnsolicitedWake {
  */
 export function ompTriggerSource(text: string): OmpTriggerSource | undefined {
   const head = text.trimStart()
+  if (head.startsWith('<advisory')) {
+    return { kind: 'omp-advisor', form: 'notice', summary: boundContextSummary(firstMeaningfulLine(text)) }
+  }
   if (head.startsWith('<system-notice') || text.includes('<task-result')) {
     return { kind: 'omp-subagent-settled', form: 'notice', summary: boundContextSummary(firstMeaningfulLine(text)) }
   }
@@ -132,9 +135,21 @@ export function ompTriggerSource(text: string): OmpTriggerSource | undefined {
   return undefined
 }
 
+/**
+ * Attribute an OMP-authored injection that matches no specific trigger.
+ * @param text - the exact input text OMP injected.
+ * @returns the system notice source.
+ */
+export function ompSystemSource(text: string): OmpTriggerSource {
+  return { kind: 'omp-system', form: 'notice', summary: boundContextSummary(firstMeaningfulLine(text)) }
+}
+
 function firstMeaningfulLine(text: string): string {
   for (const line of text.split('\n')) {
-    const stripped = line.trim().replace(/^<\/?(?:system-notice|task-result|hcom)[^>]*>/u, '').trim()
+    const stripped = line.trim()
+      .replace(/^<\/?(?:advisory|hcom|memories|system-notice|system-reminder|task-result)[^>]*>/u, '')
+      .replace(/<\/[a-z-]+>$/u, '')
+      .trim()
     if (stripped.length > 0) return stripped
   }
   return text.trim()
@@ -829,9 +844,8 @@ export class OmpAgentDriver {
       return
     }
     if (text === undefined) return
-    const source = ompTriggerSource(text)
     this.markExternalUserMessage(text)
-    this.onUnsolicitedWake?.(source === undefined ? { text } : { text, source })
+    this.onUnsolicitedWake?.({ text, source: ompTriggerSource(text) ?? ompSystemSource(text) })
   }
 
   /** One announcement per OMP message id, bounded so a long attach does not grow without limit. */

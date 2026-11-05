@@ -22,7 +22,7 @@ import {
 import { foldSurface, type Session, type SessionAppendTiming, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { normalizeSessionTitle } from '@deepseek-ai/dsh-session-title'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
-import { ompTriggerSource } from './driver.ts'
+import { ompSystemSource, ompTriggerSource } from './driver.ts'
 import type { OmpTriggerSource } from './types.ts'
 
 /** A resume or open request the HTTP surface can report with a stable status. */
@@ -262,6 +262,8 @@ interface TranscriptMessageEntry {
   readonly parentId?: unknown
   readonly timestamp?: unknown
   readonly customType?: unknown
+  readonly content?: unknown
+  readonly display?: unknown
   readonly message?: TranscriptMessage
   readonly data?: unknown
   readonly summary?: unknown
@@ -298,6 +300,18 @@ function partsOf(content: unknown): TranscriptContentPart[] {
 function userMessageSource(content: readonly ContentBlock[]): MessageSourceMap['user'] | OmpTriggerSource {
   const text = content.map(block => block.type === 'text' ? block.text : '').join('\n')
   return ompTriggerSource(text) ?? { kind: 'user' }
+}
+
+/** Attribution for a custom card OMP recorded; it is never operator prose. */
+function customMessageSource(content: readonly ContentBlock[]): OmpTriggerSource {
+  const text = content.map(block => block.type === 'text' ? block.text : '').join('\n')
+  return ompTriggerSource(text) ?? ompSystemSource(text)
+}
+
+/** Read a `custom_message` entry's content, which OMP records as a string or parts. */
+function customContent(raw: unknown): ContentBlock[] {
+  if (typeof raw === 'string') return raw.trim().length === 0 ? [] : [{ type: 'text', text: raw }]
+  return textBlocks(raw)
 }
 
 function textBlocks(content: unknown): ContentBlock[] {
@@ -821,6 +835,21 @@ export async function ompTranscriptTurns(path: string): Promise<OmpTranscriptTur
         if (draft === undefined) beforeFirst.push(boundary)
         else (draft.boundaries ??= []).push(boundary)
       }
+      if (draft !== undefined && id !== undefined) draft.leafEntryId = id
+      continue
+    }
+    if (entry.type === 'custom_message') {
+      const content = customContent(entry.content)
+      if (content.length === 0 || entry.display === false) {
+        if (draft !== undefined && id !== undefined) draft.leafEntryId = id
+        continue
+      }
+      if (current === undefined) current = openTurn(time, id)
+      current.push(timed({
+        type: 'user/message',
+        data: createUserMessage({ content, source: customMessageSource(content) }),
+      }, time))
+      lastTime = time ?? lastTime
       if (draft !== undefined && id !== undefined) draft.leafEntryId = id
       continue
     }
