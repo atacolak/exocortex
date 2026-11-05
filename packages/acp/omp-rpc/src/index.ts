@@ -21,7 +21,7 @@ import { modelSelectionProjectionDefinition, type Agent } from '@deepseek-ai/dsh
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import { Session, SessionId, type SessionEvent, type SessionHeader } from '@deepseek-ai/dsh-session'
 import { inboxProjectionDefinition, OmpAgentFactory, type OmpAgentHost, type OmpRecoveredSession } from './agent-factory.ts'
-import { OMP_LLM_PROVIDER, registerOmpLlmProvider } from './llm-catalog.ts'
+import { registerOmpLlmProvider } from './llm-catalog.ts'
 import type {} from '@deepseek-ai/dsh-session-query'
 import type {} from '@deepseek-ai/dsh-workspace'
 import Schema from '@deepseek-ai/schemastery'
@@ -92,6 +92,13 @@ export * from './driver.ts'
 export * from './host-tools.ts'
 export * from './launch.ts'
 export * from './llm-catalog.ts'
+export {
+  loadOmpModelCatalog,
+  type OmpCatalogModel as OmpProviderModel,
+  type OmpCatalogSourceOptions,
+  type OmpModelCatalogSnapshot,
+  type OmpThinkingLevel,
+} from './model-catalog.ts'
 export * from './native-commands.ts'
 export * from './open.ts'
 export * from './presets.ts'
@@ -856,7 +863,15 @@ export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
 
   const modelSelection = await ctx.sessionProjections.register(modelSelectionProjectionDefinition)
   const inbox = await ctx.sessionProjections.register(inboxProjectionDefinition)
-  registerOmpLlmProvider(ctx, OMP_LLM_PROVIDER)
+  const ompExecutable = resolveOmpExecutable(config.executable)
+  const catalogExecutable = await ctx.subprocess.resolveExecutable(ompExecutable, undefined)
+    .catch(() => ompExecutable)
+  const llmCatalog = registerOmpLlmProvider(ctx, {
+    executable: catalogExecutable,
+    home: config.home ?? homedir(),
+    cwd: config.cwd ?? process.cwd(),
+  })
+  await llmCatalog.ready
   ctx.effect(() => ctx.agents.setFactory(new OmpAgentFactory({
     ctx,
     host: agentHost,

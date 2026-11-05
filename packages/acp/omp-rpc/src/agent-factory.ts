@@ -520,6 +520,7 @@ export class OmpSessionAgent implements Agent {
     let outcome: TurnEndReason | undefined
     let stepOpen = false
     let stickyMaxTokens = false
+    let outcomeFailure: { readonly message: string; readonly code: string } | undefined
     try {
       this.session.append('turn/start', { turn: phase.turn })
       if (initial !== undefined) {
@@ -602,6 +603,9 @@ export class OmpSessionAgent implements Agent {
             }, { surfaceOp: 'append' }).seq)
             this.host.projectTools(this.id, phase.turn, step, tools)
           }
+          if (finish?.kind === 'error') {
+            outcomeFailure = { message: finish.failure.message, code: finish.failure.code }
+          }
           if (finish?.kind === 'max-tokens') stickyMaxTokens = true
         } catch (error: unknown) {
           if (!attempt.ended) attempt.abandon()
@@ -617,6 +621,8 @@ export class OmpSessionAgent implements Agent {
       }
       if (phase.controller.signal.aborted) {
         outcome = { kind: 'aborted', reason: abortedCancelCause(phase.controller.signal) ?? { kind: 'legacy' } }
+      } else if (outcomeFailure !== undefined) {
+        outcome = { kind: 'error', error: outcomeFailure }
       } else if (stickyMaxTokens) {
         outcome = { kind: 'max-tokens' }
       } else {

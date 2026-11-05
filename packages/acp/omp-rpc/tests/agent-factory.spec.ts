@@ -162,16 +162,27 @@ function acceptPrompt(h: Harness): void {
   h.rpc.receive({ type: 'response', id: prompt.id, command: 'prompt', success: true, data: { agentInvoked: true } })
 }
 
-function assistantMessage(text: string, stopReason: string, usage: Record<string, number>): Record<string, unknown> {
+function assistantMessage(
+  text: string,
+  stopReason: string,
+  usage: Record<string, number>,
+  errorMessage?: string,
+): Record<string, unknown> {
   return {
     role: 'assistant',
     content: [{ type: 'text', text }],
     stopReason,
+    ...errorMessage === undefined ? {} : { errorMessage },
     usage: { input: usage.input, output: usage.output, totalTokens: usage.total },
   }
 }
 
-function assistantCycle(messageId: string, text: string, stopReason = 'stop'): readonly Record<string, unknown>[] {
+function assistantCycle(
+  messageId: string,
+  text: string,
+  stopReason = 'stop',
+  errorMessage?: string,
+): readonly Record<string, unknown>[] {
   const usage = { input: 10, output: 5, total: 15 }
   return [
     { type: 'message_start', messageId, message: { role: 'assistant' } },
@@ -191,7 +202,7 @@ function assistantCycle(messageId: string, text: string, stopReason = 'stop'): r
       messageId,
       assistantMessageEvent: { type: 'text_end', contentIndex: 0, content: text },
     },
-    { type: 'message_end', messageId, message: assistantMessage(text, stopReason, usage) },
+    { type: 'message_end', messageId, message: assistantMessage(text, stopReason, usage, errorMessage) },
   ]
 }
 
@@ -409,6 +420,25 @@ describe('OmpAgentFactory runs one turn per human prompt', () => {
     const userIndex = events.findIndex(event => event.type === 'user/message')
     expect(userIndex).toBeGreaterThan(-1)
     expect(userIndex).toBeLessThan(events.length - 1)
+    await created.dispose()
+  })
+
+  it('surfaces the exact provider error instead of ending the turn as completed', async () => {
+    const h = await harness()
+    const created = await createAgent(h, 'session-factory-provider-message-error')
+    created.agent.followup(userInput('switch to deepseek'))
+    await tick()
+    acceptPrompt(h)
+    emit(h, assistantCycle('m1', '', 'error', '400 Upstream request failed: Model is unavailable'))
+    settle(h)
+    await created.agent.whenIdle()
+
+    const events = created.agent.session.snapshotEvents()
+    const end = events.find(event => event.type === 'turn/end')
+    expect(end?.data.reason).toEqual({
+      kind: 'error',
+      error: { message: '400 Upstream request failed: Model is unavailable', code: 'PROVIDER_ERROR' },
+    })
     await created.dispose()
   })
 })
