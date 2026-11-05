@@ -379,13 +379,14 @@ function parseHeaderRecord(record: Buffer): { readonly meta: SessionHeader; read
 
 /**
  * A decoded log whose released relationships do not validate, carrying the
- * longest prefix that still does. Callers classifying the failure can offer the
- * prefix to a mirror owner that must not lose input with the unusable tail.
+ * readable prefix a recreated Session can continue. Callers classifying the
+ * failure can offer the prefix to a mirror owner that must not lose input with
+ * the unusable tail.
  */
 export class SessionLogRelationshipError extends Error {
   /**
    * @param message - the rejected relationship's own diagnostic.
-   * @param salvagedEvents - longest decoded prefix that still validates.
+   * @param salvagedEvents - decoded prefix a recreated Session can continue.
    * @param options - original validation failure.
    */
   constructor(message: string, readonly salvagedEvents: readonly SessionEvent[], options: ErrorOptions) {
@@ -395,16 +396,26 @@ export class SessionLogRelationshipError extends Error {
 }
 
 /**
- * Find the largest decoded-event count that satisfies released relationships.
- * Relationship checks only look backward, so validity is monotone over
- * prefixes and a binary search finds the cut in logarithmic validation passes.
+ * Find the largest decoded prefix a recreated Session can continue, meaning a
+ * prefix whose events satisfy released relationships on their own.
+ *
+ * Validity is monotone over prefixes only while no later event reclassifies an
+ * earlier one. A `session/end-seed` that lands with a compaction still open
+ * does exactly that: its pre-scan marks that `compaction/start` as orphaned,
+ * which lets a `turn/start` that the same prefix without the marker must
+ * reject — so a longer prefix can validate where a shorter one cannot. Such an
+ * artifact keeps nothing rather than trusting a search whose premise it
+ * falsifies. The ordinary marker a resumed log carries without an open
+ * compaction reclassifies nothing, so it does not disable salvage.
+ *
  * A trailing `compaction/start` is excluded because an unterminated compaction
- * poisons every later turn event a recreated Session would append.
+ * would poison every later turn event the recreated Session appends.
  * @param artifact - decoded artifact whose full event list was refused.
- * @returns the readable prefix length, zero when even the first event is refused.
+ * @returns the readable prefix length a Session can continue, zero when no prefix qualifies.
  */
 function salvageableEventCount(artifact: SessionFormatArtifact): number {
   const events = artifact.events
+  if (retroactivelyReclassifies(events)) return 0
   let low = 0
   let high = events.length - 1
   let best = -1
@@ -423,6 +434,28 @@ function salvageableEventCount(artifact: SessionFormatArtifact): number {
   }
   while (best >= 0 && events[best]?.type === 'compaction/start') best -= 1
   return best + 1
+}
+
+/**
+ * Detect a `session/end-seed` that closes a compaction still open before it,
+ * the one feature that makes released-relationship validity non-monotone over
+ * this artifact's prefixes. Mirrors the orphan pre-scan in
+ * `Relationships`'s constructor: a seed with no open compaction leaves the
+ * orphan set empty for every prefix and therefore keeps the search sound.
+ * @param events - decoded artifact events in log order.
+ * @returns whether prefix validity depends on an event after the prefix.
+ */
+function retroactivelyReclassifies(events: readonly SessionFormatEvent[]): boolean {
+  let open: number | undefined
+  for (const event of events) {
+    if (event.type === 'compaction/start') open = event.seq
+    else if (event.type === 'compaction/end') open = undefined
+    else if (event.type === 'session/end-seed') {
+      if (open !== undefined) return true
+      open = undefined
+    }
+  }
+  return false
 }
 
 /**

@@ -92,10 +92,10 @@ export interface SessionLocation {
 /** Durable session contents failed validation after a successful backend read. */
 export class SessionPersistenceCorruptionError extends Error {
   /**
-   * Longest decoded prefix that still satisfied the installed format's released
-   * relationships, when the backend admitted one before refusing the artifact.
-   * A derived-mirror owner can recreate the Session from this prefix so pending
-   * input the canonical source never received is not lost with the corrupt tail.
+   * Decoded prefix a recreated Session can continue, when the backend could
+   * admit one before refusing the artifact. A derived-mirror owner can recreate
+   * the Session from this prefix so pending input the canonical source never
+   * received is not lost with the corrupt tail.
    */
   readonly salvagedEvents?: readonly SessionEvent[]
 

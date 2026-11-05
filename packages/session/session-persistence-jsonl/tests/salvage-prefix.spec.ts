@@ -62,6 +62,23 @@ describe('released relationship validity over prefixes', () => {
       )).not.toThrow()
     }
   })
+
+  it('accepts a longer prefix whose session/end-seed reclassifies an earlier compaction', () => {
+    const seeded: SessionFormatEvent[] = [
+      { type: 'compaction/start', seq: 0, time: 1, data: { compactionId: 'inherited', turn: null, sourceCommandId: 'cmd' } },
+      { type: 'turn/start', seq: 1, time: 2, data: { turn: 1 } },
+      { type: 'step/start', seq: 2, time: 3, data: { turn: 1, step: 1 } },
+      { type: 'step/end', seq: 3, time: 4, data: { turn: 1, step: 1 } },
+      { type: 'turn/end', seq: 4, time: 5, data: { turn: 1, reason: { kind: 'completed' } } },
+      { type: 'session/end-seed', seq: 5, time: 6, data: { inherited: true } },
+    ]
+
+    expect(() => assertReleasedV4Relationships(artifactOf(seeded), KNOWN_SESSION_EVENT_TYPES)).not.toThrow()
+    expect(() => assertReleasedV4Relationships(
+      artifactOf(seeded.slice(0, -1)),
+      KNOWN_SESSION_EVENT_TYPES,
+    )).toThrow('turn/start crosses an open compaction')
+  })
 })
 
 describe('corrupt-log salvage', () => {
@@ -98,5 +115,26 @@ describe('corrupt-log salvage', () => {
     expect(salvaged).toHaveLength(oneTurnLog().length)
     expect(salvaged.map(event => event.type)).toEqual(oneTurnLog().map(event => event.type))
     expect(salvaged.at(-1)?.type).toBe('turn/end')
+  })
+
+  it('keeps no prefix when a seed marker lets the longer log validate where a shorter one cannot', async () => {
+    const header = meta('salvage-seed', '/work')
+    const handle = await ctx.sessionPersistence.create(header)
+    try {
+      await handle.append(oneTurnLog())
+    } finally {
+      await handle.close()
+    }
+    await appendFile(logPath(root, '/work', header.id, 'none'), [
+      JSON.stringify({ type: 'compaction/start', seq: 6, time: 7, data: { compactionId: 'c', turn: null, sourceCommandId: 'cmd' } }),
+      JSON.stringify({ type: 'turn/start', seq: 7, time: 8, data: { turn: 2 } }),
+      JSON.stringify({ type: 'session/end-seed', seq: 8, time: 9, data: { inherited: false } }),
+      JSON.stringify({ type: 'turn/end', seq: 9, time: 10, data: { turn: 2, reason: { kind: 'completed' } } }),
+      JSON.stringify({ type: 'turn/start', seq: 10, time: 11, data: { turn: 7 } }),
+    ].join('\n') + '\n')
+
+    const failure = await ctx.sessionPersistence.open(header.id, 'read').then(() => undefined, (error: unknown) => error)
+    if (!(failure instanceof SessionPersistenceCorruptionError)) throw failure
+    expect(failure.salvagedEvents ?? []).toEqual([])
   })
 })
