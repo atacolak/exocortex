@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs'
-import { appendFile, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -28,6 +28,7 @@ import {
   ompHydrationEvents,
   ompTranscriptTurns,
   readOmpTranscriptTitle,
+  resolveOmpTranscript,
   type OmpHydrationCursor,
   type OmpHydrationOutcome,
   type OmpTranscriptTurn,
@@ -92,6 +93,21 @@ function sessionUserTimes(session: Session): number[] {
   return session.snapshotEvents()
     .filter(isSessionUserMessage)
     .map(event => event.time)
+}
+
+function sessionTurnOpeningMessages(events: readonly SessionEvent[]): SessionEvent<'user/message'>[] {
+  const openings: SessionEvent<'user/message'>[] = []
+  let awaiting = true
+  for (const event of events) {
+    if (event.type === 'turn/start') {
+      awaiting = true
+      continue
+    }
+    if (!awaiting || !isSessionUserMessage(event)) continue
+    openings.push(event)
+    awaiting = false
+  }
+  return openings
 }
 
 function sessionTurnNumbers(session: Session): number[] {
@@ -641,6 +657,157 @@ describe('ompHydrationEvents trigger cards', () => {
       { kind: 'user' },
     ])
   })
+
+  it('hydrates advisor and custom cards through already-registered wake kinds', async () => {
+    const advisory = '<advisory severity="blocker" guidance="weigh, don\'t blindly obey">\nStop before shipping.\n</advisory>'
+    const path = await transcript([
+      { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'ship it' }] } },
+      { type: 'message', message: { role: 'assistant', content: [{ type: 'text', text: 'shipping' }] } },
+      { type: 'message', message: { role: 'user', content: [{ type: 'text', text: advisory }] } },
+      { type: 'custom_message', customType: 'advisor', display: true, attribution: 'agent', content: [{ type: 'text', text: advisory }] },
+      { type: 'custom_message', customType: 'todo', display: true, attribution: 'agent', content: 'Todo list is stale.' },
+    ])
+
+    const users = (await ompHydrationEvents(path)).filter(event => event.type === 'user/message')
+
+    expect(users.map(event => event.data.source)).toEqual([
+      { kind: 'user' },
+      { kind: 'omp-wake', form: 'notice', summary: 'Stop before shipping.' },
+      { kind: 'omp-wake', form: 'notice', summary: 'Stop before shipping.' },
+      { kind: 'omp-wake', form: 'notice', summary: 'Todo list is stale.' },
+    ])
+  })
+})
+
+describe('hydrateOmpSession wake claims', () => {
+  const openers = [
+    {
+      name: 'hcom mail',
+      text: '<hcom>[inform #41909] exo_lead -> argon: ship the wake rows</hcom>',
+      source: { kind: 'omp-agent-message', form: 'relay' },
+    },
+    {
+      name: 'advisor guidance',
+      text: '<advisory severity="concern" guidance="weigh, don\'t blindly obey">\nStop before shipping.\n</advisory>',
+      source: { kind: 'omp-wake', form: 'notice', summary: 'Stop before shipping.' },
+    },
+    {
+      name: 'settled background work',
+      text: '<system-notice>\nBackground job abc has completed. Resume your work.\n</system-notice>',
+      source: {
+        kind: 'omp-subagent-settled',
+        form: 'notice',
+        summary: 'Background job abc has completed. Resume your work.',
+      },
+    },
+  ] as const
+
+  it.each(openers)('claims a hydrated $name opener before logging it so Chat promotes it', async ({ text, source }) => {
+    const path = await transcript([
+      { type: 'message', message: { role: 'user', content: [{ type: 'text', text }] } },
+      { type: 'message', message: { role: 'assistant', content: [{ type: 'text', text: 'acknowledged' }] } },
+    ])
+    const session = Session.create(SessionId('hydrated-wake-claim'))
+
+    const outcome = await hydrateOmpSession(session, path)
+    const events = session.snapshotEvents()
+    const logged = events.find((event): event is SessionEvent<'user/message'> => event.type === 'user/message')
+    const splices = events.filter((event): event is SessionEvent<'agent/inbox/spliced'> =>
+      event.type === 'agent/inbox/spliced')
+    const insert = splices.find(splice => splice.data.removedCount === undefined)
+    const claim = splices.find(splice => splice.data.removedCount === 1)
+
+    expect(logged?.data.source).toEqual(source)
+    expect(logged?.data.content).toEqual([{ type: 'text', text }])
+    expect(insert, 'the opener is queued for the Turn that consumes it').toBeDefined()
+    expect(claim, 'the hydrated Turn claims its opener').toBeDefined()
+    expect(insert!.data).toMatchObject({ target: 'next-turn', start: 0 })
+    expect(insert!.data.inserted.map(message => message.id)).toEqual([logged?.data.id])
+    expect(claim!.data).toMatchObject({ target: 'next-turn', start: 0, removedCount: 1, inserted: [] })
+    expect(claim!.data.outcome).toBeUndefined()
+    expect(insert!.seq).toBeLessThan(claim!.seq)
+    expect(claim!.seq).toBeLessThan(logged!.seq)
+    expect(outcome.appended).toBe(events.length)
+  })
+
+  it('leaves a hydrated human opener unclaimed', async () => {
+    const path = await transcript([
+      { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'plain question' }] } },
+      { type: 'message', message: { role: 'assistant', content: [{ type: 'text', text: 'answer' }] } },
+    ])
+    const session = Session.create(SessionId('hydrated-human-opener'))
+
+    await hydrateOmpSession(session, path)
+
+    expect(session.snapshotEvents().filter(event => event.type === 'agent/inbox/spliced')).toEqual([])
+  })
+})
+
+describe('hydrateOmpSession settled custom wakes', () => {
+  const hcom = '<hcom>[inform #41909] exo_lead -> argon: ship the wake rows</hcom>'
+  const advisory = '<advisory severity="concern" guidance="weigh, don\'t blindly obey">\nStop before shipping.\n</advisory>'
+  const settledWakes: unknown[] = [
+    { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'ship it' }] } },
+    { type: 'message', message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'shipping' }] } },
+    { type: 'custom_message', customType: 'hcom', display: true, attribution: 'agent', content: hcom },
+    { type: 'message', message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'woke' }] } },
+    { type: 'custom_message', customType: 'advisor', display: true, attribution: 'agent', content: advisory },
+    { type: 'message', message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'advised' }] } },
+  ]
+
+  it('opens a turn for each custom wake that follows a settled reply', async () => {
+    const path = await transcript(settledWakes)
+
+    const turns = await ompTranscriptTurns(path)
+
+    expect(turns.map(turn => turn.turn)).toEqual([1, 2, 3])
+    expect(turnUserTexts(turns)).toEqual(['ship it', hcom, advisory])
+  })
+
+  it('claims every hydrated settled custom wake so Chat promotes it', async () => {
+    const path = await transcript(settledWakes)
+    const session = Session.create(SessionId('hydrated-settled-custom-wakes'))
+
+    await hydrateOmpSession(session, path)
+
+    const events = session.snapshotEvents()
+    expect(sessionTurnOpeningMessages(events).map(event => event.data.source)).toEqual([
+      { kind: 'user' },
+      { kind: 'omp-agent-message', form: 'relay' },
+      { kind: 'omp-wake', form: 'notice', summary: 'Stop before shipping.' },
+    ])
+    const splices = events.filter((event): event is SessionEvent<'agent/inbox/spliced'> =>
+      event.type === 'agent/inbox/spliced')
+    expect(splices).toHaveLength(4)
+    expect(splices.filter(splice => splice.data.removedCount === 1)).toHaveLength(2)
+  })
+
+  it('keeps a custom wake inside a turn whose tool call is still open', async () => {
+    const path = await transcript([
+      { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'inspect' }] } },
+      {
+        type: 'message',
+        message: {
+          role: 'assistant',
+          stopReason: 'toolUse',
+          content: [{ type: 'toolCall', id: 'call-1', name: 'read', arguments: { path: '/tmp/a' } }],
+        },
+      },
+      { type: 'custom_message', customType: 'hcom', display: true, attribution: 'agent', content: hcom },
+      { type: 'message', message: { role: 'toolResult', toolCallId: 'call-1', content: [{ type: 'text', text: 'a' }] } },
+      { type: 'message', message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'done' }] } },
+    ])
+
+    const turns = await ompTranscriptTurns(path)
+    expect(turns.map(turn => turn.turn)).toEqual([1])
+    expect(turnUserTexts(turns)).toEqual(['inspect'])
+
+    const session = Session.create(SessionId('hydrated-midturn-custom-wake'))
+    await hydrateOmpSession(session, path)
+    const events = session.snapshotEvents()
+    expect(sessionTurnOpeningMessages(events).map(event => event.data.source)).toEqual([{ kind: 'user' }])
+    expect(events.filter(event => event.type === 'agent/inbox/spliced')).toEqual([])
+  })
 })
 
 describe('ompTranscriptTurns canonical branch', () => {
@@ -766,6 +933,62 @@ describe('ompTranscriptTurns canonical branch', () => {
       Date.parse('2026-11-04T10:00:00.000Z'),
       Date.parse('2026-11-04T11:00:00.000Z'),
     ])
+  })
+
+  it('records an empty assistant error as the turn failure instead of completing the turn', async () => {
+    const path = await transcript([
+      sessionLine(),
+      userEntry(entryId(1), SESSION_UUID, 'switch to deepseek'),
+      {
+        type: 'message',
+        id: entryId(2),
+        parentId: entryId(1),
+        message: {
+          role: 'assistant',
+          content: [],
+          stopReason: 'error',
+          errorMessage: '400 Upstream request failed: Model is unavailable',
+        },
+      },
+    ])
+
+    const turns = await ompTranscriptTurns(path)
+
+    expect(turns).toHaveLength(1)
+    expect(turns[0]?.events.filter(event => event.type === 'assistant/message')).toEqual([])
+    const end = turns[0]?.events.find(event => event.type === 'turn/end')
+    expect(end?.data.reason).toEqual({
+      kind: 'error',
+      error: { message: '400 Upstream request failed: Model is unavailable', code: 'PROVIDER_ERROR' },
+    })
+  })
+
+  it('keeps the assistant text of an errored message and marks the turn failed', async () => {
+    const path = await transcript([
+      sessionLine(),
+      userEntry(entryId(1), SESSION_UUID, 'switch to deepseek'),
+      {
+        type: 'message',
+        id: entryId(2),
+        parentId: entryId(1),
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'The provider refused the request.' }],
+          stopReason: 'error',
+          errorMessage: 'Model is unavailable',
+        },
+      },
+    ])
+
+    const session = Session.create(SessionId('hydrate-errored-assistant'))
+    await hydrateOmpSession(session, path)
+    const events = session.snapshotEvents()
+
+    expect(events.filter(event => event.type === 'assistant/message')).toHaveLength(1)
+    expect(events.find(event => event.type === 'turn/end')?.data.reason).toEqual({
+      kind: 'error',
+      error: { message: 'Model is unavailable', code: 'PROVIDER_ERROR' },
+    })
   })
 })
 
@@ -906,17 +1129,22 @@ describe.skipIf(!existsSync(REAL_TRANSCRIPT))('real OMP transcript hydration', (
 
     const session = Session.create(SessionId('real-transcript'))
     const outcome = await hydrateOmpSession(session, REAL_TRANSCRIPT)
-    const users = sessionUserTexts(session)
+    const openings = sessionTurnOpeningMessages(session.snapshotEvents())
+    const wakes = session.snapshotEvents()
+      .filter(isSessionUserMessage)
+      .filter(event => event.data.source.kind !== 'user')
 
     expect(outcome.turns).toBe(turns.length)
-    expect(users).toHaveLength(turns.length)
-    expect(users.filter(text => text?.trimStart().startsWith('omp:continue'))).toEqual([])
-    expect(users.filter(text => text?.trimStart().startsWith('<memories>')
-      || text?.trimStart().startsWith('<system-reminder>'))).toEqual([])
+    expect(openings.map(event => firstText(event.data.content))).toEqual(turnUserTexts(turns))
+    expect(wakes.length).toBeGreaterThan(0)
 
     const recordedUserTimes = turns.map(turn => turn.events.find(event => event.type === 'user/message')?.time)
     expect(recordedUserTimes.every(time => time !== undefined)).toBe(true)
-    expect(sessionUserTimes(session)).toEqual(recordedUserTimes)
+    expect(openings.map(event => event.time)).toEqual(recordedUserTimes)
+    const users = openings.map(event => firstText(event.data.content))
+    expect(users.filter(text => text?.trimStart().startsWith('omp:continue'))).toEqual([])
+    expect(users.filter(text => text?.trimStart().startsWith('<memories>')
+      || text?.trimStart().startsWith('<system-reminder>'))).toEqual([])
     const checkpoints = session.snapshotEvents().filter(event => event.type === 'compaction/summary')
     expect(checkpoints.length).toBeGreaterThan(0)
     for (const checkpoint of checkpoints) expect(checkpoint.data.shadowedSeqs.length).toBeGreaterThan(0)
@@ -943,8 +1171,7 @@ describe.skipIf(!existsSync(REAL_TRANSCRIPT))('real OMP transcript hydration', (
     try {
       const stored = await reopened.read()
       expect(stored.events.filter(event => event.type === 'turn/start')).toHaveLength(turns.length)
-      const storedUsers = stored.events.filter(event => event.type === 'user/message'
-        && !isCompactCheckpointSource(event.data.source))
+      const storedUsers = sessionTurnOpeningMessages(stored.events)
       expect(storedUsers).toHaveLength(turns.length)
       expect(stored.events.filter(event => event.type === 'turn/start').map(event => event.data.turn))
         .toEqual(turns.map(turn => turn.turn))
@@ -1245,5 +1472,31 @@ describe('hydrateOmpSession against a live streaming turn', () => {
       .map(event => event.data.turn)).toEqual([1, 2])
 
     await expect(persistAndReopen(session)).resolves.toBeDefined()
+  })
+})
+
+describe('resolveOmpTranscript session layouts', () => {
+  it('resolves a transcript stored directly under a flat session root', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'omp-flat-root-'))
+    roots.push(root)
+    const id = '01a1abad-8738-77e1-8d30-f0c29eee42e2'
+    const path = join(root, `2026-11-05T12-27-18-712Z_${id}.jsonl`)
+    await writeFile(path, `${JSON.stringify({ type: 'session', version: 3, id, cwd: '/work' })}\n`)
+
+    const match = await resolveOmpTranscript(root, id.slice(0, 8))
+    expect(match).toMatchObject({ id, path })
+  })
+
+  it('resolves a transcript nested in a project directory', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'omp-project-root-'))
+    roots.push(root)
+    const project = join(root, '-work')
+    await mkdir(project, { recursive: true })
+    const path = join(project, `2026-11-05T12-27-18-712Z_${SESSION_UUID}.jsonl`)
+    await writeFile(path, `${JSON.stringify(sessionLine())}
+`)
+
+    const match = await resolveOmpTranscript(root, SESSION_UUID.slice(0, 8))
+    expect(match).toMatchObject({ id: SESSION_UUID, path })
   })
 })

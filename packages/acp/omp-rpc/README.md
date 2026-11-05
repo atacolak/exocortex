@@ -35,13 +35,31 @@ so `/omp-resume` works against an active OMP session instead of returning
 transcript, and every other terminal stay alive.
 
 The bridge also polls the run directory (default 1500 ms, immediate startup
-scan) and adopts every live publication: it resolves the Harness Session
-already bound to that OMP session (never minting a duplicate), otherwise
-creates one under the OMP `cwd` workspace with the transcript's `rootAgent`
-preset, hydrates the recorded bubbles when the Session is blank, sets the
-recorded title, and attaches the socket. Any OMP agent running anywhere on
-the machine therefore appears in the sidebar with live status and opens into
-its running conversation without typing a command.
+scan) and adopts every live publication whose `sessionFile` resolves under
+this instance's sessions root: a shared run directory can carry publications
+from another instance, and adopting one would bind a foreign transcript
+locally. A sidecar with no `sessionFile` is still adopted, since OMP writes
+that field as nullable. For each adopted session it resolves the Harness
+Session already bound to that OMP session (never minting a duplicate),
+otherwise creates one under the OMP `cwd` workspace with the transcript's
+`rootAgent` preset, hydrates the recorded bubbles when the Session is blank,
+sets the recorded title, and attaches the socket. Any OMP agent running
+anywhere on the machine therefore appears in the sidebar with live status and
+opens into its running conversation without typing a command.
+
+## Missing workspace directories
+
+`POST /api/exocortex/omp/open` and the detached launcher both `stat` the
+workspace directory before any spawn. A Session whose recorded directory no
+longer exists is refused instead of started: the open route answers 409
+`omp/workspace-missing` with `workspace directory <path> no longer exists;
+relocate this session to an existing directory or forget it`, and the launcher
+rejects its publication promise with the same message. The refusal belongs to
+that Session; the Host and every other Session keep running. A directory that
+disappears between the check and the spawn still becomes a per-Session
+failure, never a process exit, because the keeper observes its child's `error`
+event and reports `cannot start OMP in workspace <path>` with the same
+relocate/forget guidance.
 
 ## Slash palette
 

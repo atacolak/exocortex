@@ -1,12 +1,20 @@
 import { spawn } from 'node:child_process'
-import { unlink } from 'node:fs/promises'
-import { readFile } from 'node:fs/promises'
+import { readFile, stat, unlink } from 'node:fs/promises'
 
 /** Idle lifetime a detached keeper grants OMP before it ends the request stream. */
 export const DEFAULT_OMP_DAEMON_IDLE_TIMEOUT_MS = 60 * 60_000
 
 /** How long a keeper waits for OMP to publish its session socket. */
 export const DEFAULT_OMP_DAEMON_PUBLICATION_TIMEOUT_MS = 30_000
+
+/**
+ * Operator-facing refusal for a session whose workspace directory vanished.
+ * @param cwd - workspace directory recorded by the session.
+ * @returns the message shared by the open route and the daemon pre-flight.
+ */
+export function missingWorkspaceMessage(cwd: string): string {
+  return `workspace directory ${cwd} no longer exists; relocate this session to an existing directory or forget it`
+}
 
 /** One detached session daemon request: how to start OMP and where it publishes. */
 export interface OmpDaemonLaunchSpec {
@@ -90,20 +98,29 @@ async function linkMirror(target, source) {
   mirrors.push(target)
 }
 
-async function publicationOf(childPid) {
+async function publicationIn(directory, childPid) {
   let names
-  try { names = await readdir(publicationDir) } catch { return undefined }
+  try { names = await readdir(directory) } catch { return undefined }
   for (const name of names) {
     if (!name.endsWith('.json')) continue
     let record
-    try { record = JSON.parse(await readFile(join(publicationDir, name), 'utf8')) } catch { continue }
+    try { record = JSON.parse(await readFile(join(directory, name), 'utf8')) } catch { continue }
     if (record === null || typeof record !== 'object' || record.pid !== childPid) continue
     const sessionId = record.sessionId
     if (typeof sessionId !== 'string' || sessionId.length === 0) continue
-    const socketPath = join(publicationDir, sessionId + '.sock')
+    const socketPath = join(directory, sessionId + '.sock')
     const info = await stat(socketPath).catch(() => undefined)
     if (info === undefined) continue
-    return { sessionId, socketPath }
+    return { sessionId, socketPath, directory }
+  }
+  return undefined
+}
+
+async function publicationOf(childPid) {
+  const directories = new Set([runDirectory, publicationDir])
+  for (const directory of directories) {
+    const found = await publicationIn(directory, childPid)
+    if (found !== undefined) return found
   }
   return undefined
 }
@@ -115,10 +132,10 @@ async function publish() {
     const found = await publicationOf(child.pid)
     if (found !== undefined) {
       let socketPath = found.socketPath
-      if (runDirectory !== publicationDir) {
+      if (found.directory !== runDirectory) {
         socketPath = join(runDirectory, found.sessionId + '.sock')
         await linkMirror(socketPath, found.socketPath)
-        await linkMirror(join(runDirectory, found.sessionId + '.json'), join(publicationDir, found.sessionId + '.json'))
+        await linkMirror(join(runDirectory, found.sessionId + '.json'), join(found.directory, found.sessionId + '.json'))
       }
       await writeHandshake({ ompSessionId: found.sessionId, pid: child.pid, socketPath })
       published = true
@@ -135,7 +152,7 @@ async function publish() {
 
 function start() {
   const executable = spec.argv[0]
-  const environment = Object.assign({}, process.env, spec.env)
+  const environment = Object.assign({}, process.env, spec.env, { OMP_RUN_DIR: runDirectory })
   child = spawn(executable, spec.argv.slice(1), {
     detached: false,
     stdio: ['pipe', 'pipe', 'ignore'],
@@ -164,7 +181,7 @@ function start() {
   child.stdin.on('error', () => {})
   child.on('error', (error) => {
     clearTimeout(idle)
-    void writeHandshake({ error: 'cannot start OMP: ' + String(error) }).catch(() => {})
+    void writeHandshake({ error: 'cannot start OMP in workspace ' + spec.cwd + ': ' + String(error) + '; if the workspace directory no longer exists, relocate this session to an existing directory or forget it' }).catch(() => {})
       .then(() => process.exit(0))
   })
   child.on('exit', () => {
@@ -218,30 +235,9 @@ export function launchOmpDaemon(spec: OmpDaemonLaunchSpec): OmpDaemonLaunch {
   const [executable, ...args] = spec.argv
   if (executable === undefined) throw new Error('OMP daemon launch needs an executable')
   const publicationTimeoutMs = spec.publicationTimeoutMs ?? DEFAULT_OMP_DAEMON_PUBLICATION_TIMEOUT_MS
-  const keeper = spawn(
-    process.execPath,
-    [
-      '--input-type=module',
-      '-e',
-      KEEPER_SOURCE,
-      JSON.stringify({
-        argv: [executable, ...args],
-        cwd: spec.cwd,
-        env: spec.env ?? {},
-        publicationDir: spec.publicationDir,
-        runDirectory: spec.runDirectory,
-        handshakePath: spec.handshakePath,
-        idleTimeoutMs: spec.idleTimeoutMs ?? DEFAULT_OMP_DAEMON_IDLE_TIMEOUT_MS,
-        publicationTimeoutMs,
-      }),
-    ],
-    { detached: true, stdio: 'ignore', cwd: spec.cwd },
-  )
-  keeper.unref()
-
   const { promise: published, resolve, reject } = Promise.withResolvers<OmpDaemonSession>()
   let timer: NodeJS.Timeout | undefined
-  const deadline = Date.now() + publicationTimeoutMs + 5_000
+  let deadline = 0
   const poll = (): void => {
     timer = undefined
     readFile(spec.handshakePath, 'utf8').then(
@@ -262,7 +258,52 @@ export function launchOmpDaemon(spec: OmpDaemonLaunchSpec): OmpDaemonLaunch {
       },
     )
   }
-  poll()
+  const fail = (error: Error): void => {
+    clearTimeout(timer)
+    reject(error)
+  }
+  const startKeeper = (): void => {
+    const keeper = spawn(
+      process.execPath,
+      [
+        '--input-type=module',
+        '-e',
+        KEEPER_SOURCE,
+        JSON.stringify({
+          argv: [executable, ...args],
+          cwd: spec.cwd,
+          env: spec.env ?? {},
+          publicationDir: spec.publicationDir,
+          runDirectory: spec.runDirectory,
+          handshakePath: spec.handshakePath,
+          idleTimeoutMs: spec.idleTimeoutMs ?? DEFAULT_OMP_DAEMON_IDLE_TIMEOUT_MS,
+          publicationTimeoutMs,
+        }),
+      ],
+      { detached: true, stdio: 'ignore', cwd: spec.cwd },
+    )
+    keeper.on('error', (error: Error) => {
+      fail(new Error(`cannot start the OMP daemon in workspace ${spec.cwd}: ${String(error)}; if the workspace directory no longer exists, relocate this session to an existing directory or forget it`))
+    })
+    keeper.unref()
+    deadline = Date.now() + publicationTimeoutMs + 5_000
+    poll()
+  }
+  void stat(spec.cwd).then(
+    (info) => {
+      if (!info.isDirectory()) {
+        fail(new Error(`workspace path ${spec.cwd} is not a directory; relocate this session to an existing directory or forget it`))
+        return
+      }
+      startKeeper()
+    },
+    (error: unknown) => {
+      const code = (error as NodeJS.ErrnoException).code
+      fail(code === 'ENOENT' || code === 'ENOTDIR'
+        ? new Error(missingWorkspaceMessage(spec.cwd))
+        : new Error(`cannot read workspace directory ${spec.cwd}: ${String(error)}`))
+    },
+  ).catch(fail)
   return {
     published,
     async dispose(): Promise<void> {

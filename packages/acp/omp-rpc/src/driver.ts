@@ -118,6 +118,8 @@ export interface OmpUnsolicitedWake {
 
 /**
  * Map one waking input onto the trigger-card source it is presented under.
+ * Advisor guidance rides the registered `omp-wake` kind; the `<advisory>` tag
+ * prefix in the injected text is what the trigger card reads to distinguish it.
  * @param text - the exact input text OMP received for the unasked run.
  * @returns the trigger-card source, or undefined for real user prose.
  */
@@ -129,12 +131,27 @@ export function ompTriggerSource(text: string): OmpTriggerSource | undefined {
   if (head.startsWith('<hcom') || head.startsWith('[hcom')) {
     return { kind: 'omp-agent-message', form: 'relay' }
   }
+  if (head.startsWith('<advisory')) {
+    return { kind: 'omp-wake', form: 'notice', summary: boundContextSummary(firstMeaningfulLine(text)) }
+  }
   return undefined
+}
+
+/**
+ * Attribute an OMP-authored injection that matches no specific trigger.
+ * @param text - the exact input text OMP injected.
+ * @returns the background wake source.
+ */
+export function ompGenericWakeSource(text: string): OmpTriggerSource {
+  return { kind: 'omp-wake', form: 'notice', summary: boundContextSummary(firstMeaningfulLine(text)) }
 }
 
 function firstMeaningfulLine(text: string): string {
   for (const line of text.split('\n')) {
-    const stripped = line.trim().replace(/^<\/?(?:system-notice|task-result|hcom)[^>]*>/u, '').trim()
+    const stripped = line.trim()
+      .replace(/^<\/?(?:advisory|hcom|memories|system-notice|system-reminder|task-result)[^>]*>/u, '')
+      .replace(/<\/[a-z-]+>$/u, '')
+      .trim()
     if (stripped.length > 0) return stripped
   }
   return text.trim()
@@ -549,6 +566,11 @@ interface PromptState {
 /**
  * Drive harness agent steps from one long-lived OMP RPC session.
  *
+ * The driver stays bound to the OMP session its attachment opened: transcript
+ * identity is fixed by `--resume`, `--fork`, or the attached socket, so a
+ * shrinking harness history is OMP compacting its own context, never a reason
+ * to reset the conversation inside the live process.
+ *
  * The first prompt carries only real user messages (never assembled context
  * or assistant/tool echoes), so `[Image #N]` markers in prose line up with the
  * frame-1 image array. Later steps steer newly assembled user messages into
@@ -597,7 +619,6 @@ export class OmpAgentDriver {
   private readonly external = new Set<string>()
   /** Harness turns already satisfied by a terminal-typed message, kept across every later step. */
   private readonly claimedKeys = new Set<string>()
-  private highWaterMark = 0
   private prompt: PromptState | undefined
   private startingPrompt = false
   private readonly stopFrames: () => void
@@ -829,9 +850,8 @@ export class OmpAgentDriver {
       return
     }
     if (text === undefined) return
-    const source = ompTriggerSource(text)
     this.markExternalUserMessage(text)
-    this.onUnsolicitedWake?.(source === undefined ? { text } : { text, source })
+    this.onUnsolicitedWake?.({ text, source: ompTriggerSource(text) ?? ompGenericWakeSource(text) })
   }
 
   /** One announcement per OMP message id, bounded so a long attach does not grow without limit. */
@@ -892,14 +912,12 @@ export class OmpAgentDriver {
   async *stream(request: GenerateOptions, signal: AbortSignal): AsyncIterable<StreamChunk> {
     this.userCancelled = false
     signal.throwIfAborted()
-    if (this.sent !== undefined && request.messages.length < this.highWaterMark) await this.restart()
     const pending = this.pendingTurns(request.messages)
     let state = this.prompt
     const buffered = state === undefined ? false : state.unsolicited && !state.channel.finished()
     const drainable = state !== undefined && buffered && (!state.closed || pending.length === 0)
     if (state === undefined || (state.closed && !drainable)) {
       if (pending.length === 0) {
-        this.highWaterMark = Math.max(this.highWaterMark, request.messages.length)
         yield { type: 'finish', reason: { kind: 'stop' } }
         return
       }
@@ -1048,7 +1066,6 @@ export class OmpAgentDriver {
       if (tools.length > 0 && (finalOutcome === undefined || finalOutcome.status === 'completed')) this.onTool?.(tools)
       const chunks = final ? translator.finish(settling) : translator.endCycle()
       for (const chunk of chunks) yield chunk
-      this.highWaterMark = Math.max(this.highWaterMark, request.messages.length)
       if (final) {
         state.closed = true
         this.prompt = undefined
@@ -1203,14 +1220,6 @@ export class OmpAgentDriver {
       content: toolContentOf(frame.result),
       isError: frame.isError === true,
     }
-  }
-
-  private async restart(): Promise<void> {
-    await this.client.request({ type: 'new_session' })
-    this.sent = undefined
-    this.highWaterMark = 0
-    this.prompt?.channel.close()
-    this.prompt = undefined
   }
 }
 

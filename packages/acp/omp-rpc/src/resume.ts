@@ -22,7 +22,7 @@ import {
 import { foldSurface, type Session, type SessionAppendTiming, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { normalizeSessionTitle } from '@deepseek-ai/dsh-session-title'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
-import { ompTriggerSource } from './driver.ts'
+import { ompGenericWakeSource, ompTriggerSource } from './driver.ts'
 import type { OmpTriggerSource } from './types.ts'
 
 /** A resume or open request the HTTP surface can report with a stable status. */
@@ -93,21 +93,23 @@ export async function readOmpTranscriptHeader(path: string): Promise<OmpTranscri
 }
 
 /**
- * List the transcripts directly under one OMP session root's project
- * directories, newest file first.
+ * List the transcripts under one OMP session root: the session root itself and
+ * one project level below it, newest file first.
  * @param root - OMP session root (`~/.omp/agent/sessions`).
  * @returns transcript paths; unreadable directories contribute nothing.
  */
 export async function listOmpTranscripts(root: string): Promise<string[]> {
-  const projects = await readdir(root, { withFileTypes: true }).catch(() => [])
   const paths: string[] = []
-  for (const project of projects) {
-    if (!project.isDirectory() && !project.isSymbolicLink()) continue
-    const dir = join(root, project.name)
-    const entries = await readdir(dir, { withFileTypes: true }).catch(() => [])
-    for (const entry of entries) {
-      if (!(entry.isFile() || entry.isSymbolicLink()) || !entry.name.endsWith('.jsonl')) continue
-      paths.push(join(dir, entry.name))
+  for (const entry of await readdir(root, { withFileTypes: true }).catch(() => [])) {
+    const path = join(root, entry.name)
+    if (entry.name.endsWith('.jsonl') && (entry.isFile() || entry.isSymbolicLink())) {
+      paths.push(path)
+      continue
+    }
+    if (!entry.isDirectory() && !entry.isSymbolicLink()) continue
+    for (const nested of await readdir(path, { withFileTypes: true }).catch(() => [])) {
+      if (!nested.name.endsWith('.jsonl') || !(nested.isFile() || nested.isSymbolicLink())) continue
+      paths.push(join(path, nested.name))
     }
   }
   return paths.sort((left, right) => right.localeCompare(left))
@@ -254,6 +256,8 @@ interface TranscriptMessage {
   readonly model?: unknown
   readonly toolCallId?: unknown
   readonly isError?: unknown
+  readonly stopReason?: unknown
+  readonly errorMessage?: unknown
 }
 
 interface TranscriptMessageEntry {
@@ -262,6 +266,8 @@ interface TranscriptMessageEntry {
   readonly parentId?: unknown
   readonly timestamp?: unknown
   readonly customType?: unknown
+  readonly content?: unknown
+  readonly display?: unknown
   readonly message?: TranscriptMessage
   readonly data?: unknown
   readonly summary?: unknown
@@ -298,6 +304,18 @@ function partsOf(content: unknown): TranscriptContentPart[] {
 function userMessageSource(content: readonly ContentBlock[]): MessageSourceMap['user'] | OmpTriggerSource {
   const text = content.map(block => block.type === 'text' ? block.text : '').join('\n')
   return ompTriggerSource(text) ?? { kind: 'user' }
+}
+
+/** Attribution for a custom card OMP recorded; it is never operator prose. */
+function customMessageSource(content: readonly ContentBlock[]): OmpTriggerSource {
+  const text = content.map(block => block.type === 'text' ? block.text : '').join('\n')
+  return ompTriggerSource(text) ?? ompGenericWakeSource(text)
+}
+
+/** Read a `custom_message` entry's content, which OMP records as a string or parts. */
+function customContent(raw: unknown): ContentBlock[] {
+  if (typeof raw === 'string') return raw.trim().length === 0 ? [] : [{ type: 'text', text: raw }]
+  return textBlocks(raw)
 }
 
 function textBlocks(content: unknown): ContentBlock[] {
@@ -767,6 +785,7 @@ export async function ompTranscriptTurns(path: string): Promise<OmpTranscriptTur
     leafEntryId?: string
     events: OmpHydrationEvent[]
     boundaries?: OmpTranscriptCompaction[]
+    failure?: { message: string; code: string }
   }
   const beforeFirst: OmpTranscriptCompaction[] = []
   const drafts: TurnDraft[] = []
@@ -777,12 +796,21 @@ export async function ompTranscriptTurns(path: string): Promise<OmpTranscriptTur
   let stepHasAssistant = false
   let suppressed = false
   let lastTime: number | undefined
+  let lastStopTerminal = false
   const openCalls = new Set<string>()
 
   const closeTurn = (): void => {
     if (current === undefined || draft === undefined) return
     current.push(timed({ type: 'step/end', data: { turn, step } }, lastTime))
-    current.push(timed({ type: 'turn/end', data: { turn, reason: { kind: 'completed' } } }, lastTime))
+    current.push(timed({
+      type: 'turn/end',
+      data: {
+        turn,
+        reason: draft.failure === undefined
+          ? { kind: 'completed' }
+          : { kind: 'error', error: draft.failure },
+      },
+    }, lastTime))
     drafts.push(draft)
     current = undefined
     draft = undefined
@@ -802,6 +830,7 @@ export async function ompTranscriptTurns(path: string): Promise<OmpTranscriptTur
       ...userEntryId === undefined ? {} : { userEntryId, leafEntryId: userEntryId },
     }
     openCalls.clear()
+    lastStopTerminal = false
     return events
   }
   const openStep = (events: OmpHydrationEvent[], time: number | undefined): void => {
@@ -821,6 +850,24 @@ export async function ompTranscriptTurns(path: string): Promise<OmpTranscriptTur
         if (draft === undefined) beforeFirst.push(boundary)
         else (draft.boundaries ??= []).push(boundary)
       }
+      if (draft !== undefined && id !== undefined) draft.leafEntryId = id
+      continue
+    }
+    if (entry.type === 'custom_message') {
+      const content = customContent(entry.content)
+      if (content.length === 0 || entry.display === false) {
+        if (draft !== undefined && id !== undefined) draft.leafEntryId = id
+        continue
+      }
+      if (current === undefined || lastStopTerminal) {
+        closeTurn()
+        current = openTurn(time, id)
+      }
+      current.push(timed({
+        type: 'user/message',
+        data: createUserMessage({ content, source: customMessageSource(content) }),
+      }, time))
+      lastTime = time ?? lastTime
       if (draft !== undefined && id !== undefined) draft.leafEntryId = id
       continue
     }
@@ -856,6 +903,12 @@ export async function ompTranscriptTurns(path: string): Promise<OmpTranscriptTur
       continue
     }
     if (message.role === 'assistant') {
+      if (message.stopReason === 'error' && draft !== undefined) {
+        const reported = typeof message.errorMessage === 'string' && message.errorMessage.trim().length > 0
+          ? message.errorMessage
+          : 'The OMP provider reported an error without a message.'
+        draft.failure = draft.failure ?? { message: reported, code: 'PROVIDER_ERROR' }
+      }
       const results = resultsBefore(position)
       const content = assistantBlocks(message.content, toolStarts)
         .filter(block => block.type !== 'tool-call' || results.has(block.id))
@@ -885,6 +938,7 @@ export async function ompTranscriptTurns(path: string): Promise<OmpTranscriptTur
         }, time))
         openCalls.add(block.id)
       }
+      lastStopTerminal = message.stopReason !== 'toolUse' && openCalls.size === 0
       lastTime = time ?? lastTime
       if (draft !== undefined && id !== undefined) draft.leafEntryId = id
       continue
@@ -1289,6 +1343,7 @@ export async function hydrateOmpSession(
   for (const boundary of matchedTurn?.boundariesAfter ?? []) emitBoundary(boundary)
   for (const boundary of admitted[0]?.boundariesBefore ?? []) emitBoundary(boundary)
   let appendedEvents = 0
+  let awaitingOpener = false
   const liveTurn = mergedInto === undefined ? undefined : liveTurnDedupeOf(session)
   for (const [index, events] of selected.entries()) {
     const batch = liveTurn === undefined || admitted[index] !== mergedInto
@@ -1298,6 +1353,7 @@ export async function hydrateOmpSession(
       appendedEvents += 1
       switch (event.type) {
         case 'turn/start':
+          awaitingOpener = true
           session.append('turn/start', event.data, timingOf(event.time))
           break
         case 'turn/end':
@@ -1309,9 +1365,26 @@ export async function hydrateOmpSession(
         case 'step/end':
           session.append('step/end', event.data, timingOf(event.time))
           break
-        case 'user/message':
-          session.append('user/message', event.data, { surfaceOp: 'append', ...timingOf(event.time) })
+        case 'user/message': {
+          const timing = timingOf(event.time)
+          if (awaitingOpener && event.data.source.kind !== 'user') {
+            session.append('agent/inbox/spliced', {
+              target: 'next-turn',
+              start: 0,
+              inserted: [event.data],
+            }, timing)
+            session.append('agent/inbox/spliced', {
+              target: 'next-turn',
+              start: 0,
+              removedCount: 1,
+              inserted: [],
+            }, timing)
+            appendedEvents += 2
+          }
+          awaitingOpener = false
+          session.append('user/message', event.data, { surfaceOp: 'append', ...timing })
           break
+        }
         case 'assistant/message':
           session.append('assistant/message', event.data, { surfaceOp: 'append', ...timingOf(event.time) })
           break

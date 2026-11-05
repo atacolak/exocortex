@@ -1,18 +1,31 @@
 import { mkdir, stat } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
-import { homedir, tmpdir } from 'node:os'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import type { Agent, AgentStepStream } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentStepStream, ModelSelection } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-commands'
-import type { CommandId } from '@deepseek-ai/dsh-commands/brand'
-import { createAssistantMessage, createToolResultMessage, createUserMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
+import { CommandId } from '@deepseek-ai/dsh-commands/brand'
+import {
+  createAssistantMessage,
+  createToolResultMessage,
+  createUserMessage,
+  ReasoningEffortId,
+  ToolCallId,
+} from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, RequestMessage, StreamChunk, UserMessage } from '@deepseek-ai/dsh-llm'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import type { TodoItem } from '@deepseek-ai/dsh-tool-todo'
 import type { OmpBindings } from './bindings.ts'
-import { OMP_THINKING_LEVELS, OmpModelCatalogSync, type CatalogSyncOutcome, type OmpModelSelection } from './catalog.ts'
+import {
+  applyOperatorSelection,
+  mintModel,
+  readAuthority,
+  type CatalogSyncOutcome,
+  type OmpActiveModel,
+  type OmpModelSelection,
+} from './catalog.ts'
 import { OmpRpcClient } from './client.ts'
 import { DEFAULT_OMP_DAEMON_IDLE_TIMEOUT_MS, launchOmpDaemon } from './daemon.ts'
 import { DEFAULT_OMP_HOST_TOOLS, ompCordisHostTools } from './cordis-tools.ts'
@@ -21,7 +34,7 @@ import { OmpHostToolBridge } from './host-tools.ts'
 import { launchOmp, type LaunchedOmp } from './launch.ts'
 import { CLIENT_OWNED_COMMANDS, ompCompactCommand, ompNativeCommandLine } from './native-commands.ts'
 import { appendOmpCompactionBoundary, tailOmpTranscriptCompaction } from './resume.ts'
-import { connectOmpSocket, ompRunDirectory, resolveOmpRunDirectory, type OmpSocketConnection } from './socket.ts'
+import { connectOmpSocket, resolveOmpRunDirectory, type OmpSocketConnection } from './socket.ts'
 import { OmpUiBridge, type OmpUiAsker } from './ui.ts'
 import type { OmpExtensionUiRequest, OmpPromptResultFrame, OmpRpcCommand } from './types.ts'
 
@@ -45,7 +58,10 @@ export interface OmpAttachOptions {
   readonly resumePath?: string
   /** Existing transcript path to copy for `fork`; omitted replays harness history instead. */
   readonly forkPath?: string
-  /** Provider/model the OMP gateway should serve for this attachment. */
+  /**
+   * Explicit model to mint a brand-new blank session with. Omitted — every
+   * attach and resume — the process keeps the model its own session runs.
+   */
   readonly selection?: OmpModelSelection
   /** Directory holding OMP transcripts for this attachment. */
   readonly sessionDir: string
@@ -106,8 +122,17 @@ function sessionUserMessages(session: Agent['session']): Extract<RequestMessage,
   return messages
 }
 
-async function activeSessionOf(client: OmpRpcClient): Promise<OmpAttachment['session']> {
-  const state = await client.request({ type: 'get_state' })
+/**
+ * Whether one session holds no events yet, which is the only state an explicit
+ * caller selection may mint onto.
+ * @param session - the harness session an attachment serves.
+ * @returns true for a session that has not recorded anything.
+ */
+export function sessionIsBlank(session: Agent['session']): boolean {
+  return session.seq === 0
+}
+
+function activeSessionOf(state: unknown): OmpAttachment['session'] {
   if (typeof state !== 'object' || state === null || Array.isArray(state)) {
     throw new Error('OMP get_state returned no session state')
   }
@@ -169,7 +194,7 @@ export interface OmpBridgeOptions {
   readonly daemonIdleTimeoutMs?: number
   /** Directory the bridge watches for published sockets; defaults to `$OMP_RUN_DIR` then `<home>/.omp/run`. */
   readonly runDirectory?: string
-  /** Directory OMP itself publishes under; defaults to `$HOME/.omp/run`. */
+  /** Directory OMP itself publishes under; defaults to the watched run directory. */
   readonly publicationDir?: string
 }
 
@@ -212,10 +237,14 @@ export function ompLaunchArgv(options: {
  * @param options - whether the mounted extensions include the hcom binder.
  * @returns the environment additions for the OMP child process.
  */
-export function ompLaunchEnvironment(options: { readonly hcom?: boolean } = {}): Record<string, string> {
+export function ompLaunchEnvironment(options: {
+  readonly hcom?: boolean
+  readonly runDirectory?: string
+} = {}): Record<string, string> {
   return {
     EXOCORTEX_ENV: '1',
     ...options.hcom === true ? { HCOM_LAUNCHED: '1' } : {},
+    ...options.runDirectory === undefined ? {} : { OMP_RUN_DIR: options.runDirectory },
   }
 }
 
@@ -343,6 +372,11 @@ interface LiveAttachment {
   readonly cursor: LiveCursor
   /** Serializes live compaction projection so two boundaries cannot reorder. */
   projections: Promise<void>
+  /** Serializes model authority reads and writes so projections cannot interleave. */
+  modelQueue: Promise<void>
+  /** Last selection projected onto the harness session, so echoes stay skipped. */
+  projected: ModelSelection | undefined
+  detachModel: () => void
   todos: TodoItem[]
 }
 
@@ -350,6 +384,13 @@ interface LiveCursor {
   readonly agent: Agent
   turn: number
   step: number
+}
+
+function sameSelection(left: ModelSelection | undefined, right: ModelSelection): boolean {
+  return left !== undefined
+    && left.provider === right.provider
+    && left.model === right.model
+    && left.reasoningEffort === right.reasoningEffort
 }
 
 /**
@@ -435,7 +476,11 @@ export class OmpBridge {
           executable,
           ...hcomExtension === undefined ? {} : { extensions: [hcomExtension] },
         })
-        const env = ompLaunchEnvironment({ hcom: hcomExtension !== undefined })
+        const runDirectory = this.options.runDirectory ?? resolveOmpRunDirectory(undefined, undefined)
+        const env = ompLaunchEnvironment({
+          hcom: hcomExtension !== undefined,
+          runDirectory,
+        })
         if (this.options.detachedDaemon === false) {
           launched = launchOmp(this.options.subprocess, { argv, cwd: options.cwd, env })
           await launched.ready
@@ -445,8 +490,8 @@ export class OmpBridge {
             argv,
             cwd: options.cwd,
             env,
-            publicationDir: this.options.publicationDir ?? ompRunDirectory(homedir()),
-            runDirectory: this.options.runDirectory ?? resolveOmpRunDirectory(undefined, undefined),
+            publicationDir: this.options.publicationDir ?? runDirectory,
+            runDirectory,
             handshakePath: join(tmpdir(), `dsh-omp-daemon-${randomUUID()}.json`),
             idleTimeoutMs: this.options.daemonIdleTimeoutMs ?? DEFAULT_OMP_DAEMON_IDLE_TIMEOUT_MS,
           })
@@ -463,7 +508,8 @@ export class OmpBridge {
         client = connection.client
       }
       await client.negotiateProtocol()
-      const session = await activeSessionOf(client)
+      const state = await client.request({ type: 'get_state' })
+      const session = activeSessionOf(state)
       if (options.sessionId !== undefined && session.id !== options.sessionId) {
         throw new Error(`OMP session socket ${options.socketPath ?? ''} serves session "${session.id}", not "${options.sessionId}"`)
       }
@@ -471,16 +517,17 @@ export class OmpBridge {
       if (duplicate !== undefined) {
         throw new Error(`OMP session "${session.id}" is already attached to harness session "${duplicate.agent.id}"`)
       }
-      const currentSelection = agent.model.current()
-      const selection = options.selection === undefined
-        ? currentSelection
-        : {
-          ...options.selection,
-          ...options.selection.reasoningEffort !== undefined || currentSelection?.reasoningEffort === undefined
-            ? {}
-            : { reasoningEffort: currentSelection.reasoningEffort },
-        }
-      const catalog = await new OmpModelCatalogSync(client, selection).sync()
+      const mint = options.selection !== undefined
+        && options.resumePath === undefined
+        && options.sessionId === undefined
+        && options.forkPath === undefined
+        && options.socketPath === undefined
+        && sessionIsBlank(agent.session)
+        ? options.selection
+        : undefined
+      const catalog: CatalogSyncOutcome = mint === undefined
+        ? { status: 'adopted', ...await readAuthority(client, state) }
+        : await mintModel(client, mint)
       const hostTools = new OmpHostToolBridge({
         client,
         tools: () => ompCordisHostTools({
@@ -535,9 +582,14 @@ export class OmpBridge {
         detachStream: () => {},
         cursor,
         projections: Promise.resolve(),
+        modelQueue: Promise.resolve(),
+        projected: undefined,
+        detachModel: () => {},
         todos: [],
       }
       attachment = live
+      live.detachModel = this.bindModel(live)
+      this.projectModel(live, catalog.active)
       if (options.managedStreams !== true) live.detachStream = this.bindStream(live)
       await hostTools.sync()
       await this.publishTodos(live)
@@ -683,6 +735,7 @@ export class OmpBridge {
     const live = this.attachments.get(id)
     if (live === undefined) return
     this.attachments.delete(id)
+    live.detachModel()
     live.driver.close()
     live.detachStream()
     live.disposeCommands()
@@ -755,6 +808,7 @@ export class OmpBridge {
   private releaseUnloaded(live: LiveAttachment): void {
     if (this.attachments.get(live.agent.id) !== live) return
     this.attachments.delete(live.agent.id)
+    live.detachModel()
     live.driver.close()
     live.detachStream()
     live.disposeCommands()
@@ -767,6 +821,108 @@ export class OmpBridge {
   /** Stop every attachment, as when the owning plugin unloads. */
   async dispose(): Promise<void> {
     await Promise.all([...this.attachments.keys()].map(id => this.detach(id)))
+  }
+
+  /**
+   * Subscribe to both directions of model authority: an operator selection
+   * made in the harness, and a switch the OMP process made for itself.
+   *
+   * Bound for every attachment, including the managed-stream ones whose step
+   * streams the agent factory drives, because the Web UI's model and effort
+   * pickers reach OMP only through this subscription.
+   * @param live - the attachment to keep in step.
+   * @returns the disposer that stops both subscriptions.
+   */
+  private bindModel(live: LiveAttachment): () => void {
+    const stopSelection = live.agent.ctx.on('session/event', (session, event) => {
+      if (session !== live.agent.session || event.type !== 'model/selection') return
+      if (sameSelection(live.projected, event.data)) return
+      const selection = event.data
+      live.modelQueue = live.modelQueue.then(() => this.applySelection(live, selection))
+    })
+    const stopFrames = live.client.onFrame((frame) => {
+      if (frame.type !== 'model_changed' && frame.type !== 'thinking_level_changed') return
+      live.modelQueue = live.modelQueue.then(() => this.adopt(live))
+    })
+    return () => {
+      stopSelection()
+      stopFrames()
+    }
+  }
+
+  /**
+   * Apply one operator selection to the process, then project what the process
+   * confirms. A refusal is recorded as a visible command error and the badge
+   * falls back to the process's own model, never to the rejected request.
+   * @param live - the attachment whose process serves the selection.
+   * @param selection - the selection the operator recorded.
+   */
+  private async applySelection(live: LiveAttachment, selection: ModelSelection): Promise<void> {
+    try {
+      this.projectModel(live, await applyOperatorSelection(live.client, {
+        provider: selection.provider,
+        model: selection.model,
+        ...selection.reasoningEffort === undefined ? {} : { reasoningEffort: selection.reasoningEffort },
+      }))
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error)
+      this.options.ctx.logger.error(`omp-rpc: model selection rejected: ${message}`)
+      await this.adopt(live)
+      this.surfaceRejection(live, selection, message)
+    }
+  }
+
+  /**
+   * Re-read the process model authority and project it onto the harness badge.
+   * @param live - the attachment to re-read.
+   */
+  private async adopt(live: LiveAttachment): Promise<void> {
+    try {
+      this.projectModel(live, (await readAuthority(live.client)).active)
+    } catch (error: unknown) {
+      this.options.ctx.logger.warn(`omp-rpc: cannot read the OMP model state: ${String(error)}`)
+    }
+  }
+
+  /**
+   * Make the harness session report one process model authority, recording the
+   * projection so the selection event it appends is not echoed back to OMP.
+   * @param live - the attachment whose badge to update.
+   * @param active - the authority the process reports; omitted leaves the badge.
+   */
+  private projectModel(live: LiveAttachment, active: OmpActiveModel | undefined): void {
+    if (active === undefined) return
+    const selection: ModelSelection = {
+      provider: active.provider,
+      model: active.model,
+      ...active.thinkingLevel === undefined
+        ? {}
+        : { reasoningEffort: ReasoningEffortId(active.thinkingLevel) },
+    }
+    live.projected = selection
+    live.agent.model.select(selection)
+  }
+
+  /**
+   * Record a rejected model selection as a session command card, which the
+   * transcript and the Web UI surface instead of a silently stale badge.
+   * @param live - the attachment whose session reports the failure.
+   * @param selection - the rejected operator selection.
+   * @param message - the failure text naming the rejected request.
+   */
+  private surfaceRejection(live: LiveAttachment, selection: ModelSelection, message: string): void {
+    const commandId = CommandId(`omp-model-${randomUUID()}`)
+    try {
+      live.agent.session.append('command/run', {
+        commandId,
+        name: 'model',
+        args: `${selection.provider}/${selection.model}`,
+        source: { kind: 'user' },
+      })
+      live.agent.session.append('command/done', { commandId, kind: 'error', text: message })
+    } catch (error: unknown) {
+      this.options.ctx.logger.warn(`omp-rpc: cannot record the rejected model selection: ${String(error)}`)
+    }
   }
 
   private bindStream(live: LiveAttachment): () => void {
@@ -791,12 +947,6 @@ export class OmpBridge {
     })
     const stopSessionEvents = live.agent.ctx.on('session/event', (session, event) => {
       if (session !== live.agent.session) return
-      if (event.type === 'model/selection') {
-        const level = event.data.reasoningEffort
-        if (level === undefined || OMP_THINKING_LEVELS[level] !== true) return
-        void live.client.request({ type: 'set_thinking_level', level }).catch(() => {})
-        return
-      }
       if (event.type !== 'agent/inbox/spliced') return
       if (event.data.target !== 'next-step' || event.data.inserted.length === 0) return
       if (!live.driver.hasActiveRun()) return

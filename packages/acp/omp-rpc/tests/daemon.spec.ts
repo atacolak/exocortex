@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process'
 import { lstat, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -32,6 +33,24 @@ async function sandbox(): Promise<string> {
 
 async function missing(path: string): Promise<boolean> {
   return await readFile(path).then(() => false, () => true)
+}
+
+async function runNode(source: string, cwd: string): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  const child = spawn(process.execPath, ['--import', import.meta.resolve('tsx/esm'), '--input-type=module', '-e', source], {
+    cwd,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  let stdout = ''
+  let stderr = ''
+  child.stdout.setEncoding('utf8')
+  child.stderr.setEncoding('utf8')
+  child.stdout.on('data', (chunk: string) => { stdout += chunk })
+  child.stderr.on('data', (chunk: string) => { stderr += chunk })
+  const exited = Promise.withResolvers<number | null>()
+  child.once('exit', (exitCode) => { exited.resolve(exitCode) })
+  child.once('error', exited.reject)
+  const code = await exited.promise
+  return { code, stdout, stderr }
 }
 
 function publishedPid(record: unknown): number {
@@ -213,4 +232,184 @@ describe('detached OMP session daemon', () => {
     }, { timeout: 10_000 })
     await vi.waitFor(() => { expect(ompProcessAlive(published.pid)).toBe(false) }, { timeout: 10_000 })
   })
+
+  it('keeps the host process alive when the session working directory no longer exists', async () => {
+    const root = await sandbox()
+    const gone = join(root, 'deleted-workspace')
+    const program = `
+      import { launchOmpDaemon } from ${JSON.stringify(new URL('../src/daemon.ts', import.meta.url).href)}
+      const launch = launchOmpDaemon({
+        argv: ['omp'],
+        cwd: ${JSON.stringify(gone)},
+        publicationDir: ${JSON.stringify(join(root, '.omp', 'run'))},
+        runDirectory: ${JSON.stringify(join(root, 'omp-run'))},
+        handshakePath: ${JSON.stringify(join(root, 'handshake.json'))},
+        publicationTimeoutMs: 500,
+      })
+      try {
+        await launch.published
+        console.log('published')
+      } catch (error) {
+        console.log('session error: ' + error.message)
+      }
+      await launch.dispose()
+      console.log('host alive')
+    `
+    const result = await runNode(program, root)
+    expect(result.stderr).not.toContain("Unhandled 'error' event")
+    expect(result.code).toBe(0)
+    expect(result.stdout).toContain('host alive')
+    expect(result.stdout).toContain(`workspace directory ${gone} no longer exists`)
+    expect(result.stdout).toContain('relocate')
+    expect(result.stdout).toContain('forget')
+  }, 20_000)
+
+  it('reports a spawn failure after the workspace pre-flight without crashing the host', async () => {
+    const root = await sandbox()
+    const program = `
+      import { launchOmpDaemon } from ${JSON.stringify(new URL('../src/daemon.ts', import.meta.url).href)}
+      const launch = launchOmpDaemon({
+        argv: [${JSON.stringify(join(root, 'missing-omp-binary'))}],
+        cwd: ${JSON.stringify(root)},
+        publicationDir: ${JSON.stringify(join(root, '.omp', 'run'))},
+        runDirectory: ${JSON.stringify(join(root, 'omp-run'))},
+        handshakePath: ${JSON.stringify(join(root, 'handshake.json'))},
+        publicationTimeoutMs: 500,
+      })
+      const keepAlive = setInterval(() => {}, 1000)
+      try {
+        await launch.published
+        console.log('published')
+      } catch (error) {
+        console.log('session error: ' + error.message)
+      } finally {
+        clearInterval(keepAlive)
+      }
+      await launch.dispose()
+      console.log('host alive')
+    `
+    const result = await runNode(program, root)
+    expect(result.stderr).not.toContain("Unhandled 'error' event")
+    expect(result.code).toBe(0)
+    expect(result.stdout).toContain('host alive')
+    expect(result.stdout).toContain(`cannot start OMP in workspace ${root}`)
+    expect(result.stdout).toContain('relocate')
+    expect(result.stdout).toContain('forget')
+  }, 20_000)
+
+  it('isolates a deleted workspace to its own session and attaches the next session', async () => {
+    const root = await sandbox()
+    const publicationDir = join(root, '.omp', 'run')
+    const runDirectory = join(root, 'omp-run')
+    const sessionId = 'omp-isolated-session'
+    vi.stubEnv('OMP_TEST_PUBLICATION_DIR', publicationDir)
+    vi.stubEnv('OMP_TEST_TRANSCRIPT', join(root, 'session.jsonl'))
+    vi.stubEnv('OMP_TEST_MARKERS', join(root, 'markers'))
+    vi.stubEnv('OMP_TEST_SESSION_ID', sessionId)
+
+    const ctx = new Context()
+    onTestFinished(() => ctx.fiber.dispose())
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(CommandRuntime)
+    ctx.provide('tools', { definitions: () => [] } as never)
+    const subprocess = {
+      resolveExecutable: (command: string) => Promise.resolve(command),
+      spawn: () => { throw new Error('a detached launch must not spawn through the subprocess provider') },
+    } as unknown as SubprocessRuntime
+    ctx.provide('subprocess', subprocess)
+    let bridgeCtx!: Context
+    await ctx.plugin(Object.assign((inner: Context) => { bridgeCtx = inner }, {
+      inject: ['commands', 'subprocess', 'tools'],
+    }))
+    const bridge = new OmpBridge({
+      ctx: bridgeCtx,
+      subprocess,
+      executable: FIXTURE,
+      publicationDir,
+      runDirectory,
+      daemonIdleTimeoutMs: 60_000,
+    })
+    onTestFinished(() => bridge.dispose())
+
+    const deleted = join(root, 'deleted-workspace')
+    const orphaned = await scopedAgent(ctx, 'harness-gone-cwd')
+    await expect(bridge.attach(orphaned, { mode: 'attach', sessionDir: join(root, 'sessions'), cwd: deleted }))
+      .rejects.toThrow(`workspace directory ${deleted} no longer exists`)
+
+    const live = await scopedAgent(ctx, 'harness-live-cwd')
+    const attachment = await bridge.attach(live, { mode: 'attach', sessionDir: join(root, 'sessions'), cwd: root })
+    expect(attachment.session).toMatchObject({ id: sessionId })
+    const published: unknown = JSON.parse(await readFile(join(publicationDir, `${sessionId}.json`), 'utf8'))
+    onTestFinished(() => { try { process.kill(publishedPid(published), 'SIGTERM') } catch {} })
+  }, 20_000)
+})
+
+describe('OMP run directory inheritance', () => {
+  it('pins OMP_RUN_DIR for the child so it publishes into the watched run directory', async () => {
+    const root = await sandbox()
+    const home = join(root, 'home')
+    const runDirectory = join(root, 'omp-run')
+    const publicationDir = join(root, 'unused-publication')
+    const markers = join(root, 'markers')
+    const sessionId = 'omp-run-dir-session'
+    const handshakePath = join(root, 'handshake.json')
+    vi.stubEnv('HOME', home)
+    vi.stubEnv('OMP_RUN_DIR', '')
+    vi.stubEnv('OMP_TEST_PUBLICATION_DIR', '')
+    vi.stubEnv('OMP_TEST_TRANSCRIPT', join(root, 'session.jsonl'))
+    vi.stubEnv('OMP_TEST_MARKERS', markers)
+    vi.stubEnv('OMP_TEST_SESSION_ID', sessionId)
+
+    const launch = launchOmpDaemon({
+      argv: [FIXTURE, '--mode', 'rpc', '--session-dir', join(root, 'sessions')],
+      cwd: root,
+      publicationDir,
+      runDirectory,
+      handshakePath,
+      idleTimeoutMs: 60_000,
+      publicationTimeoutMs: 1_500,
+    })
+    const published = await launch.published
+    onTestFinished(() => { try { process.kill(published.pid, 'SIGTERM') } catch {} })
+    await launch.dispose()
+
+    expect(published.socketPath).toBe(join(runDirectory, `${sessionId}.sock`))
+    expect((await lstat(published.socketPath)).isSocket()).toBe(true)
+    expect(await missing(join(publicationDir, `${sessionId}.sock`))).toBe(true)
+    const environ = await readFile(`/proc/${String(published.pid)}/environ`, 'utf8')
+    expect(environ.split('\0')).toContain(`OMP_RUN_DIR=${runDirectory}`)
+  }, 20_000)
+
+  it('finds a publication that landed in the watched directory when OMP publishes elsewhere', async () => {
+    const root = await sandbox()
+    const runDirectory = join(root, 'omp-run')
+    const publicationDir = join(root, 'unused-publication')
+    const sessionId = 'omp-watched-session'
+    vi.stubEnv('OMP_TEST_PUBLICATION_DIR', '')
+    vi.stubEnv('OMP_TEST_TRANSCRIPT', join(root, 'session.jsonl'))
+    vi.stubEnv('OMP_TEST_MARKERS', join(root, 'markers'))
+    vi.stubEnv('OMP_TEST_SESSION_ID', sessionId)
+
+    const launch = launchOmpDaemon({
+      argv: [FIXTURE, '--mode', 'rpc', '--session-dir', join(root, 'sessions')],
+      cwd: root,
+      env: { OMP_RUN_DIR: runDirectory },
+      publicationDir,
+      runDirectory,
+      handshakePath: join(root, 'handshake.json'),
+      idleTimeoutMs: 60_000,
+      publicationTimeoutMs: 1_500,
+    })
+    const published = await launch.published
+    onTestFinished(() => { try { process.kill(published.pid, 'SIGTERM') } catch {} })
+    await launch.dispose()
+
+    expect(published).toEqual({
+      ompSessionId: sessionId,
+      pid: expect.any(Number) as number,
+      socketPath: join(runDirectory, `${sessionId}.sock`),
+    })
+    expect((await lstat(published.socketPath)).isSocket()).toBe(true)
+    expect(await missing(join(publicationDir, `${sessionId}.json`))).toBe(true)
+  }, 20_000)
 })

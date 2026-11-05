@@ -442,6 +442,13 @@ export class OmpSessionAgent implements Agent {
     this.attachPromise = undefined
   }
 
+  /**
+   * Project one OMP-initiated run into the session. An idle wake queues on the inbox before the
+   * Turn opens because `runTurn` claims only when it starts without an initial message; handing
+   * the wake to `startTurn` would leave it unclaimed and therefore hidden from Chat. A wake that
+   * arrives mid-Turn is recorded without a claim so it stays in Trajectory.
+   * @param wake - the waking input and its trigger attribution.
+   */
   projectExternalWake(wake: OmpExternalWake): void {
     if (this.disposed) return
     const message = createUserMessage({
@@ -449,7 +456,8 @@ export class OmpSessionAgent implements Agent {
       source: wake.source ?? { kind: 'user' },
     })
     if (this.phase === undefined) {
-      this.startTurn(message)
+      this.inbox.append('next-turn', message)
+      this.startTurn(undefined)
       return
     }
     this.session.append('user/message', message, { surfaceOp: 'append' })
@@ -520,10 +528,12 @@ export class OmpSessionAgent implements Agent {
     let outcome: TurnEndReason | undefined
     let stepOpen = false
     let stickyMaxTokens = false
+    let outcomeFailure: { readonly message: string; readonly code: string } | undefined
     try {
       this.session.append('turn/start', { turn: phase.turn })
-      if (initial !== undefined) {
-        this.session.append('user/message', initial, { surfaceOp: 'append' })
+      const prompt = initial ?? this.inbox.claimNextTurn(phase.turn)
+      if (prompt !== undefined) {
+        this.session.append('user/message', prompt, { surfaceOp: 'append' })
       }
       const driver = await this.ensureDriver()
       phase.controller.signal.throwIfAborted()
@@ -602,6 +612,9 @@ export class OmpSessionAgent implements Agent {
             }, { surfaceOp: 'append' }).seq)
             this.host.projectTools(this.id, phase.turn, step, tools)
           }
+          if (finish?.kind === 'error') {
+            outcomeFailure = { message: finish.failure.message, code: finish.failure.code }
+          }
           if (finish?.kind === 'max-tokens') stickyMaxTokens = true
         } catch (error: unknown) {
           if (!attempt.ended) attempt.abandon()
@@ -617,6 +630,8 @@ export class OmpSessionAgent implements Agent {
       }
       if (phase.controller.signal.aborted) {
         outcome = { kind: 'aborted', reason: abortedCancelCause(phase.controller.signal) ?? { kind: 'legacy' } }
+      } else if (outcomeFailure !== undefined) {
+        outcome = { kind: 'error', error: outcomeFailure }
       } else if (stickyMaxTokens) {
         outcome = { kind: 'max-tokens' }
       } else {

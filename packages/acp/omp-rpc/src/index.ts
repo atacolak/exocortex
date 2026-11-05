@@ -21,11 +21,12 @@ import { modelSelectionProjectionDefinition, type Agent } from '@deepseek-ai/dsh
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import { Session, SessionId, type SessionEvent, type SessionHeader } from '@deepseek-ai/dsh-session'
 import { inboxProjectionDefinition, OmpAgentFactory, type OmpAgentHost, type OmpRecoveredSession } from './agent-factory.ts'
-import { OMP_LLM_PROVIDER, registerOmpLlmProvider } from './llm-catalog.ts'
+import { registerOmpLlmProvider } from './llm-catalog.ts'
 import type {} from '@deepseek-ai/dsh-session-query'
 import type {} from '@deepseek-ai/dsh-workspace'
 import Schema from '@deepseek-ai/schemastery'
 import { bindingFactsOf, defaultOmpBindingsFile, hydrateOmpBinding, OmpBindings, rememberOmpBinding, type OmpBinding } from './bindings.ts'
+import { missingWorkspaceMessage } from './daemon.ts'
 import {
   OmpBridge,
   planOmpAttach,
@@ -92,6 +93,13 @@ export * from './driver.ts'
 export * from './host-tools.ts'
 export * from './launch.ts'
 export * from './llm-catalog.ts'
+export {
+  loadOmpModelCatalog,
+  type OmpCatalogModel as OmpProviderModel,
+  type OmpCatalogSourceOptions,
+  type OmpModelCatalogSnapshot,
+  type OmpThinkingLevel,
+} from './model-catalog.ts'
 export * from './native-commands.ts'
 export * from './open.ts'
 export * from './presets.ts'
@@ -179,13 +187,17 @@ export const Config: Schema<OmpRpcConfig> = Schema.object({
 
 function attachmentSummary(attachment: OmpAttachment): string {
   const version = attachment.client.protocol
-  const catalog = attachment.catalog.status === 'applied'
-    ? `model ${attachment.catalog.model.id}`
-    : attachment.catalog.status === 'not-offered'
-      ? 'harness model not offered by the OMP gateway'
-      : 'OMP default model'
+  const { catalog } = attachment
+  const authority = catalog.active === undefined
+    ? 'model unread'
+    : `model ${catalog.active.provider}/${catalog.active.model}`
+  const model = catalog.status === 'applied'
+    ? `minted ${catalog.model.id}`
+    : catalog.status === 'not-offered'
+      ? `harness model not offered by the OMP gateway; kept ${authority}`
+      : `adopted OMP ${authority}`
   const transport = attachment.launched === undefined ? ' on its live session socket' : ''
-  return `attached OMP RPC v${String(version)} (${catalog})${transport}`
+  return `attached OMP RPC v${String(version)} (${model})${transport}`
 }
 
 async function existingFile(path: string): Promise<boolean> {
@@ -425,7 +437,7 @@ export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
     config.watchRunDir === false ? undefined : config.watchRunDir,
     config.home,
   )
-  const ompPublicationDir = join(config.home ?? homedir(), '.omp', 'run')
+  const ompPublicationDir = resolveOmpRunDirectory(undefined, config.home)
   const bridge = new OmpBridge({
     ctx,
     subprocess: ctx.subprocess,
@@ -454,11 +466,9 @@ export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
     const cwd = options.cwd ?? agent.session.header.cwd ?? config.cwd
     if (cwd === undefined) throw new Error('OMP bridge has no working directory: set omp-rpc cwd or start the session in one')
     const preset = options.preset ?? config.preset
-    const selection = agent.model.current()
     return {
       ...options,
       ...preset === undefined ? {} : { preset },
-      ...selection === undefined ? {} : { selection },
       sessionDir: config.sessionDir ?? sessionsRoot,
       hostTools: config.hostTools ?? DEFAULT_OMP_HOST_TOOLS,
       managedStreams: true,
@@ -612,6 +622,10 @@ export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
       ompSessionId: transcript.id,
       attached: served,
       async attach() {
+        const workspace = await stat(cwd).catch(() => undefined)
+        if (workspace === undefined || !workspace.isDirectory()) {
+          throw new OmpResumeError('omp/workspace-missing', missingWorkspaceMessage(cwd), 409)
+        }
         const executable = await ctx.subprocess.resolveExecutable(resolveOmpExecutable(config.executable), undefined)
         const wake = await wakeDecisionOf(transcript.id)
         const lease = await probeOmpSessionLease(ctx.subprocess, executable, transcript.id, cwd)
@@ -854,7 +868,15 @@ export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
 
   const modelSelection = await ctx.sessionProjections.register(modelSelectionProjectionDefinition)
   const inbox = await ctx.sessionProjections.register(inboxProjectionDefinition)
-  registerOmpLlmProvider(ctx, OMP_LLM_PROVIDER)
+  const ompExecutable = resolveOmpExecutable(config.executable)
+  const catalogExecutable = await ctx.subprocess.resolveExecutable(ompExecutable, undefined)
+    .catch(() => ompExecutable)
+  const llmCatalog = registerOmpLlmProvider(ctx, {
+    executable: catalogExecutable,
+    home: config.home ?? homedir(),
+    cwd: config.cwd ?? process.cwd(),
+  })
+  await llmCatalog.ready
   ctx.effect(() => ctx.agents.setFactory(new OmpAgentFactory({
     ctx,
     host: agentHost,
@@ -966,6 +988,7 @@ export async function apply(ctx: Context, config: OmpRpcConfig): Promise<void> {
       if (controller === undefined) return
       sessionCtx.effect(() => watchOmpRunDirectory({
         runDir: watchDir,
+        sessionsRoot,
         ...config.watchIntervalMs === undefined ? {} : { intervalMs: config.watchIntervalMs },
         onSession: (live) => { onLiveSession(controller, live) },
       }), 'omp-rpc live session adoption')

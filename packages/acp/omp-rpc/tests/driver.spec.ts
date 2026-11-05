@@ -325,7 +325,7 @@ describe('OmpAgentDriver', () => {
     await consume
   })
 
-  it('restarts a replay session when the assembled history shrinks', async () => {
+  it('keeps one OMP session when compaction shrinks the assembled history', async () => {
     const client = new FakeClient()
     const driver = new OmpAgentDriver(client)
     const first = request([user('u1', 'one'), assistant('a1', 'two'), user('u2', 'three')])
@@ -340,19 +340,23 @@ describe('OmpAgentDriver', () => {
     settlePrompt(client)
     await consume
 
+    client.emit({ type: 'auto_compaction_start', reason: 'threshold' })
+    client.emit({ type: 'auto_compaction_end', aborted: false, skipped: false })
+
     const compacted = request([user('u9', 'fresh start')])
     const consumeCompacted = (async () => {
       for await (const _chunk of driver.stream(compacted, new AbortController().signal)) { /* drain */ }
     })()
     await tick()
+    expect(client.commands.filter(command => command.type === 'new_session')).toEqual([])
+    expect(client.commands.filter(command => command.type === 'prompt')).toHaveLength(2)
     client.settle()
     await tick()
     client.emit(messageUpdate('m2', { type: 'text_start', contentIndex: 0 }, assistantMessage('', 'stop', { input: 1, output: 1 })))
     client.emit(messageUpdate('m2', { type: 'text_end', contentIndex: 0, content: 'ok' }, assistantMessage('ok', 'stop', { input: 1, output: 1 })))
-    client.settle()
     settlePrompt(client)
     await consumeCompacted
-    expect(client.commands.filter(command => command.type === 'new_session')).toHaveLength(1)
+    expect(client.commands.map(command => command.type)).toEqual(['prompt', 'prompt'])
     expect(client.promptText(1)).toBe('fresh start')
   })
 
@@ -597,6 +601,56 @@ describe('OmpAgentDriver unsolicited wakes', () => {
     driver.close()
   })
 
+  it.each([
+    ['<advisory advisor="watchdog" severity="blocker" guidance="weigh, don\'t blindly obey">\nStop before shipping.\n</advisory>', 'Stop before shipping.'],
+    ['Todo list is stale.', 'Todo list is stale.'],
+  ])('attributes %j to an already-registered wake kind, never user prose', (injected, summary) => {
+    const client = new FakeClient()
+    const wakes: { source?: { kind?: string } }[] = []
+    const driver = new OmpAgentDriver(client, { onUnsolicitedWake: (wake) => { wakes.push(wake) } })
+
+    client.emit({ type: 'agent_start' })
+    client.emit({ type: 'message_end', message: { role: 'custom', content: [{ type: 'text', text: injected }] } })
+
+    expect(wakes).toEqual([{
+      text: injected,
+      source: { kind: 'omp-wake', form: 'notice', summary },
+    }])
+    expect(['omp-wake', 'omp-agent-message', 'omp-subagent-settled']).toContain(wakes[0]?.source?.kind)
+    driver.close()
+  })
+
+  it.each(['<memories>\nEarlier decision: ship after review.\n</memories>', '<system-reminder>\nTodo list is stale.\n</system-reminder>'])(
+    'keeps %j in the injection lane instead of waking the run',
+    (injected) => {
+      const client = new FakeClient()
+      const wakes: unknown[] = []
+      const driver = new OmpAgentDriver(client, { onUnsolicitedWake: (wake) => { wakes.push(wake) } })
+
+      client.emit({ type: 'agent_start' })
+      client.emit({ type: 'message_end', message: { role: 'custom', content: [{ type: 'text', text: injected }] } })
+
+      expect(wakes).toEqual([])
+      driver.close()
+    },
+  )
+
+  it('classifies live advisor guidance recorded as a user frame, never as operator prose', () => {
+    const client = new FakeClient()
+    const wakes: unknown[] = []
+    const driver = new OmpAgentDriver(client, { onUnsolicitedWake: (wake) => { wakes.push(wake) } })
+    const advisory = '<advisory severity="concern" guidance="weigh, don\'t blindly obey">\nThe hook misses two paths.\n</advisory>'
+
+    client.emit({ type: 'agent_start' })
+    client.emit({ type: 'message_end', message: { role: 'user', content: [{ type: 'text', text: advisory }] } })
+
+    expect(wakes).toEqual([{
+      text: advisory,
+      source: { kind: 'omp-wake', form: 'notice', summary: 'The hook misses two paths.' },
+    }])
+    driver.close()
+  })
+
   it('classifies hcom actor mail as an agent message relay', () => {
     const client = new FakeClient()
     const wakes: unknown[] = []
@@ -605,6 +659,38 @@ describe('OmpAgentDriver unsolicited wakes', () => {
 
     client.emit({ type: 'agent_start' })
     client.emit({ type: 'message_end', message: { role: 'custom', content: mail } })
+
+    expect(wakes).toEqual([{
+      text: mail,
+      source: { kind: 'omp-agent-message', form: 'relay' },
+    }])
+    driver.close()
+  })
+
+  it('carries a live hcom envelope verbatim for the trigger row to attribute', () => {
+    const client = new FakeClient()
+    const wakes: unknown[] = []
+    const driver = new OmpAgentDriver(client, { onUnsolicitedWake: (wake) => { wakes.push(wake) } })
+    const mail = '<hcom>[inform #24819] mg_lead -> argon: mg-l7i wave is running: three builders, non-blocking.</hcom>'
+
+    client.emit({ type: 'agent_start' })
+    client.emit({ type: 'message_end', message: { role: 'user', content: [{ type: 'text', text: mail }] } })
+
+    expect(wakes).toEqual([{
+      text: mail,
+      source: { kind: 'omp-agent-message', form: 'relay' },
+    }])
+    driver.close()
+  })
+
+  it('carries every mail of a batched hcom envelope verbatim, not just the first', () => {
+    const client = new FakeClient()
+    const wakes: unknown[] = []
+    const driver = new OmpAgentDriver(client, { onUnsolicitedWake: (wake) => { wakes.push(wake) } })
+    const mail = '<hcom>[2 new messages] | [inform #43234] charter_arch -> argon: ack #43170: reading the charter. | [inform #43237] mg_lead -> argon: ACK #43174. Split and sequenced.</hcom>'
+
+    client.emit({ type: 'agent_start' })
+    client.emit({ type: 'message_end', message: { role: 'user', content: [{ type: 'text', text: mail }] } })
 
     expect(wakes).toEqual([{
       text: mail,

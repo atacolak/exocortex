@@ -1,7 +1,7 @@
 import { readdir, readFile, rm, stat } from 'node:fs/promises'
 import { connect } from 'node:net'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { isAbsolute, join, relative, sep } from 'node:path'
 import { OmpRpcClient } from './client.ts'
 
 /** One live OMP session published on its owner-only Unix socket. */
@@ -188,17 +188,43 @@ export async function readOmpSocketSession(runDir: string, sessionId: string): P
 }
 
 /**
- * Scan a run directory for OMP sessions whose socket is still attachable.
- * @param runDir - OMP run directory.
- * @returns every session whose pid is alive and whose socket still answers as a socket.
+ * Whether a transcript belongs to the session store this instance owns.
+ *
+ * Both sides are resolved against the current directory first, so `..` and
+ * trailing separators cannot smuggle a foreign transcript past the check, and
+ * a sibling such as `/a/sessions-2` is outside `/a/sessions` rather than a
+ * string prefix of it.
+ * @param sessionFile - transcript path recorded by the publishing process.
+ * @param sessionsRoot - transcript store this instance owns.
+ * @returns true when the transcript resolves under the owned root.
  */
-export async function scanOmpRunDirectory(runDir: string): Promise<OmpSocketSession[]> {
+function ownedSessionFile(sessionFile: string, sessionsRoot: string): boolean {
+  const owned = relative(sessionsRoot, sessionFile)
+  return owned.length > 0 && owned !== '..' && !owned.startsWith(`..${sep}`) && !isAbsolute(owned)
+}
+
+/**
+ * Scan a run directory for OMP sessions whose socket is still attachable.
+ *
+ * A shared run directory can carry publications from several harness
+ * instances. Only a sidecar whose transcript resolves under `sessionsRoot` is
+ * adopted: adopting a foreign one would bind another instance's transcript to
+ * a local session. OMP writes `sessionFile` as nullable, so a sidecar that
+ * records no transcript is still adopted — refusing it would drop a legitimate
+ * session that simply has not written one yet.
+ * @param runDir - OMP run directory.
+ * @param sessionsRoot - transcript store owned by this instance.
+ * @returns every owned session whose pid is alive and whose socket still answers as a socket.
+ */
+export async function scanOmpRunDirectory(runDir: string, sessionsRoot: string): Promise<OmpSocketSession[]> {
   const entries = await readdir(runDir).catch(() => [] as string[])
   const sessions: OmpSocketSession[] = []
   for (const entry of entries) {
     if (!entry.endsWith('.json')) continue
     const session = await readOmpSocketSession(runDir, entry.slice(0, -'.json'.length))
-    if (session !== undefined) sessions.push(session)
+    if (session === undefined) continue
+    if (session.sessionFile !== undefined && !ownedSessionFile(session.sessionFile, sessionsRoot)) continue
+    sessions.push(session)
   }
   return sessions
 }
@@ -206,9 +232,11 @@ export async function scanOmpRunDirectory(runDir: string): Promise<OmpSocketSess
 /** Options for watching one OMP run directory. */
 export interface OmpRunDirectoryWatchOptions {
   readonly runDir: string
+  /** Transcript store this instance owns; publications under any other store are ignored. */
+  readonly sessionsRoot: string
   /** Poll period; defaults to 1.5 s. */
   readonly intervalMs?: number
-  /** Called once per live session per scan; callers deduplicate adoption. */
+  /** Called once per live owned session per scan; callers deduplicate adoption. */
   readonly onSession: (session: OmpSocketSession) => void
 }
 
@@ -218,9 +246,15 @@ const DEFAULT_WATCH_INTERVAL_MS = 1_500
  * Poll a run directory so OMP sessions started anywhere on the machine
  * surface without a manual attach.
  *
+ * Only sessions whose transcript resolves under `sessionsRoot` are reported:
+ * a run directory can be shared with another harness instance, and adopting
+ * its sessions would bind a foreign transcript locally. A publication with no
+ * recorded transcript is still reported, because OMP writes that field as
+ * nullable.
+ *
  * The first scan runs immediately, scans never overlap, and the timer is
  * unref'd so an idle watcher cannot hold the process open.
- * @param options - directory, poll period, and per-session callback.
+ * @param options - directory, owned transcript store, poll period, and per-session callback.
  * @returns a stop function that also cancels an in-flight scan's next tick.
  */
 export function watchOmpRunDirectory(options: OmpRunDirectoryWatchOptions): () => void {
@@ -231,7 +265,7 @@ export function watchOmpRunDirectory(options: OmpRunDirectoryWatchOptions): () =
     if (scanning || stopped) return
     scanning = true
     try {
-      for (const session of await scanOmpRunDirectory(options.runDir)) options.onSession(session)
+      for (const session of await scanOmpRunDirectory(options.runDir, options.sessionsRoot)) options.onSession(session)
     } catch {
       return
     } finally {

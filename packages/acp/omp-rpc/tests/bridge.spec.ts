@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PassThrough } from 'node:stream'
-import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { Agent, ModelSelection } from '@deepseek-ai/dsh-agent'
 import CommandRuntime from '@deepseek-ai/dsh-commands'
 import { Context } from '@deepseek-ai/cordis'
 import { createScope } from '@deepseek-ai/dsh-scope'
@@ -82,6 +82,32 @@ describe('omp launch extensions', () => {
       EXOCORTEX_ENV: '1',
       HCOM_LAUNCHED: '1',
     })
+  })
+
+  it('pins the OMP run directory so the child cannot publish under the process home', () => {
+    expect(ompLaunchEnvironment({ runDirectory: '/stage/omp-run' })).toEqual({
+      EXOCORTEX_ENV: '1',
+      OMP_RUN_DIR: '/stage/omp-run',
+    })
+  })
+})
+
+describe('OmpBridge run directory pinning', () => {
+  it('carries the bridge run directory into the launched OMP environment', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'omp-pin-'))
+    onTestFinished(() => rm(root, { recursive: true, force: true }))
+    const runDirectory = join(root, 'omp-run')
+    const { ctx, bridge, spawned } = await mountedBridge((frame) => {
+      if (frame.type === 'get_state') return { sessionId: 'omp-pinned-1', cwd: root }
+      if (frame.type === 'get_available_models') return { models: [] }
+      if (frame.type === 'get_available_commands') return { commands: [] }
+      return {}
+    }, { runDirectory })
+    const agent = await scopedAgent(ctx, 'harness-pinned')
+    await bridge.attach(agent, { mode: 'attach', sessionDir: join(root, 'sessions'), cwd: root })
+
+    expect(spawned).toHaveLength(1)
+    expect(spawned[0]?.env.OMP_RUN_DIR).toBe(runDirectory)
   })
 })
 
@@ -201,15 +227,28 @@ describe('omp todo projection', () => {
 interface FakeOmp {
   readonly subprocess: SubprocessRuntime
   readonly requests: Record<string, unknown>[]
+  /** Every process the bridge asked the provider to start. */
+  readonly spawned: { readonly argv: readonly string[]; readonly env: Record<string, string> }[]
+  /** Push one unsolicited frame, as a lifecycle or model switch event does. */
+  readonly send: (frame: unknown) => void
+}
+
+interface FakeSpawnRequest {
+  readonly argv: readonly string[]
+  readonly env?: Record<string, string> | undefined
 }
 
 function fakeOmp(reply: (frame: Record<string, unknown>, send: (frame: unknown) => void) => unknown): FakeOmp {
   const requests: Record<string, unknown>[] = []
+  const outputs: PassThrough[] = []
+  const spawned: { readonly argv: readonly string[]; readonly env: Record<string, string> }[] = []
   const subprocess = {
     resolveExecutable: async (command: string) => command,
-    spawn: (): SubprocessHandle => {
+    spawn: (request: FakeSpawnRequest): SubprocessHandle => {
+      spawned.push({ argv: request.argv, env: request.env ?? {} })
       const stdin = new PassThrough()
       const stdout = new PassThrough()
+      outputs.push(stdout)
       stdout.write(`${JSON.stringify({
         type: 'ready',
         protocolVersion: 1,
@@ -226,13 +265,20 @@ function fakeOmp(reply: (frame: Record<string, unknown>, send: (frame: unknown) 
           buffered = buffered.slice(newline + 1)
           const frame = JSON.parse(line) as Record<string, unknown>
           requests.push(frame)
-          const data = reply(frame, (extra) => { stdout.write(`${JSON.stringify(extra)}\n`) })
+          let data: unknown
+          let failure: string | undefined
+          try {
+            data = reply(frame, (extra) => { stdout.write(`${JSON.stringify(extra)}\n`) })
+          } catch (error: unknown) {
+            failure = error instanceof Error ? error.message : String(error)
+          }
           stdout.write(`${JSON.stringify({
             type: 'response',
             id: frame.id,
             command: frame.type,
-            success: true,
-            ...data === undefined ? {} : { data },
+            ...failure === undefined
+              ? { success: true, ...data === undefined ? {} : { data } }
+              : { success: false, error: failure },
           })}\n`)
           newline = buffered.indexOf('\n')
         }
@@ -250,29 +296,48 @@ function fakeOmp(reply: (frame: Record<string, unknown>, send: (frame: unknown) 
       } as unknown as SubprocessHandle
     },
   } as unknown as SubprocessRuntime
-  return { subprocess, requests }
+  return {
+    subprocess,
+    requests,
+    spawned,
+    send: (frame) => {
+      for (const output of outputs) output.write(`${JSON.stringify(frame)}\n`)
+    },
+  }
 }
 
-async function mountedBridge(reply: Parameters<typeof fakeOmp>[0]): Promise<{
+async function mountedBridge(
+  reply: Parameters<typeof fakeOmp>[0],
+  options: { readonly runDirectory?: string } = {},
+): Promise<{
   ctx: Context
   bridge: OmpBridge
   bridgeCtx: Context
   subprocess: SubprocessRuntime
+  requests: Record<string, unknown>[]
+  spawned: FakeOmp['spawned']
+  send: FakeOmp['send']
 }> {
   const ctx = new Context()
   onTestFinished(() => ctx.fiber.dispose())
   await ctx.plugin(SessionStore)
   await ctx.plugin(CommandRuntime)
   ctx.provide('tools', { definitions: () => [] } as never)
-  const { subprocess } = fakeOmp(reply)
+  const { subprocess, requests, spawned, send } = fakeOmp(reply)
   ctx.provide('subprocess', subprocess as never)
   let bridgeCtx!: Context
   await ctx.plugin(Object.assign((inner: Context) => { bridgeCtx = inner }, {
     inject: ['commands', 'subprocess', 'tools'],
   }))
-  const bridge = new OmpBridge({ ctx: bridgeCtx, subprocess, executable: 'omp', detachedDaemon: false })
+  const bridge = new OmpBridge({
+    ctx: bridgeCtx,
+    subprocess,
+    executable: 'omp',
+    detachedDaemon: false,
+    ...options.runDirectory === undefined ? {} : { runDirectory: options.runDirectory },
+  })
   onTestFinished(() => bridge.dispose())
-  return { ctx, bridge, bridgeCtx, subprocess }
+  return { ctx, bridge, bridgeCtx, subprocess, requests, spawned, send }
 }
 
 async function scopedAgent(ctx: Context, id: string): Promise<Agent> {
@@ -462,6 +527,38 @@ describe('OmpBridge live socket attachment', () => {
     await expect.poll(() => server.open, { timeout: 2_000 }).toBe(0)
   })
 
+  it('switches to a named OMP session by binding a new process, never restarting the old one', async () => {
+    const { ctx, bridge } = await socketBridge()
+    const from = await published('omp-live-from')
+    const to = await published('omp-live-to')
+    const agent = await scopedAgent(ctx, 'socket-switch')
+
+    await bridge.attach(agent, {
+      mode: 'attach',
+      sessionDir: from.directory,
+      socketPath: ompSocketPath(from.directory, 'omp-live-from'),
+      sessionId: 'omp-live-from',
+      cwd: '/work',
+    })
+    const before = bridge.driverOf(agent.id)
+    await bridge.attach(agent, {
+      mode: 'attach',
+      sessionDir: to.directory,
+      socketPath: ompSocketPath(to.directory, 'omp-live-to'),
+      sessionId: 'omp-live-to',
+      cwd: '/work',
+    })
+    const after = bridge.driverOf(agent.id)
+
+    expect(before).toBeDefined()
+    expect(after).toBeDefined()
+    expect(after).not.toBe(before)
+    expect(from.frames.filter(frame => frame.type === 'new_session')).toEqual([])
+    expect(bridge.servesOmpSession('omp-live-from')).toBe(false)
+    expect(bridge.servesOmpSession('omp-live-to')).toBe(true)
+    await expect.poll(() => from.server.open, { timeout: 2_000 }).toBe(0)
+  })
+
   it('refuses a socket publishing a different session than requested', async () => {
     const { ctx, bridge } = await socketBridge()
     const { directory } = await published('omp-live-2')
@@ -605,5 +702,181 @@ describe('OmpBridge live socket attachment', () => {
     operator.abort({ kind: 'user' })
     await cancelled
     await expect.poll(() => frames.filter(frame => frame.type === 'abort').length).toBe(1)
+  })
+})
+
+/**
+ * Poll the assertion until it holds, so a projection that lands after the frame
+ * is observed on the next tick is not reported as a failure.
+ * @param predicate - the condition the projection should reach.
+ */
+async function waitFor(predicate: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if (predicate()) return
+    await tick()
+  }
+  throw new Error('condition did not hold')
+}
+
+describe('OMP model authority', () => {
+  const DSH_DEFAULT: ModelSelection = { provider: 'deepseek-official', model: 'deepseek-flash' }
+  const OPUS_4 = { provider: 'cpa', id: 'claude-opus-4-6', name: 'Claude Opus 4.6' }
+  const OPUS_5 = { provider: 'cpa', id: 'claude-opus-5', name: 'Claude Opus 5' }
+  const GLM = { provider: 'opencode-go', id: 'go/glm-5', name: 'GLM 5' }
+
+  interface ModelDouble {
+    current(): ModelSelection | undefined
+    select(selection: ModelSelection): void
+  }
+
+  /**
+   * Build an agent whose session publishes on the root ctx, so the bridge's
+   * `session/event` subscription sees the selections the badge records.
+   * @param ctx - root context the bridge was mounted on.
+   * @param id - session identity.
+   * @param initial - the model the harness believed before attaching.
+   */
+  async function modelAgent(ctx: Context, id: string, initial?: ModelSelection): Promise<{ agent: Agent; session: Session; model: ModelDouble }> {
+    const session = ctx.sessions.create(SessionId(id))
+    let recorded = initial
+    const model: ModelDouble = {
+      current: () => recorded,
+      select: (selection) => {
+        if (recorded !== undefined
+          && recorded.provider === selection.provider
+          && recorded.model === selection.model
+          && recorded.reasoningEffort === selection.reasoningEffort) return
+        recorded = selection
+        session.append('model/selection', selection)
+      },
+    }
+    const agent = { id: session.id, session, model } as unknown as Agent
+    ;(agent as unknown as { ctx: Context }).ctx = ctx
+    return { agent, session, model }
+  }
+
+  /**
+   * Script an OMP process that owns one model state and answers the authority
+   * reads the bridge makes, including a rejected write when asked.
+   * @param options - initial authority, served models, and commands to refuse.
+   */
+  function scriptedOmp(options: {
+    readonly state: { provider: string; id: string; thinkingLevel?: string }
+    readonly models: readonly Record<string, unknown>[]
+    readonly reject?: readonly string[]
+  }): (frame: Record<string, unknown>, send: (frame: unknown) => void) => unknown {
+    const state = options.state
+    const rejected = new Set(options.reject ?? [])
+    return (frame, send) => {
+      const type = String(frame.type)
+      if (rejected.has(type)) throw new Error(`${type} is not available`)
+      switch (type) {
+        case 'get_state':
+          return {
+            sessionId: 'omp-model',
+            model: { provider: state.provider, id: state.id },
+            ...state.thinkingLevel === undefined ? {} : { thinkingLevel: state.thinkingLevel },
+          }
+        case 'get_available_models':
+          return { models: options.models }
+        case 'set_model': {
+          const next = options.models.find(model => model.provider === frame.provider && model.id === frame.modelId)
+          if (next === undefined) throw new Error(`Model not found: ${String(frame.provider)}/${String(frame.modelId)}`)
+          state.provider = String(next.provider)
+          state.id = String(next.id)
+          send({ type: 'model_changed' })
+          return {}
+        }
+        case 'set_thinking_level':
+          state.thinkingLevel = String(frame.level)
+          send({ type: 'thinking_level_changed', thinkingLevel: state.thinkingLevel })
+          return {}
+        default:
+          return {}
+      }
+    }
+  }
+
+  /** Every write the bridge sent to the process. */
+  function writes(requests: readonly Record<string, unknown>[]): Record<string, unknown>[] {
+    return requests.filter(request => request.type === 'set_model' || request.type === 'set_thinking_level')
+  }
+
+  /** The model the session badge currently reports. */
+  function badge(session: Session): unknown {
+    return session.snapshotEvents().filter(event => event.type === 'model/selection').at(-1)?.data
+  }
+
+  async function sessionDir(): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), 'omp-attach-'))
+    onTestFinished(() => rm(dir, { recursive: true, force: true }))
+    return dir
+  }
+
+  it('never writes a model frame when attaching to a session whose OMP state already names one', async () => {
+    const reply = scriptedOmp({
+      state: { provider: 'cpa', id: 'claude-opus-4-6', thinkingLevel: 'high' },
+      models: [OPUS_4, GLM],
+    })
+    const { ctx, bridge, requests } = await mountedBridge(reply)
+    const { agent, session } = await modelAgent(ctx, 'omp-model-adopt', DSH_DEFAULT)
+    await bridge.attach(agent, { mode: 'attach', sessionDir: await sessionDir(), cwd: '/work' })
+    expect(writes(requests)).toEqual([])
+    expect(requests.map(request => request.type)).toEqual(expect.arrayContaining(['get_state', 'get_available_models']))
+    expect(badge(session)).toEqual({ provider: 'cpa', model: 'claude-opus-4-6', reasoningEffort: 'high' })
+  })
+
+  it('ignores an ambient selection when the session already carries history', async () => {
+    const reply = scriptedOmp({ state: { provider: 'cpa', id: 'claude-opus-4-6' }, models: [OPUS_4, GLM] })
+    const { ctx, bridge, requests } = await mountedBridge(reply)
+    const { agent, model } = await modelAgent(ctx, 'omp-model-history')
+    model.select(DSH_DEFAULT)
+    await bridge.attach(agent, { mode: 'attach', sessionDir: await sessionDir(), cwd: '/work', selection: DSH_DEFAULT })
+    expect(writes(requests)).toEqual([])
+  })
+
+  it('sends one model frame when minting a blank session with an explicit pick', async () => {
+    const reply = scriptedOmp({ state: { provider: 'cpa', id: 'claude-opus-4-6' }, models: [OPUS_4, OPUS_5] })
+    const { ctx, bridge, requests } = await mountedBridge(reply)
+    const { agent, session } = await modelAgent(ctx, 'omp-model-mint', DSH_DEFAULT)
+    await bridge.attach(agent, {
+      mode: 'attach',
+      sessionDir: await sessionDir(),
+      cwd: '/work',
+      selection: { provider: 'cpa', model: 'claude-opus-5' },
+    })
+    expect(requests.filter(request => request.type === 'set_model')).toMatchObject([{ provider: 'cpa', modelId: 'claude-opus-5' }])
+    expect(badge(session)).toEqual({ provider: 'cpa', model: 'claude-opus-5' })
+  })
+
+  it('forwards an operator selection as both calls and falls back to the process state when the effort is rejected', async () => {
+    const reply = scriptedOmp({
+      state: { provider: 'cpa', id: 'claude-opus-4-6', thinkingLevel: 'low' },
+      models: [OPUS_4, OPUS_5],
+      reject: ['set_thinking_level'],
+    })
+    const { ctx, bridge, requests } = await mountedBridge(reply)
+    const { agent, session, model } = await modelAgent(ctx, 'omp-model-reject', { provider: 'cpa', model: 'claude-opus-4-6' })
+    await bridge.attach(agent, { mode: 'attach', sessionDir: await sessionDir(), cwd: '/work' })
+    model.select({ provider: 'cpa', model: 'claude-opus-5', reasoningEffort: 'high' } as ModelSelection)
+    await waitFor(() => session.snapshotEvents().some(event => event.type === 'command/done'))
+    expect(requests.filter(request => request.type === 'set_model')).toMatchObject([{ provider: 'cpa', modelId: 'claude-opus-5' }])
+    expect(requests.filter(request => request.type === 'set_thinking_level')).toMatchObject([{ level: 'high' }])
+    expect(badge(session)).toEqual({ provider: 'cpa', model: 'claude-opus-5', reasoningEffort: 'low' })
+    expect(session.snapshotEvents().find(event => event.type === 'command/done'))
+      .toMatchObject({ data: { kind: 'error' } })
+  })
+
+  it('follows a model the OMP process switched to on its own', async () => {
+    const state = { provider: 'cpa', id: 'claude-opus-4-6', thinkingLevel: 'low' }
+    const reply = scriptedOmp({ state, models: [OPUS_4, OPUS_5] })
+    const { ctx, bridge, requests, send } = await mountedBridge(reply)
+    const { agent, session } = await modelAgent(ctx, 'omp-model-switch', DSH_DEFAULT)
+    await bridge.attach(agent, { mode: 'attach', sessionDir: await sessionDir(), cwd: '/work' })
+    state.provider = 'cpa'
+    state.id = 'claude-opus-5'
+    send({ type: 'model_changed' })
+    await waitFor(() => (badge(session) as { model?: string } | undefined)?.model === 'claude-opus-5')
+    expect(writes(requests)).toEqual([])
   })
 })
