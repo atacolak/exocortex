@@ -40,7 +40,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Entry } from '@deepseek-ai/cordis-plugin-loader'
 import type { IndexInjection } from '@deepseek-ai/dsh-host-webserver'
 import { PACKAGE_ASSET_SEGMENT, packageAssetMediaType } from './assets.ts'
-import { exactPackageSpecifier, parseDshClient, stripClientSuffix } from './client/manifest.ts'
+import { exactPackageSpecifier, parseBootManifest, parseDshClient, stripClientSuffix } from './client/manifest.ts'
 import type { WebBootBatch, WebBootBatchPhase, WebBootEntry, WebBootGraph, WebBootRelease } from './client/manifest.ts'
 
 export { stripClientSuffix } from './client/manifest.ts'
@@ -54,6 +54,9 @@ declare module '@deepseek-ai/cordis' {
     clientModules: ClientModuleRegistry
   }
 }
+
+/** Select one document's initial graph before any application bundle is materialized. */
+export type ClientBootSelector = (graph: WebBootGraph, documentUrl: string | undefined) => WebBootGraph
 
 /** The declared fields a graph row carries, normalized (absent array declarations become empty). */
 interface WebBootRowFields {
@@ -662,6 +665,7 @@ export class ClientModuleRegistry extends Service {
   private previousBatchResponses = new Map<string, LazyResponse>()
   private flushQueued = false
   private composed: WebBootGraph
+  private bootSelector: { select: ClientBootSelector } | undefined
 
   /**
    * Build the service: subscribe, seed, and run the activation flush.
@@ -707,8 +711,8 @@ export class ClientModuleRegistry extends Service {
       )
     }
     ctx.inject(['webServer'], registerWebCarrier)
-    ctx.on('webserver/index-inject', (table) => {
-      table.push(...bootInjections(this.composed))
+    ctx.on('webserver/index-inject', (table, _peer, documentUrl) => {
+      table.push(...bootInjections(this.bootGraph(documentUrl)))
     })
   }
 
@@ -718,6 +722,37 @@ export class ClientModuleRegistry extends Service {
    */
   graph(): WebBootGraph {
     return this.composed
+  }
+
+  /**
+   * Register the sole initial-composition selector. The caller owns its disposer.
+   * Selection runs synchronously on a private graph copy for each document;
+   * rejection stops index rendering, never falling back to the normal graph.
+   * @param selector - Document selection; the URL grants no additional authority.
+   * @returns Idempotent unregister function.
+   */
+  registerBootSelector(selector: ClientBootSelector): () => void {
+    if (this.bootSelector !== undefined) throw new Error('client-modules: a boot selector is already registered')
+    const registration = { select: selector }
+    this.bootSelector = registration
+    let active = true
+    return () => {
+      if (!active) return
+      active = false
+      if (this.bootSelector === registration) this.bootSelector = undefined
+    }
+  }
+
+  /**
+   * Resolve a document's first graph without changing the shared graph or HMR state.
+   * @param documentUrl - Optional URL from the authenticated document carrier.
+   * @returns Validated selected graph; throws before emitting application references.
+   */
+  bootGraph(documentUrl?: string): WebBootGraph {
+    if (this.bootSelector === undefined) return this.composed
+    const selected = this.bootSelector.select(structuredClone(this.composed), documentUrl)
+    parseBootManifest(selected)
+    return selected
   }
 
   /**

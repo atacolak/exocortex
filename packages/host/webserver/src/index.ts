@@ -39,9 +39,10 @@ declare module '@deepseek-ai/cordis' {
      * fresh at emit time.
      * @param table - Mutable row table; listeners append in activation order.
      * @param peer - The Peer the rendered page speaks for.
+     * @param documentUrl - Optional document URL; selection input, never authentication.
      * @mode emit
      */
-    'webserver/index-inject'(table: IndexInjection[], peer: PeerScope): void
+    'webserver/index-inject'(table: IndexInjection[], peer: PeerScope, documentUrl?: string): void
   }
 }
 
@@ -730,11 +731,12 @@ export class WebServer extends Service {
    * Fresh per call, so subscribers read live state (module graph, theme
    * preference, the Peer's access) at emit time.
    * @param peer - the Peer the page speaks for.
+   * @param documentUrl - Optional document URL supplied by the index request owner.
    * @returns rows in subscriber activation order.
    */
-  collectIndexInjections(peer: PeerScope): IndexInjection[] {
+  collectIndexInjections(peer: PeerScope, documentUrl?: string): IndexInjection[] {
     const table: IndexInjection[] = []
-    this.ctx.emit('webserver/index-inject', table, peer)
+    this.ctx.emit('webserver/index-inject', table, peer, documentUrl)
     return table
   }
 
@@ -743,10 +745,11 @@ export class WebServer extends Service {
    * first, then the raw `tapIndex` transforms over the result.
    * @param html - the raw index.html body.
    * @param peer - the Peer the page speaks for.
+   * @param documentUrl - Optional document URL; omitted by non-document carriers.
    * @returns the transformed body.
    */
-  renderIndex(html: string, peer: PeerScope): string {
-    return this.applyIndexTaps(renderIndexInjections(html, this.collectIndexInjections(peer)))
+  renderIndex(html: string, peer: PeerScope, documentUrl?: string): string {
+    return this.applyIndexTaps(renderIndexInjections(html, this.collectIndexInjections(peer, documentUrl)))
   }
 }
 

@@ -154,8 +154,10 @@ describe('real Loader composition', () => {
     // A plugin row stands in for the Host's plugin-resource rows: the base the
     // shell inserts must precede it, not merely exist.
     const renderedFor: Connection.PeerScope[] = []
-    const offRows = loaded.on('webserver/index-inject', (rows, peer) => {
+    const renderedUrls: (string | undefined)[] = []
+    const offRows = loaded.on('webserver/index-inject', (rows, peer, documentUrl) => {
       renderedFor.push(peer)
+      renderedUrls.push(documentUrl)
       rows.push({ kind: 'script-preload', src: 'plugins/boot.js' })
     })
     for (const path of ['/', '/index.html', '/?view=test']) {
@@ -174,6 +176,7 @@ describe('real Loader composition', () => {
     }
     // An authenticated browser renders for the owner's shared browser Peer.
     expect(renderedFor).toEqual([loaded.connection.browserPeer, loaded.connection.browserPeer, loaded.connection.browserPeer])
+    expect(renderedUrls.map((value) => { const url = new URL(value!); return url.pathname + url.search })).toEqual(['/', '/index.html', '/?view=test'])
     offRows()
     expect(await request(port, '/', authenticated({ method: 'HEAD' }))).toEqual({
       status: 200,

@@ -165,7 +165,7 @@ export function apply(ctx: Context, config: Config): void {
       // The browser authentication admits the owner's shared browser Peer. The
       // base goes in after all index transforms, so it precedes every resource
       // reference they insert.
-      html => ctx.webServer.renderIndex(html, peer ?? ctx.connection.browserPeer)
+      html => ctx.webServer.renderIndex(html, peer ?? ctx.connection.browserPeer, request.url)
         .replace(/<head(?:\s[^>]*)?>/i, open => `${open}<base href="./">`),
     ),
   }), 'frontend-static: fallback seat')
