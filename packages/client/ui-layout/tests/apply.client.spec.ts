@@ -12,6 +12,7 @@ import { apply as themeApply, inject as themeInject, ThemeRuntime } from '@deeps
 import { apply, inject, LayoutController } from '@deepseek-ai/dsh-client-ui-layout/client'
 import { apply as nodeApply } from '@deepseek-ai/dsh-client-ui-layout'
 import type { MainPanelId } from '../src/client/service.ts'
+import type { ClientEntryState } from '../../modules/src/client/entries.ts'
 import type { createLayoutStore } from '../src/client/stores.ts'
 import { ShortcutRegistry } from '../../shortcuts/src/client/registry.ts'
 
@@ -73,6 +74,16 @@ async function bench() {
     return host
   }
   return { ctx, slots, rendererHost }
+}
+
+async function reconciliationBench() {
+  const b = await bench()
+  const state = createSnapshotStore<ClientEntryState>({ syncing: false, failures: [] })
+  b.ctx.provide('modules', { entries: { state } } as never)
+  const fiber = b.ctx.plugin({ inject: [...inject], apply })
+  await fiber.await()
+  const layout = b.ctx.get('layout') as LayoutController
+  return { ...b, state, fiber, layout }
 }
 
 describe('ui-layout client apply', () => {
@@ -146,6 +157,66 @@ describe('ui-layout client apply', () => {
     const pending = layout.beginNavigation()
     await fiber.dispose()
     expect(pending.aborted).toBe(true)
+  })
+
+  it('retains the logical panel across temporary main-slot replacement without replacing the root', async () => {
+    const { slots, state, layout } = await reconciliationBench()
+    const root = slots.entries('root')[0]
+    const remove = slots.register({ name: 'main', key: 'plugins' }, () => null)
+    layout.selectPanel('plugins' as MainPanelId)
+    const selections: (string | null)[] = []
+    const unsubscribe = layout.panelInfo.subscribe(() => {
+      selections.push(layout.panelInfo.getSnapshot().activePanelId)
+    })
+    state.set({ syncing: true, failures: [] })
+    remove()
+    await Promise.resolve()
+    expect(layout.panelInfo.getSnapshot().activePanelId).toBe('plugins')
+    slots.register({ name: 'main', key: 'plugins' }, () => null)
+    state.set({ syncing: false, failures: [] })
+    await Promise.resolve()
+    expect(layout.panelInfo.getSnapshot().activePanelId).toBe('plugins')
+    expect(selections).toEqual([])
+    expect(slots.entries('root')[0]).toBe(root)
+    unsubscribe()
+  })
+
+  it.each([false, true])('reconciles a genuine removal at settlement, with import failure: %s', async (failed) => {
+    const { slots, state, layout } = await reconciliationBench()
+    const remove = slots.register({ name: 'main', key: 'plugins' }, () => null)
+    layout.selectPanel('plugins' as MainPanelId)
+    state.set({ syncing: true, failures: [] })
+    remove()
+    await Promise.resolve()
+    expect(layout.panelInfo.getSnapshot().activePanelId).toBe('plugins')
+    state.set({ syncing: false, failures: failed ? [{ id: 'plugins', message: 'import failed' }] : [] })
+    expect(layout.panelInfo.getSnapshot().activePanelId).toBeNull()
+  })
+
+  it.each([null, 'work'])('does not restore a stale panel after navigation to %s during syncing', async (next) => {
+    const { slots, state, layout } = await reconciliationBench()
+    const remove = slots.register({ name: 'main', key: 'plugins' }, () => null)
+    slots.register({ name: 'main', key: 'work' }, () => null)
+    layout.selectPanel('plugins' as MainPanelId)
+    state.set({ syncing: true, failures: [] })
+    remove()
+    await Promise.resolve()
+    layout.selectPanel(next as MainPanelId | null)
+    slots.register({ name: 'main', key: 'plugins' }, () => null)
+    state.set({ syncing: false, failures: [] })
+    await Promise.resolve()
+    expect(layout.panelInfo.getSnapshot().activePanelId).toBe(next)
+  })
+
+  it('releases the reconciliation subscription with the layout owner', async () => {
+    const { slots, state, fiber, layout } = await reconciliationBench()
+    slots.register({ name: 'main', key: 'plugins' }, () => null)
+    layout.selectPanel('plugins' as MainPanelId)
+    state.set({ syncing: true, failures: [] })
+    await fiber.dispose()
+    state.set({ syncing: false, failures: [] })
+    expect(layout.panelInfo.getSnapshot().activePanelId).toBe('plugins')
+    expect(slots.entries('root')).toHaveLength(0)
   })
 
   it('theme presenter applies the initial snapshot, follows theme/change, and unwinds on dispose', async () => {

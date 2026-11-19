@@ -9,6 +9,7 @@
  */
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
+import type {} from '@deepseek-ai/dsh-client-modules/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-session/client'
 import type {} from '@deepseek-ai/dsh-client-ui-theme/client'
@@ -178,6 +179,8 @@ export function apply(ctx: ClientContext): void {
     const instance = handle.create()
     const store: typeof handle = { ...handle, create: () => instance }
     const retainMainPanels = (): void => {
+      // An HMR teardown is not a panel removal until the page Loader settles.
+      if (ctx.get('modules')?.entries.state.getSnapshot().syncing === true) return
       instance.actions.retainMainPanels(ctx.slots.entries('main').flatMap(entry =>
         entry.options.key === undefined ? [] : [entry.options.key]))
     }
@@ -218,11 +221,13 @@ export function apply(ctx: ClientContext): void {
         : { status: 'handled', run: () => { layout.toggleSidebar() } },
     })
     const disposePanels = ctx.slots.subscribe('main', retainMainPanels)
+    const disposeEntries = ctx.get('modules')?.entries.state.subscribe(retainMainPanels)
     retainMainPanels()
     return () => {
       disposeShortcut()
       layout.dispose()
       disposePanels()
+      disposeEntries?.()
       disposeRegistration()
       disposePanelInfo()
       // provide()'s disposer settles asynchronously; teardown is synchronous fire-and-forget.
