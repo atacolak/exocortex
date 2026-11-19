@@ -18,6 +18,9 @@
       "path": "../locale/tsconfig.client.json"
     },
     {
+      "path": "../modules"
+    },
+    {
       "path": "../ui-slots"
     },
     {
