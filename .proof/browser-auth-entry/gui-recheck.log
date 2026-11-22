@@ -1,0 +1,94 @@
+The plugin "vite-tsconfig-paths" is detected. Vite now supports tsconfig paths resolution natively via the resolve.tsconfigPaths option. You can remove the plugin and set resolve.tsconfigPaths: true in your Vite config instead.
+The plugin "vite-tsconfig-paths" is detected. Vite now supports tsconfig paths resolution natively via the resolve.tsconfigPaths option. You can remove the plugin and set resolve.tsconfigPaths: true in your Vite config instead.
+The plugin "vite-tsconfig-paths" is detected. Vite now supports tsconfig paths resolution natively via the resolve.tsconfigPaths option. You can remove the plugin and set resolve.tsconfigPaths: true in your Vite config instead.
+
+[1m[30m[46m RUN [49m[39m[22m [36mv4.1.11 [39m[90m/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122[39m
+
+[90mstderr[2m | packages/client/ui-settings-account/tests/apply.client.spec.ts[2m > [22m[2mcoalesces refreshes, publishes independent failures, and rejects stale responses after sign-out or unload
+[22m[39m[deepseek-account] account read failed { field: [32m'balance'[39m }
+
+[90mstderr[2m | packages/client/ui-settings-account/tests/apply.client.spec.ts[2m > [22m[2mcoalesces refreshes, publishes independent failures, and rejects stale responses after sign-out or unload
+[22m[39m[deepseek-account] account read failed { field: [32m'profile'[39m }
+[deepseek-account] account read failed { field: [32m'balance'[39m }
+
+[90mstderr[2m | packages/client/ui-settings-account/tests/apply.client.spec.ts[2m > [22m[2mpublishes a failed balance from a Settings entry without dropping the bonus read
+[22m[39m[deepseek-account] account read failed { field: [32m'balance'[39m }
+
+ [32m✓[39m [30m[45m thread-safe [49m[39m packages/client/ui-settings-account/tests/apply.client.spec.ts [2m([22m[2m31 tests[22m[2m)[22m[33m 11626[2mms[22m[39m
+   [33m[2m✓[22m[39m registers account sign-in in a plain browser without the Desktop-only surfaces, including after reload [33m 3974[2mms[22m[39m
+   [33m[2m✓[22m[39m shares account actions across seats, publishes dialog ownership, and opens contextual support [33m 310[2mms[22m[39m
+   [33m[2m✓[22m[39m prefills the native device description from the Desktop bridge on every click [33m 306[2mms[22m[39m
+   [33m[2m✓[22m[39m reports the account sampled by the click when a native read outlasts a sign-out [33m 347[2mms[22m[39m
+   [33m[2m✓[22m[39m coalesces refreshes, publishes independent failures, and rejects stale responses after sign-out or unload [33m 341[2mms[22m[39m
+   [33m[2m✓[22m[39m waits for an in-flight pre-return read before the post-top-up read [33m 338[2mms[22m[39m
+   [33m[2m✓[22m[39m reads the unnotified bonus in the active locale and acknowledges only after the card renders [33m 303[2mms[22m[39m
+   [33m[2m✓[22m[39m keeps the notice and its acknowledgement retry across repeated signed-in frames [33m 319[2mms[22m[39m
+   [33m[2m✓[22m[39m drops the previous account notice and stops reading after sign-out [33m 313[2mms[22m[39m
+ [32m✓[39m [30m[45m thread-safe [49m[39m packages/client/ui-schedule/tests/task-manager-page.client.spec.tsx [2m([22m[2m131 tests[22m[2m)[22m[33m 7235[2mms[22m[39m
+ [32m✓[39m [30m[45m thread-safe [49m[39m packages/client/ui-schedule/tests/host-task-editor.client.spec.tsx [2m([22m[2m97 tests[22m[2m)[22m[33m 3794[2mms[22m[39m
+ [32m✓[39m [30m[45m thread-safe [49m[39m packages/client/ui-primitives/tests/markdown-incremental.client.spec.tsx [2m([22m[2m32 tests[22m[2m)[22m[33m 2417[2mms[22m[39m
+     [33m[2m✓[22m[39m matches a fresh render at every prefix (chunk=1) [33m 1185[2mms[22m[39m
+     [33m[2m✓[22m[39m matches a fresh render at every prefix (chunk=3) [33m 338[2mms[22m[39m
+[90mstderr[2m | packages/client/ui-sidebar-right/tests/seat.client.spec.tsx[2m > [22m[2mRightbarSeat presentation[2m > [22m[2mkeeps a background retained body through standard-source registration and removal
+[22m[39mSidebar Session opening failed: Error: Session reference "s-other" is released
+    at TestSessionReference.release [90m(/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122/[39mpackages/test-support/client-runtime/src/sessions.ts:276:20[90m)[39m
+    at SidebarSessionView.dispose [90m(/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122/[39mpackages/client/ui-sidebar-right/src/client/session-view.ts:89:20[90m)[39m
+    at [90m/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122/[39mpackages/client/ui-sidebar-right/src/client/session-view.ts:50:51
+    at safelyCallDestroy [90m(/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122/[39mnode_modules/[4m.pnpm[24m/react-dom@18.3.1_react@18.3.1/node_modules/[4mreact-dom[24m/cjs/react-dom.development.js:22971:5[90m)[39m
+    at commitDeletionEffectsOnFiber [90m(/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122/[39mnode_modules/[4m.pnpm[24m/react-dom@18.3.1_react@18.3.1/node_modules/[4mreact-dom[24m/cjs/react-dom.development.js:24142:23[90m)[39m
+    at commitDeletionEffects [90m(/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122/[39mnode_modules/[4m.pnpm[24m/react-dom@18.3.1_react@18.3.1/node_modules/[4mreact-dom[24m/cjs/react-dom.development.js:24015:5[90m)[39m
+    at recursivelyTraverseMutationEffects [90m(/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122/[39mnode_modules/[4m.pnpm[24m/react-dom@18.3.1_react@18.3.1/node_modules/[4mreact-dom[24m/cjs/react-dom.development.js:24298:9[90m)[39m
+    at commitMutationEffectsOnFiber [90m(/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122/[39mnode_modules/[4m.pnpm[24m/react-dom@18.3.1_react@18.3.1/node_modules/[4mreact-dom[24m/cjs/react-dom.development.js:24332:9[90m)[39m
+    at recursivelyTraverseMutationEffects [90m(/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122/[39mnode_modules/[4m.pnpm[24m/react-dom@18.3.1_react@18.3.1/node_modules/[4mreact-dom[24m/cjs/react-dom.development.js:24312:7[90m)[39m
+    at commitMutationEffectsOnFiber [90m(/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122/[39mnode_modules/[4m.pnpm[24m/react-dom@18.3.1_react@18.3.1/node_modules/[4mreact-dom[24m/cjs/react-dom.development.js:24332:9[90m)[39m
+
+[90mstderr[2m | packages/client/ui-sidebar-right/tests/seat.client.spec.tsx[2m > [22m[2mslot-owned useTabInfo[2m > [22m[2mkeeps session records and navigation while unmounted, aborting only removal and plugin unload
+[22m[39mSidebar Session opening failed: Error: Session reference "s-other" is released
+    at TestSessionReference.release [90m(/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122/[39mpackages/test-support/client-runtime/src/sessions.ts:276:20[90m)[39m
+    at SidebarSessionView.dispose [90m(/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122/[39mpackages/client/ui-sidebar-right/src/client/session-view.ts:89:20[90m)[39m
+    at SidebarSessionViews.dispose [90m(/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122/[39mpackages/client/ui-sidebar-right/src/client/session-views.ts:64:61[90m)[39m
+    at [90m/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122/[39mpackages/client/ui-sidebar-right/src/client/index.ts:123:41
+    at runDisposable [90m(/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122/[39mvendor/cordis/src/fiber.ts:115:18[90m)[39m
+    at dispose [90m(/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122/[39mvendor/cordis/src/fiber.ts:441:26[90m)[39m
+    at [90m/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122/[39mvendor/cordis/src/fiber.ts:518:44
+    at finalizeDisposal [90m(/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122/[39mvendor/cordis/src/fiber.ts:494:18[90m)[39m
+    at [90m/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122/[39mvendor/cordis/src/fiber.ts:516:14
+    at runDisposable [90m(/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122/[39mvendor/cordis/src/fiber.ts:115:18[90m)[39m
+
+ [32m✓[39m [30m[45m thread-safe [49m[39m packages/client/ui-sidebar-right/tests/seat.client.spec.tsx [2m([22m[2m50 tests[22m[2m)[22m[33m 1860[2mms[22m[39m
+ [32m✓[39m [30m[45m thread-safe [49m[39m packages/client/ui-trajectory/tests/views.client.spec.tsx [2m([22m[2m46 tests[22m[2m)[22m[33m 1299[2mms[22m[39m
+Error: ui-deliverables: not a review address "dsh-resource://file/session/viewed/a.ts"
+    at ReviewTab (/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122/packages/client/ui-deliverables/src/client/ReviewTab.tsx:75:40)
+    at renderWithHooks (/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122/node_modules/.pnpm/react-dom@18.3.1_react@18.3.1/node_modules/react-dom/cjs/react-dom.development.js:15486:18)
+    at mountIndeterminateComponent (/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122/node_modules/.pnpm/react-dom@18.3.1_react@18.3.1/node_modules/react-dom/cjs/react-dom.development.js:20103:13)
+    at beginWork (/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122/node_modules/.pnpm/react-dom@18.3.1_react@18.3.1/node_modules/react-dom/cjs/react-dom.development.js:21626:16)
+    at HTMLUnknownElement.callCallback (/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122/node_modules/.pnpm/react-dom@18.3.1_react@18.3.1/node_modules/react-dom/cjs/react-dom.development.js:4164:14)
+    at HTMLUnknownElement.callTheUserObjectsOperation (/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122/node_modules/.pnpm/jsdom@29.1.1_@noble+hashes@2.4.0/node_modules/jsdom/lib/generated/idl/EventListener.js:26:30)
+    at innerInvokeEventListeners (/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122/node_modules/.pnpm/jsdom@29.1.1_@noble+hashes@2.4.0/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:360:16)
+    at invokeEventListeners (/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122/node_modules/.pnpm/jsdom@29.1.1_@noble+hashes@2.4.0/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:296:3)
+    at HTMLUnknownElementImpl._dispatch (/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122/node_modules/.pnpm/jsdom@29.1.1_@noble+hashes@2.4.0/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:243:9)
+    at HTMLUnknownElementImpl.dispatchEvent (/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122/node_modules/.pnpm/jsdom@29.1.1_@noble+hashes@2.4.0/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:114:17)
+Error: ui-deliverables: not a review address "dsh-resource://file/session/viewed/a.ts"
+    at ReviewTab (/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122/packages/client/ui-deliverables/src/client/ReviewTab.tsx:75:40)
+    at renderWithHooks (/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122/node_modules/.pnpm/react-dom@18.3.1_react@18.3.1/node_modules/react-dom/cjs/react-dom.development.js:15486:18)
+    at mountIndeterminateComponent (/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122/node_modules/.pnpm/react-dom@18.3.1_react@18.3.1/node_modules/react-dom/cjs/react-dom.development.js:20103:13)
+    at beginWork (/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122/node_modules/.pnpm/react-dom@18.3.1_react@18.3.1/node_modules/react-dom/cjs/react-dom.development.js:21626:16)
+    at HTMLUnknownElement.callCallback (/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122/node_modules/.pnpm/react-dom@18.3.1_react@18.3.1/node_modules/react-dom/cjs/react-dom.development.js:4164:14)
+    at HTMLUnknownElement.callTheUserObjectsOperation (/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122/node_modules/.pnpm/jsdom@29.1.1_@noble+hashes@2.4.0/node_modules/jsdom/lib/generated/idl/EventListener.js:26:30)
+    at innerInvokeEventListeners (/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122/node_modules/.pnpm/jsdom@29.1.1_@noble+hashes@2.4.0/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:360:16)
+    at invokeEventListeners (/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122/node_modules/.pnpm/jsdom@29.1.1_@noble+hashes@2.4.0/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:296:3)
+    at HTMLUnknownElementImpl._dispatch (/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122/node_modules/.pnpm/jsdom@29.1.1_@noble+hashes@2.4.0/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:243:9)
+    at HTMLUnknownElementImpl.dispatchEvent (/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122/node_modules/.pnpm/jsdom@29.1.1_@noble+hashes@2.4.0/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:114:17)
+ [32m✓[39m [30m[45m thread-safe [49m[39m packages/client/ui-deliverables/tests/review-tab.client.spec.tsx [2m([22m[2m12 tests[22m[2m)[22m[33m 1551[2mms[22m[39m
+     [33m[2m✓[22m[39m states the summary and comparison that stand in for hunks, and retries a failed read [33m 1236[2mms[22m[39m
+ [32m✓[39m [30m[45m thread-safe [49m[39m packages/client/connection/tests/binary-rpc.host.spec.ts [2m([22m[2m43 tests[22m[2m)[22m[33m 3883[2mms[22m[39m
+     [33m[2m✓[22m[39m preserves gzip configuration through the HTTP bridge [33m 1961[2mms[22m[39m
+     [33m[2m✓[22m[39m preserves none configuration through the HTTP bridge [33m 1890[2mms[22m[39m
+ [32m✓[39m [30m[45m thread-safe [49m[39m packages/client/ui-sidebar-documentpreview/tests/document-preview-license-bundle.client.spec.ts [2m([22m[2m1 test[22m[2m)[22m[33m 1517[2mms[22m[39m
+     [33m[2m✓[22m[39m keeps bundled licenses in the packed lazy chunks [33m 1515[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m9 passed[39m[22m[90m (9)[39m
+[2m      Tests [22m [1m[32m443 passed[39m[22m[90m (443)[39m
+[2m   Start at [22m 01:09:13
+[2m   Duration [22m 45.61s[2m (transform 4.09s, setup 124ms, import 6.13s, tests 35.18s, environment 3.25s)[22m
+

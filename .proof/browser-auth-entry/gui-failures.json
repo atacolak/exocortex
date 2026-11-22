@@ -1,0 +1,59 @@
+{
+  "failures": [
+    {
+      "header": " FAIL   thread-safe  packages/client/connection/tests/binary-rpc.host.spec.ts > Connection binary RPC > preserves gzip configuration through the HTTP bridge",
+      "file": "packages/client/connection/tests/binary-rpc.host.spec.ts",
+      "detail": ""
+    },
+    {
+      "header": " FAIL   thread-safe  packages/client/connection/tests/binary-rpc.host.spec.ts > Connection binary RPC > preserves none configuration through the HTTP bridge",
+      "file": "packages/client/connection/tests/binary-rpc.host.spec.ts",
+      "detail": "Error: Test timed out in 5000ms.\nIf this is a long-running test, pass a timeout value as the last argument or configure it globally with \"testTimeout\".\n \u276f packages/client/connection/tests/binary-rpc.host.spec.ts:24:37\n     22|\n     23| describe('Connection binary RPC', () => {\n     24|   it.each(['gzip', 'none'] as const)('preserves %s configuration throu\u2026\n       |                                     ^\n     25|     const ctx = new Context()\n     26|     try {\n\n\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af[1/10]\u23af"
+    },
+    {
+      "header": " FAIL   thread-safe  packages/client/ui-deliverables/tests/review-tab.client.spec.tsx > ReviewTab > states the summary and comparison that stand in for hunks, and retries a failed read",
+      "file": "packages/client/ui-deliverables/tests/review-tab.client.spec.tsx",
+      "detail": "Error: Test timed out in 5000ms.\nIf this is a long-running test, pass a timeout value as the last argument or configure it globally with \"testTimeout\".\n \u276f packages/client/ui-deliverables/tests/review-tab.client.spec.tsx:358:3\n    356|   })\n    357|\n    358|   it('states the summary and comparison that stand in for hunks, and r\u2026\n       |   ^\n    359|     const summaries = new ChangesSummaryStore()\n    360|     summaries.state.set({ [SUMMARY_URL]: 'missing' })\n\n\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af[2/10]\u23af"
+    },
+    {
+      "header": " FAIL   thread-safe  packages/client/ui-primitives/tests/markdown-incremental.client.spec.tsx > multibyte content > code-unit chunking (splitting surrogate pairs mid-stream) matches fresh renders",
+      "file": "packages/client/ui-primitives/tests/markdown-incremental.client.spec.tsx",
+      "detail": "Error: Test timed out in 5000ms.\nIf this is a long-running test, pass a timeout value as the last argument or configure it globally with \"testTimeout\".\n \u276f packages/client/ui-primitives/tests/markdown-incremental.client.spec.tsx:372:3\n    370|   ].join('\\n')\n    371|\n    372|   it('code-unit chunking (splitting surrogate pairs mid-stream) matche\u2026\n       |   ^\n    373|     const live = render(<MarkdownText text=\"\" streaming />)\n    374|     for (let end = 1; end < CJK_DOC.length + 1; end += 1) {\n\n\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af[3/10]\u23af"
+    },
+    {
+      "header": " FAIL   thread-safe  packages/client/ui-schedule/tests/host-task-editor.client.spec.tsx > Host task editor on the existing manager > closes manual creation on Escape without discarding the edited task",
+      "file": "packages/client/ui-schedule/tests/host-task-editor.client.spec.tsx",
+      "detail": "Error: Test timed out in 5000ms.\nIf this is a long-running test, pass a timeout value as the last argument or configure it globally with \"testTimeout\".\n \u276f packages/client/ui-schedule/tests/host-task-editor.client.spec.tsx:119:3\n    117|\n    118| describe('Host task editor on the existing manager', () => {\n    119|   it('closes manual creation on Escape without discarding the edited t\u2026\n       |   ^\n    120|     mount()\n    121|     const detail = openEdit()\n\n\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af[4/10]\u23af"
+    },
+    {
+      "header": " FAIL   thread-safe  packages/client/ui-schedule/tests/task-manager-page.client.spec.tsx > original Session availability in English > disables navigation while Session list pending without hiding the task",
+      "file": "packages/client/ui-schedule/tests/task-manager-page.client.spec.tsx",
+      "detail": "Error: Test timed out in 5000ms.\nIf this is a long-running test, pass a timeout value as the last argument or configure it globally with \"testTimeout\".\n \u276f packages/client/ui-schedule/tests/task-manager-page.client.spec.tsx:409:79\n\n\n\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af[5/10]\u23af\n"
+    },
+    {
+      "header": " FAIL   thread-safe  packages/client/ui-settings-account/tests/apply.client.spec.ts > registers account sign-in in a plain browser without the Desktop-only surfaces, including after reload",
+      "file": "packages/client/ui-settings-account/tests/apply.client.spec.ts",
+      "detail": "Error: Test timed out in 60000ms.\nIf this is a long-running test, pass a timeout value as the last argument or configure it globally with \"testTimeout\".\n \u276f packages/client/ui-settings-account/tests/apply.client.spec.ts:67:1\n     65| afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); vi.restor\u2026\n     66|\n     67| it('registers account sign-in in a plain browser without the Desktop-o\u2026\n       | ^\n     68|   const c = await start()\n     69|   for (const reload of [false, true]) {\n\n\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af[6/10]\u23af"
+    },
+    {
+      "header": " FAIL   thread-safe  packages/client/ui-sidebar-documentpreview/tests/document-preview-license-bundle.client.spec.ts > published document preview licenses > keeps bundled licenses in the packed lazy chunks",
+      "file": "packages/client/ui-sidebar-documentpreview/tests/document-preview-license-bundle.client.spec.ts",
+      "detail": "AssertionError: expected Error: spawnSync /home/sf/.nvm/versions/n\u2026 { \u2026(5) } to be undefined\n\n- Expected:\nundefined\n\n+ Received:\nError {\n  \"message\": \"spawnSync /home/sf/.nvm/versions/node/v24.22.2/bin/node ETIMEDOUT\",\n  \"errno\": -110,\n  \"code\": \"ETIMEDOUT\",\n  \"syscall\": \"spawnSync /home/sf/.nvm/versions/node/v24.22.2/bin/node\","
+    },
+    {
+      "header": " FAIL   thread-safe  packages/client/ui-sidebar-right/tests/seat.client.spec.tsx > keeps duplicate Session Tabs independent and preserves a body through docking and float focus",
+      "file": "packages/client/ui-sidebar-right/tests/seat.client.spec.tsx",
+      "detail": "Error: Test timed out in 5000ms.\nIf this is a long-running test, pass a timeout value as the last argument or configure it globally with \"testTimeout\".\n \u276f packages/client/ui-sidebar-right/tests/seat.client.spec.tsx:174:1\n    172| }\n    173|\n    174| it('keeps duplicate Session Tabs independent and preserves a body thro\u2026\n       | ^\n    175|   const h = await mountSeat()\n    176|   await act(async () => {\n\n\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af[8/10]\u23af"
+    },
+    {
+      "header": " FAIL   thread-safe  packages/client/ui-trajectory/tests/views.client.spec.tsx > tab switching in ConversationRoot > renders two tabs, defaults to chat, and switches to the trajectory ledger",
+      "file": "packages/client/ui-trajectory/tests/views.client.spec.tsx",
+      "detail": "Error: Test timed out in 5000ms.\nIf this is a long-running test, pass a timeout value as the last argument or configure it globally with \"testTimeout\".\n \u276f packages/client/ui-trajectory/tests/views.client.spec.tsx:535:3\n    533|\n    534| describe('tab switching in ConversationRoot', () => {\n    535|   it('renders two tabs, defaults to chat, and switches to the trajecto\u2026\n       |   ^\n    536|     const b = await bench()\n    537|     const view = mount(b)\n\n\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af[9/10]\u23af"
+    }
+  ],
+  "totalTests": 12565,
+  "passedTests": 12553,
+  "failedTests": 10,
+  "passedFiles": 723,
+  "failedFiles": 9
+}

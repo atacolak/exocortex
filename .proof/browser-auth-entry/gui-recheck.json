@@ -1,0 +1,18 @@
+{
+  "startedAt": "2026-11-22T14:09:12.712211+00:00",
+  "files": [
+    "packages/client/connection/tests/binary-rpc.host.spec.ts",
+    "packages/client/ui-deliverables/tests/review-tab.client.spec.tsx",
+    "packages/client/ui-primitives/tests/markdown-incremental.client.spec.tsx",
+    "packages/client/ui-schedule/tests/host-task-editor.client.spec.tsx",
+    "packages/client/ui-schedule/tests/task-manager-page.client.spec.tsx",
+    "packages/client/ui-settings-account/tests/apply.client.spec.ts",
+    "packages/client/ui-sidebar-documentpreview/tests/document-preview-license-bundle.client.spec.ts",
+    "packages/client/ui-sidebar-right/tests/seat.client.spec.tsx",
+    "packages/client/ui-trajectory/tests/views.client.spec.tsx"
+  ],
+  "maxWorkers": 1,
+  "testTimeoutsUnchanged": true,
+  "complete": true,
+  "exitCode": 0
+}

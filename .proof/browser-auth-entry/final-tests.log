@@ -1,0 +1,18 @@
+The plugin "vite-tsconfig-paths" is detected. Vite now supports tsconfig paths resolution natively via the resolve.tsconfigPaths option. You can remove the plugin and set resolve.tsconfigPaths: true in your Vite config instead.
+The plugin "vite-tsconfig-paths" is detected. Vite now supports tsconfig paths resolution natively via the resolve.tsconfigPaths option. You can remove the plugin and set resolve.tsconfigPaths: true in your Vite config instead.
+The plugin "vite-tsconfig-paths" is detected. Vite now supports tsconfig paths resolution natively via the resolve.tsconfigPaths option. You can remove the plugin and set resolve.tsconfigPaths: true in your Vite config instead.
+
+[1m[30m[46m RUN [49m[39m[22m [36mv4.1.11 [39m[90m/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122[39m
+
+ [32m✓[39m [30m[45m thread-safe [49m[39m apps/desktop/tests/web-document.spec.ts [2m([22m[2m6 tests[22m[2m)[22m[32m 94[2mms[22m[39m
+ [32m✓[39m [30m[45m thread-safe [49m[39m packages/client/connection/tests/api-request-trust.host.spec.ts [2m([22m[2m13 tests[22m[2m)[22m[32m 33[2mms[22m[39m
+ [32m✓[39m [30m[45m thread-safe [49m[39m packages/client/connection/tests/browser-auth-entry.host.spec.ts [2m([22m[2m16 tests[22m[2m)[22m[32m 79[2mms[22m[39m
+ [32m✓[39m [30m[45m thread-safe [49m[39m packages/client/connection/tests/browser-auth.host.spec.ts [2m([22m[2m27 tests[22m[2m)[22m[32m 89[2mms[22m[39m
+ [32m✓[39m [30m[45m thread-safe [49m[39m packages/client/connection/tests/node-half.host.spec.ts [2m([22m[2m30 tests[22m[2m)[22m[32m 223[2mms[22m[39m
+ [32m✓[39m [30m[45m thread-safe [49m[39m packages/host/frontend-static/tests/frontend-static.spec.ts [2m([22m[2m5 tests[22m[2m)[22m[32m 230[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m6 passed[39m[22m[90m (6)[39m
+[2m      Tests [22m [1m[32m97 passed[39m[22m[90m (97)[39m
+[2m   Start at [22m 00:55:02
+[2m   Duration [22m 1.44s[2m (transform 2.21s, setup 721ms, import 2.43s, tests 749ms, environment 1ms)[22m
+

@@ -1,0 +1,20 @@
+{
+  "sourceBase": "947b7d890333a35a177e52d0fa5d82f59769e1ac",
+  "branch": "cap/browser-auth-entry-20261122",
+  "paths": {
+    "packages/client/connection/src/browser-auth.ts": "a1c9d3a0d466d7296e72e0b22d052238db64894b4db52cfde3d3c4764b6a6257",
+    "packages/host/frontend-static/src/index.ts": "02c44d5cacd9d55d74a6e3c8b75eb4b2f02e6f550d41839ee615148765c08698",
+    ".proof/bundles/exo-overlay/lib/boot.js": "9be748e02e50dd259b0e49ac3bb3376db72b263e34c47899dd4f9126fe672ef0",
+    ".proof/bundles/exo-overlay/lib/entry-recovery.js": "255818b242fbba0564ac476779a7463f129a503661d7830dc1eb021fc8c9f0c0",
+    "packages/client/connection/lib/index.js": "d946bec951ba5821809850819a021c092b8636a0255513016be5f642aa3e0f2a",
+    "packages/host/frontend-static/lib/index.js": "a677987694df7580b04fa25f338b563ea9bf241bb4457cc97e0b8bdf5428e03b",
+    "apps/cli/lib/bin.js": "b6640801a5a65aae9f53ca21bcce3b2ea28bd9e9554c939c1ff7c4448d91fa18",
+    ".proof/promotion.patch.yml": "67f0c382c2016c3ddf2f76a3d99441dcf59b03b429b387224379ba5c6cd4e63a",
+    ".proof/browser-auth-entry/95-browser-entry-20261122.conf": "b7fdb73a48622594195efadb1c24fc46e12af80abe4f88792592502c14a4d3ac"
+  },
+  "codeCommits": [
+    "59580bdedb",
+    "736e1e074a",
+    "f205465b68"
+  ]
+}

@@ -1,0 +1,176 @@
+{
+  "startedAt": "2026-11-22T13:55:01.877Z",
+  "sourceSha256": "a1c9d3a0d466d7296e72e0b22d052238db64894b4db52cfde3d3c4764b6a6257",
+  "checks": [
+    {
+      "name": "direct-root",
+      "ok": true,
+      "chain": [
+        {
+          "path": "/",
+          "continuation": false,
+          "cookieSent": false,
+          "status": 200
+        },
+        {
+          "path": "/",
+          "continuation": true,
+          "cookieSent": true,
+          "status": 303
+        },
+        {
+          "path": "/",
+          "continuation": false,
+          "cookieSent": true,
+          "status": 200
+        }
+      ],
+      "cookie": {
+        "sameSite": "Strict",
+        "httpOnly": true
+      },
+      "apiStatus": 200
+    },
+    {
+      "name": "cross-site-root",
+      "ok": true,
+      "chain": [
+        {
+          "path": "/",
+          "continuation": false,
+          "cookieSent": false,
+          "status": 200
+        },
+        {
+          "path": "/",
+          "continuation": true,
+          "cookieSent": true,
+          "status": 303
+        },
+        {
+          "path": "/",
+          "continuation": false,
+          "cookieSent": true,
+          "status": 200
+        }
+      ],
+      "cookie": {
+        "sameSite": "Strict",
+        "httpOnly": true
+      },
+      "apiStatus": 200
+    },
+    {
+      "name": "cross-site-fragment",
+      "ok": true,
+      "chain": [
+        {
+          "path": "/",
+          "continuation": false,
+          "cookieSent": false,
+          "status": 200
+        },
+        {
+          "path": "/",
+          "continuation": true,
+          "cookieSent": true,
+          "status": 303
+        },
+        {
+          "path": "/",
+          "continuation": false,
+          "cookieSent": true,
+          "status": 200
+        }
+      ],
+      "cookie": {
+        "sameSite": "Strict",
+        "httpOnly": true
+      },
+      "apiStatus": 200
+    },
+    {
+      "name": "cross-site-mounted-query",
+      "ok": true,
+      "chain": [
+        {
+          "path": "/tools/exocortex/",
+          "continuation": false,
+          "cookieSent": false,
+          "status": 200
+        },
+        {
+          "path": "/tools/exocortex/",
+          "continuation": true,
+          "cookieSent": true,
+          "status": 303
+        },
+        {
+          "path": "/tools/exocortex/",
+          "continuation": false,
+          "cookieSent": true,
+          "status": 200
+        }
+      ],
+      "cookie": {
+        "sameSite": "Strict",
+        "httpOnly": true
+      },
+      "apiStatus": 200
+    },
+    {
+      "name": "javascript-disabled-manual-continue",
+      "ok": true,
+      "proxyPathPreserved": true,
+      "duplicateQueryPreserved": true,
+      "fragmentPreserved": true,
+      "tokenAndMarkerRemoved": true
+    },
+    {
+      "name": "cookies-disabled-bounded",
+      "ok": true,
+      "chain": [
+        {
+          "path": "/",
+          "continuation": false,
+          "cookieSent": false,
+          "status": 200
+        },
+        {
+          "path": "/",
+          "continuation": true,
+          "cookieSent": false,
+          "status": 200
+        }
+      ],
+      "protectedIndexServed": false
+    },
+    {
+      "name": "foreign-origin",
+      "ok": true,
+      "status": 403
+    },
+    {
+      "name": "opaque-origin",
+      "ok": true,
+      "status": 403
+    },
+    {
+      "name": "cross-site-metadata",
+      "ok": true,
+      "status": 403
+    },
+    {
+      "name": "untrusted-host",
+      "ok": true,
+      "status": 403
+    },
+    {
+      "name": "programmatic-exchange",
+      "ok": true,
+      "status": 303,
+      "cookiePolicy": "Strict"
+    }
+  ],
+  "complete": true
+}

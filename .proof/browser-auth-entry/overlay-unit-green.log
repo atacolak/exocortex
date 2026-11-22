@@ -1,0 +1,11 @@
+✔ missing overlay offers an explicit same-directory recovery without creating state (21.898461ms)
+✔ retained query values cannot inject HTML or override the recovery origin (1.378809ms)
+✔ valid overlays still select their original candidate and invalid names still reject (4.520936ms)
+ℹ tests 3
+ℹ suites 0
+ℹ pass 3
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 85.290879

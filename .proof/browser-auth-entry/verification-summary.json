@@ -1,0 +1,43 @@
+{
+  "sourceManifest": "promotion-artifacts.json",
+  "sourceReview": "independent-review.md",
+  "buildArtifacts": {
+    "passed": 8,
+    "failed": 0
+  },
+  "buildCheck": {
+    "passed": 2,
+    "failed": 0
+  },
+  "focusedRegression": {
+    "passed": 97,
+    "failed": 0
+  },
+  "firefoxAuth": {
+    "passed": 11,
+    "failed": 0
+  },
+  "firefoxComposedRecovery": {
+    "passed": 3,
+    "failed": 0
+  },
+  "guiOriginal": {
+    "passedFiles": 723,
+    "failedFiles": 9,
+    "passedTests": 12553,
+    "failedTests": 10,
+    "skippedTests": 2,
+    "failureClass": "timeouts"
+  },
+  "guiFollowUp": {
+    "passedFiles": 9,
+    "failedFiles": 0,
+    "passedTests": 443,
+    "failedTests": 0,
+    "maxWorkers": 1,
+    "testTimeoutsUnchanged": true,
+    "productCodeUnchanged": true
+  },
+  "remainingFailures": 0,
+  "acceptance": "Root approved the original broad run plus targeted unchanged-code timeout follow-up; original red receipt retained."
+}

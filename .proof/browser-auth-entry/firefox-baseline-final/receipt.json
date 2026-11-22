@@ -1,0 +1,176 @@
+{
+  "startedAt": "2026-11-22T13:42:19.147Z",
+  "sourceSha256": "2974d15c0da517a36b9612be1f9ff6bc087ce4fc114d05dbafa151f2c03bef7d",
+  "checks": [
+    {
+      "name": "direct-root",
+      "ok": true,
+      "chain": [
+        {
+          "path": "/",
+          "continuation": false,
+          "cookieSent": false,
+          "status": 303
+        },
+        {
+          "path": "/",
+          "continuation": false,
+          "cookieSent": true,
+          "status": 200
+        }
+      ],
+      "cookie": {
+        "sameSite": "Strict",
+        "httpOnly": true
+      },
+      "apiStatus": 200
+    },
+    {
+      "name": "failure",
+      "ok": false,
+      "observedDocuments": [
+        {
+          "path": "/",
+          "continuation": false,
+          "cookieSent": false,
+          "status": 303
+        },
+        {
+          "path": "/",
+          "continuation": false,
+          "cookieSent": true,
+          "status": 200
+        },
+        {
+          "path": "/",
+          "continuation": false,
+          "cookieSent": false,
+          "status": 303
+        },
+        {
+          "path": "/",
+          "continuation": false,
+          "cookieSent": false,
+          "status": 303
+        },
+        {
+          "path": "/",
+          "continuation": false,
+          "cookieSent": false,
+          "status": 303
+        },
+        {
+          "path": "/",
+          "continuation": false,
+          "cookieSent": false,
+          "status": 303
+        },
+        {
+          "path": "/",
+          "continuation": false,
+          "cookieSent": false,
+          "status": 303
+        },
+        {
+          "path": "/",
+          "continuation": false,
+          "cookieSent": false,
+          "status": 303
+        },
+        {
+          "path": "/",
+          "continuation": false,
+          "cookieSent": false,
+          "status": 303
+        },
+        {
+          "path": "/",
+          "continuation": false,
+          "cookieSent": false,
+          "status": 303
+        },
+        {
+          "path": "/",
+          "continuation": false,
+          "cookieSent": false,
+          "status": 303
+        },
+        {
+          "path": "/",
+          "continuation": false,
+          "cookieSent": false,
+          "status": 303
+        },
+        {
+          "path": "/",
+          "continuation": false,
+          "cookieSent": false,
+          "status": 303
+        },
+        {
+          "path": "/",
+          "continuation": false,
+          "cookieSent": false,
+          "status": 303
+        },
+        {
+          "path": "/",
+          "continuation": false,
+          "cookieSent": false,
+          "status": 303
+        },
+        {
+          "path": "/",
+          "continuation": false,
+          "cookieSent": false,
+          "status": 303
+        },
+        {
+          "path": "/",
+          "continuation": false,
+          "cookieSent": false,
+          "status": 303
+        },
+        {
+          "path": "/",
+          "continuation": false,
+          "cookieSent": false,
+          "status": 303
+        },
+        {
+          "path": "/",
+          "continuation": false,
+          "cookieSent": false,
+          "status": 303
+        },
+        {
+          "path": "/",
+          "continuation": false,
+          "cookieSent": false,
+          "status": 303
+        },
+        {
+          "path": "/",
+          "continuation": false,
+          "cookieSent": false,
+          "status": 303
+        },
+        {
+          "path": "/",
+          "continuation": false,
+          "cookieSent": false,
+          "status": 303
+        },
+        {
+          "path": "/",
+          "continuation": false,
+          "cookieSent": false,
+          "status": 303
+        }
+      ],
+      "type": "TimeoutError",
+      "message": "locator.waitFor: Timeout 10000ms exceeded.\nCall log:\n  - waiting for getByRole('heading', { name: 'Authenticated test index' }) to be visible\n"
+    }
+  ],
+  "complete": false
+}
