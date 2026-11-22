@@ -329,4 +329,35 @@ describe('mesh subnet trust', () => {
     expect(page.status).toBe(200)
     expect(await page.text()).toContain('shell')
   })
+  it('returns an explicit renderer response after authentication without changing valid pages', async () => {
+    const loaded = await loadComposition()
+    const server = loaded.webServer
+    const launch = loaded.connection.authenticatedUrl(`http://127.0.0.1:${String(server.port)}/`)
+    const exchange = await fetch(launch, { redirect: 'manual' })
+    const cookie = exchange.headers.get('set-cookie')!.split(';', 1)[0]!
+    await exchange.body?.cancel()
+    const off = loaded.on('webserver/index-inject', (_rows, _peer, documentUrl) => {
+      if (new URL(documentUrl!).searchParams.get('view') === 'missing') {
+        throw new Response('<h1>View unavailable</h1><a href="./?panel=actors">Open current workspace</a>', {
+          status: 404,
+          headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
+        })
+      }
+    })
+    expect(await request(server.port, '/?view=missing')).toMatchObject({ status: 401 })
+    const failed = await request(server.port, '/?view=missing', { headers: { cookie } })
+    expect(failed).toEqual({
+      status: 404, type: 'text/html; charset=utf-8',
+      body: '<h1>View unavailable</h1><a href="./?panel=actors">Open current workspace</a>',
+    })
+    expect(await request(server.port, '/?view=missing', { method: 'HEAD', headers: { cookie } }))
+      .toEqual({ status: 404, type: 'text/html; charset=utf-8', body: '' })
+    expect(await request(server.port, '/?panel=actors', { headers: { cookie } }))
+      .toMatchObject({ status: 200, body: expect.stringContaining('shell') })
+    off()
+    const offUnexpected = loaded.on('webserver/index-inject', () => { throw new Error('private renderer details') })
+    expect(await request(server.port, '/', { headers: { cookie } })).toMatchObject({ status: 400, body: '' })
+    offUnexpected()
+  })
+
 })

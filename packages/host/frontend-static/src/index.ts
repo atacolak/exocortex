@@ -84,7 +84,8 @@ function bytesBody(bytes: Uint8Array): ReadableStream<Uint8Array> {
  * @param authorizeIndex - answers an index request before its bytes are read:
  * the response to send instead of the index, or undefined to serve it.
  * @param renderIndex - turns the raw index.html body into the served document
- * for the dist root and configured index path.
+ * for the dist root and configured index path. A renderer may throw an explicit
+ * Response to report a recoverable entry failure after authentication.
  * @returns the dist response; a HEAD response carries the GET status and
  * headers without a body. A file other than the index carries
  * `cache-control: no-cache` and a weak ETag from a SHA-1 of its bytes, and a
@@ -106,7 +107,15 @@ async function serveStatic(
     if (target === distRoot || target === distIndex) {
       const refusal = authorizeIndex()
       if (refusal !== undefined) return refusal
-      body = renderIndex(await readFile(distIndex, 'utf8'))
+      const raw = await readFile(distIndex, 'utf8')
+      try {
+        body = renderIndex(raw)
+      } catch (error) {
+        if (!(error instanceof Response)) throw error
+        if (request.method !== 'HEAD') return error
+        await error.body?.cancel()
+        return new Response(null, { status: error.status, statusText: error.statusText, headers: error.headers })
+      }
       headers = { 'content-type': HTML_MIME }
     } else {
       body = await readFile(target)
@@ -133,8 +142,8 @@ async function serveStatic(
 export function apply(ctx: Context, config: Config): void {
   const distIndex = config.distIndex
   const distRoot = dirname(distIndex)
-  // Connection's browser authentication writes the token exchange's 303 or
-  // the 401 through a writeHead/end response; capture it as a Fetch response.
+  // Connection owns the browser landing, programmatic redirect, or refusal;
+  // capture its writeHead/end response as a Fetch response.
   // The answer stays a 401 unless Connection writes another one.
   const authorizeIndex = (request: Request, remoteAddress: string | undefined): Response | undefined => {
     let status = 401

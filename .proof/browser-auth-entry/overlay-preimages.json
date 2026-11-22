@@ -1,0 +1,17 @@
+{
+  "source": "/home/sf/worktrees/dsh/cap/normal-startup-20261119/.proof/bundles/exo-overlay",
+  "files": {
+    "client.js": "ca37c8b1e9a204938c37651c2c59525089ba9f970a7d5c5626a2671ec3e327f5",
+    "index.js": "1b7c68381f23ea1d01074e62012cb22ca4f098b5dedbbb6593e876f7496847b2",
+    "cordis.patch.yml": "4fd54ee7d8b2c1c09f361cc8f3c5d89983a2e04edc74d73eb7bf87628f3149d0",
+    "README.md": "381cac2cd3e7aecfe66a6b9a9a760b76703b996cb0eaba30ab7ee4c5641341c0",
+    "package.json": "9a603af602b4c68d2e2179461c194335f6eaa1dd7c6bfb0f5fb483e7057591f9",
+    "lib/boot.js": "d73b23f756c7f518d759e1e541522d1ffbe4dba1309ae8c493d55f9f6f189213",
+    "lib/verify.js": "10743ad4057b887765f5862f15f920f9f8decd338eb31b83c7f2bb102268bdb5",
+    "lib/runs.js": "bcb4dec54f7cc81ada3d23fc6db4b48661c92c7123f31cb4ee6d2a56b18b3b36",
+    "lib/promote.js": "f040aa83fe7df5c4f02381b867249d8ead05992fdf3e2be56bf3148383475663",
+    "lib/routes.js": "973199f7d6504317bbf3e7fe6099ed18a5c9a36130adc6d34020d1278f41206b",
+    "lib/contract.js": "7a53fc9d3666deac54cbf0663276ad3c24614d458ce8d850524f38d74701100b",
+    "lib/errors.js": "341949b8ac9c694fc7a530fc5d4409fd50550e87ea7d170c0e8c804fbacd052e"
+  }
+}

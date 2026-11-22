@@ -1,0 +1,32 @@
+{
+  "startedAt": "2026-11-22T13:57:27.023Z",
+  "complete": true,
+  "checks": [
+    {
+      "name": "cross-site-missing-overlay",
+      "ok": true,
+      "status": 404,
+      "explicitRecovery": true,
+      "overlayStateCreated": false
+    },
+    {
+      "name": "explicit-current-workspace-recovery",
+      "ok": true,
+      "status": 200,
+      "panelAndChatPreserved": true,
+      "duplicateQueryPreserved": true
+    },
+    {
+      "name": "recovery-head-response",
+      "ok": true,
+      "status": 404,
+      "bodyBytes": 0
+    }
+  ],
+  "artifacts": {
+    "packages/client/connection/lib/index.js": "d946bec951ba5821809850819a021c092b8636a0255513016be5f642aa3e0f2a",
+    "packages/host/frontend-static/lib/index.js": "a677987694df7580b04fa25f338b563ea9bf241bb4457cc97e0b8bdf5428e03b",
+    ".proof/bundles/exo-overlay/lib/boot.js": "9be748e02e50dd259b0e49ac3bb3376db72b263e34c47899dd4f9126fe672ef0",
+    ".proof/bundles/exo-overlay/lib/entry-recovery.js": "255818b242fbba0564ac476779a7463f129a503661d7830dc1eb021fc8c9f0c0"
+  }
+}

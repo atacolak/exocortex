@@ -1,0 +1,9 @@
+{
+  "worktree": "/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122",
+  "branch": "cap/browser-auth-entry-20261122",
+  "baseCommit": "947b7d890333a35a177e52d0fa5d82f59769e1ac",
+  "deployedOwner": "/home/sf/worktrees/dsh/cap/normal-startup-20261119",
+  "deployedBundleSha256": "a0982dda8ec29ba7f90959c503030cf9e6a296cd20bd713d6eef437ca7c4dac9",
+  "scope": "cold host authentication candidate; no production mutations",
+  "boundaryReason": "BrowserAuth owns the pre-index cookie exchange before Cordis client modules or slots exist; no UI/plugin slot can end its HTTP redirect chain."
+}

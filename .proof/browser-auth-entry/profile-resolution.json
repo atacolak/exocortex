@@ -1,0 +1,45 @@
+{
+  "complete": true,
+  "observedAt": "2026-11-22T14:01:36.017Z",
+  "profileUnchanged": true,
+  "entries": 227,
+  "entryEnablementIdentical": true,
+  "skippedBundles": [],
+  "onlyIntentionalNamedModuleChange": "exo-overlay-normal-startup",
+  "resolution": [
+    {
+      "owner": "/home/sf/worktrees/dsh/cap/normal-startup-20261119",
+      "packages": {
+        "@deepseek-ai/dsh-omp-rpc": {
+          "packageDir": "/home/sf/worktrees/dsh/cap/normal-startup-20261119/packages/bundle/base/node_modules/@deepseek-ai/dsh-omp-rpc",
+          "scope": "installation"
+        },
+        "@deepseek-ai/dsh-client-connection": {
+          "packageDir": "/home/sf/worktrees/dsh/cap/normal-startup-20261119/packages/bundle/sdk-app/node_modules/@deepseek-ai/dsh-client-connection",
+          "scope": "installation"
+        },
+        "@deepseek-ai/dsh-host-frontend-static": {
+          "packageDir": "/home/sf/worktrees/dsh/cap/normal-startup-20261119/packages/bundle/web-app/node_modules/@deepseek-ai/dsh-host-frontend-static",
+          "scope": "installation"
+        }
+      }
+    },
+    {
+      "owner": "/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122",
+      "packages": {
+        "@deepseek-ai/dsh-omp-rpc": {
+          "packageDir": "/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122/packages/bundle/base/node_modules/@deepseek-ai/dsh-omp-rpc",
+          "scope": "installation"
+        },
+        "@deepseek-ai/dsh-client-connection": {
+          "packageDir": "/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122/packages/bundle/sdk-app/node_modules/@deepseek-ai/dsh-client-connection",
+          "scope": "installation"
+        },
+        "@deepseek-ai/dsh-host-frontend-static": {
+          "packageDir": "/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122/packages/bundle/web-app/node_modules/@deepseek-ai/dsh-host-frontend-static",
+          "scope": "installation"
+        }
+      }
+    }
+  ]
+}

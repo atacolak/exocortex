@@ -1,0 +1,3 @@
+- insert:
+    - id: exo-overlay
+      name: '@exocortex/exo-overlay'

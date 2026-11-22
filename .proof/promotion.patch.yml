@@ -1,0 +1,26 @@
+[
+  {
+    "id": "exo-overlay",
+    "disabled": true
+  },
+  {
+    "insert": [
+      {
+        "id": "exo-overlay-normal-startup",
+        "name": "/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122/.proof/bundles/exo-overlay/index.js",
+        "config": {
+          "overlayRoot": "/tmp/exo-overlay",
+          "bundlesRoot": "/home/sf/workspace/exocortex-bundles",
+          "buildRunner": "/home/sf/workspace/exocortex-bundles/hmr-runner/build-bundles.mjs",
+          "bun": "bun",
+          "pollIntervalMs": 250,
+          "buildTimeoutMs": 120000
+        }
+      },
+      {
+        "id": "exocortex-image-chips",
+        "name": "@exocortex/image-chips"
+      }
+    ]
+  }
+]
