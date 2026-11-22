@@ -15,6 +15,7 @@ const AUTH_RECORD_KEY = credentialKey('client-connection', 'browser-session')
 const DAY_MILLISECONDS = 24 * 60 * 60 * 1000
 const SECRET_BYTES = 32
 const TOKEN_QUERY = 'token'
+const CONTINUATION_QUERY = '__dsh_auth_continue'
 const COOKIE_PREFIX = 'dsh-auth-'
 const COOKIE_PAYLOAD_VERSION = 1
 const STORED_SECRET_VERSION = 1
@@ -122,14 +123,39 @@ function header(
   return typeof value === 'string' ? value : undefined
 }
 
-/** Render the same-directory redirect target carrying every query parameter except the launch token. */
+/** Render the same-directory target without launch tokens or browser-entry bookkeeping. */
 function cleanRedirectTarget(url: URL): string {
   const kept = new URLSearchParams()
   for (const [key, value] of url.searchParams) {
-    if (key !== TOKEN_QUERY) kept.append(key, value)
+    if (key !== TOKEN_QUERY && key !== CONTINUATION_QUERY) kept.append(key, value)
   }
   const query = kept.toString()
   return query.length === 0 ? './' : `./?${query}`
+}
+
+/** Select a document response without widening the token or mesh authorization grant. */
+function isBrowserDocument(req: ConnectionIndexRequest): boolean {
+  const destination = header(req.headers, 'sec-fetch-dest')
+  const mode = header(req.headers, 'sec-fetch-mode')
+  const site = header(req.headers, 'sec-fetch-site')
+  if (destination !== undefined || mode !== undefined || site !== undefined) {
+    return destination === 'document' && mode === 'navigate'
+  }
+  // Plain HTTP browsers may omit Fetch Metadata; Desktop's Node fetch accepts */*.
+  return header(req.headers, 'accept')?.split(',').some((entry) => {
+    const [media, ...parameters] = entry.toLowerCase().split(';')
+    if (media?.trim() !== 'text/html') return false
+    const quality = parameters.find(parameter => /^\s*q\s*=/u.test(parameter))
+    if (quality === undefined) return true
+    const value = Number(quality.slice(quality.indexOf('=') + 1).trim())
+    return value > 0 && value <= 1
+  }) ?? false
+}
+
+/** Escape query names and values for the landing's manual continuation form. */
+function htmlAttribute(value: string): string {
+  return value.replaceAll('&', '&amp;').replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
 }
 
 /** Protocol-scoped cookie audience; HTTP retains its existing authority-only spelling. */
@@ -311,11 +337,12 @@ export class BrowserAuth {
   }
 
   /**
-   * Authenticate an index request. A valid root query token mints the cookie
-   * and redirects to the directory-relative target carrying the request's own
-   * query with the launch token removed; a valid cookie lets the caller serve
-   * the index; a root request from a trusted mesh subnet mints the same
-   * cookie; every other request receives the same minimal 401 response.
+   * Authenticate an index request. A valid root token or trusted-mesh root
+   * visit mints the signed cookie. Browser documents receive a first-party
+   * landing with one continuation; programmatic clients retain the 303 exchange.
+   * The continuation requires the cookie and removes its bookkeeping query.
+   * Missing cookies stop at an explanation instead of another automatic mint.
+   * A valid cookie lets the caller serve the index; other requests receive 401.
    * @param req - incoming root or configured-index request.
    * @param res - response owned when this method returns false.
    * @param secure - whether the listener receiving this request serves TLS; the
@@ -332,16 +359,28 @@ export class BrowserAuth {
       const authority = requestAudience(req.headers, secure)
       if (req.method === 'GET' && url.pathname === '/' && tokens.length === 1
         && authority !== undefined && tokenMatches(tokens.join(''), this.launchToken)) {
-        this.writeSessionRedirect(req, res, url, secure)
+        this.writeSessionEntry(req, res, url, secure)
         return false
       }
       if (req.method === 'GET' && url.pathname === '/' && this.isAuthenticated(req, secure)) {
         this.writeCleanRedirect(res, url)
         return false
       }
-    } else if (this.isAuthenticated(req, secure)) return true
+    } else if (this.isAuthenticated(req, secure)) {
+      if (req.method === 'GET' && url.pathname === '/' && url.searchParams.has(CONTINUATION_QUERY)) {
+        this.writeCleanRedirect(res, url)
+        return false
+      }
+      return true
+    }
+    if (tokens.length === 0 && req.method === 'GET' && url.pathname === '/'
+      && url.searchParams.has(CONTINUATION_QUERY)) {
+      if (isBrowserDocument(req)) this.writeBrowserLanding(res, url)
+      else this.writeUnauthorized(req, res)
+      return false
+    }
     if (this.trustsMeshIndex(req, url)) {
-      this.writeSessionRedirect(req, res, url, secure)
+      this.writeSessionEntry(req, res, url, secure)
       return false
     }
     this.writeUnauthorized(req, res)
@@ -364,7 +403,7 @@ export class BrowserAuth {
     return address !== undefined && this.meshCidrs.some(cidr => ((address & cidr.mask) >>> 0) === cidr.network)
   }
 
-  private writeSessionRedirect(
+  private writeSessionEntry(
     req: ConnectionIndexRequest,
     res: ConnectionIndexResponse,
     url: URL,
@@ -383,15 +422,53 @@ export class BrowserAuth {
       issuedAt,
       expiresAt,
     }, this.secret)
+    const cookie = sessionCookie(
+      cookieName(authority), value, expiresAt, Math.floor(this.maxAgeMilliseconds / 1000), secure,
+    )
+    if (isBrowserDocument(req)) {
+      this.writeBrowserLanding(res, url, cookie)
+      return
+    }
     res.writeHead(303, {
       'cache-control': 'no-store',
       'location': cleanRedirectTarget(url),
       'referrer-policy': 'no-referrer',
-      'set-cookie': sessionCookie(
-        cookieName(authority), value, expiresAt, Math.floor(this.maxAgeMilliseconds / 1000), secure,
-      ),
+      'set-cookie': cookie,
     })
     res.end()
+  }
+
+  /** A newly minted cookie permits one navigation; an absent continuation cookie stops here. */
+  private writeBrowserLanding(res: ConnectionIndexResponse, url: URL, cookie?: string): void {
+    const clean = cleanRedirectTarget(url)
+    const target = cookie === undefined
+      ? clean
+      : `${clean}${clean.includes('?') ? '&' : '?'}${CONTINUATION_QUERY}=1`
+    const nonce = cookie === undefined ? undefined : randomBytes(16).toString('base64')
+    const headers: Record<string, string> = {
+      'cache-control': 'no-store',
+      'content-type': 'text/html; charset=utf-8',
+      'referrer-policy': 'no-referrer',
+      'x-content-type-options': 'nosniff',
+      'content-security-policy': "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+        + (nonce === undefined ? '' : `; script-src 'nonce-${nonce}'`),
+    }
+    if (cookie !== undefined) headers['set-cookie'] = cookie
+    const title = cookie === undefined ? 'Cookies are required' : 'Opening the application'
+    const message = cookie === undefined
+      ? 'This browser did not return the sign-in cookie. Allow cookies for this site, then reopen the original link. Automatic retry has stopped.'
+      : 'Establishing a private browser session. If this page does not continue, use the button below.'
+    const label = cookie === undefined ? 'Try again' : 'Continue'
+    const inputs = [...new URL(target, 'http://browser-entry.invalid/').searchParams]
+      .map(([name, value]) => `<input type="hidden" name="${htmlAttribute(name)}" value="${htmlAttribute(value)}">`).join('')
+    const script = nonce === undefined
+      ? ''
+      : `<script nonce="${nonce}">location.replace(${JSON.stringify(target).replaceAll('<', '\\u003c')} + location.hash)</script>`
+    res.writeHead(200, headers)
+    res.end('<!doctype html><html lang="en"><head><meta charset="utf-8">'
+      + '<meta name="viewport" content="width=device-width, initial-scale=1">'
+      + `<title>${title}</title></head><body><main><h1>${title}</h1><p>${message}</p>`
+      + `<form method="get" accept-charset="UTF-8">${inputs}<button type="submit">${label}</button></form></main>${script}</body></html>`)
   }
 
   private writeCleanRedirect(res: ConnectionIndexResponse, url: URL): void {
