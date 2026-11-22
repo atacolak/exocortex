@@ -1,0 +1,147 @@
+{
+  "status": "passed",
+  "kind": "production-read-only-ui",
+  "actor": {
+    "sessionId": "01a1fe35-9eb1-75ce-9c0a-4c8632339a1d",
+    "sessionFile": "/home/sf/.omp/agent/sessions/exocortex-actors/mate/2026-11-21T13-04-49-329Z_01a1fe35-9eb1-75ce-9c0a-4c8632339a1d.jsonl"
+  },
+  "version": "0.4.0",
+  "expectedClientSha256": "be90ee8e0807917b1178866497ba7d74adfd0e600f82e8998a3133089d2202ff",
+  "nativeModuleObservations": 1,
+  "moduleReplacements": 0,
+  "actorMutations": 0,
+  "nativeAttachRequests": 0,
+  "nativeInputRequests": 0,
+  "sessionWorkspaceMutations": 0,
+  "pluginMutations": 0,
+  "messagesSent": 0,
+  "checks": [
+    "actual-root-overview-description-and-native-thinking-header",
+    "actual-native-role-choices-opened-without-selection",
+    "actual-native-thinking-levels-opened-without-selection"
+  ],
+  "readCounts": {
+    "inventory": 1,
+    "detail": 1,
+    "definition": 1,
+    "lifecycle.info": 1,
+    "models": 1,
+    "model.roles": 1,
+    "thinking": 1
+  },
+  "blocked": [],
+  "unselectedInspectorReads": [],
+  "pageErrors": [],
+  "consoleErrors": [
+    "[JavaScript Error: \"Content-Security-Policy: The page’s settings blocked the loading of a resource (img-src) at [url] because it violates the following directive: “default-src 'none'”\" {file: \"resource:///modules/FaviconLoader.sys.mjs\" line: 224}]"
+  ],
+  "readOutcomes": {
+    "inventory": {
+      "httpStatus": 200,
+      "ok": true,
+      "errorCode": null,
+      "observedAt": "2026-11-22T14:14:42.932Z"
+    },
+    "lifecycle.info": {
+      "httpStatus": 200,
+      "ok": true,
+      "errorCode": null,
+      "observedAt": "2026-11-22T14:14:43.433Z"
+    },
+    "detail": {
+      "httpStatus": 200,
+      "ok": true,
+      "errorCode": null,
+      "observedAt": "2026-11-22T14:14:43.476Z"
+    },
+    "definition": {
+      "httpStatus": 200,
+      "ok": true,
+      "errorCode": null,
+      "observedAt": "2026-11-22T14:14:43.933Z"
+    },
+    "models": {
+      "httpStatus": 200,
+      "ok": true,
+      "errorCode": null,
+      "observedAt": "2026-11-22T14:14:44.751Z"
+    },
+    "model.roles": {
+      "httpStatus": 200,
+      "ok": true,
+      "errorCode": null,
+      "observedAt": "2026-11-22T14:14:45.251Z"
+    },
+    "thinking": {
+      "httpStatus": 200,
+      "ok": true,
+      "errorCode": null,
+      "observedAt": "2026-11-22T14:14:45.664Z"
+    }
+  },
+  "navigation": [
+    {
+      "origin": "http://10.77.67.147:3080",
+      "path": "/",
+      "panel": "actors",
+      "hasOverlay": false,
+      "observedAt": "2026-11-22T14:14:36.924Z"
+    },
+    {
+      "origin": "http://10.77.67.147:3080",
+      "path": "/",
+      "panel": "actors",
+      "hasOverlay": false,
+      "observedAt": "2026-11-22T14:14:36.964Z"
+    },
+    {
+      "origin": "http://10.77.67.147:3080",
+      "path": "/",
+      "panel": "actors",
+      "hasOverlay": false,
+      "observedAt": "2026-11-22T14:14:42.464Z"
+    }
+  ],
+  "existingAnchorHydrated": true,
+  "owner": {
+    "verified": true,
+    "status": "idle",
+    "pid": 69863,
+    "bootId": "7839c6ee-2867-421c-907e-3b5b1740749f",
+    "model": {
+      "provider": "devin",
+      "id": "glm-5-3-1m"
+    },
+    "thinkingLevel": "max",
+    "modelRole": "default"
+  },
+  "roles": {
+    "savedCount": 15,
+    "nativeCount": 20,
+    "nativeSupported": true,
+    "selectionSupported": true,
+    "ownerBootMatches": true,
+    "visibleOptions": 20
+  },
+  "thinking": {
+    "supported": true,
+    "allowed": true,
+    "idle": true,
+    "bootId": "7839c6ee-2867-421c-907e-3b5b1740749f",
+    "model": {
+      "provider": "devin",
+      "id": "glm-5-3-1m"
+    },
+    "thinkingLevel": "max",
+    "levels": [
+      "off",
+      "low",
+      "high",
+      "max"
+    ],
+    "scope": "session",
+    "roleReported": true,
+    "modelRole": "default"
+  },
+  "phase": "final-read-only-checks"
+}

@@ -1,0 +1,89 @@
+{
+  "status": "passed",
+  "checks": [
+    {
+      "name": "fresh-public-cross-site-actors",
+      "ok": true,
+      "strictCookie": true,
+      "actualActorsSurface": true
+    },
+    {
+      "name": "fresh-public-missing-overlay",
+      "ok": true,
+      "status": 404,
+      "explicitRecovery": true,
+      "automaticFallback": false
+    },
+    {
+      "name": "explicit-public-recovery-to-actors",
+      "ok": true,
+      "status": 200,
+      "chatPreserved": true
+    }
+  ],
+  "blocked": [],
+  "nativeInputRequests": 0,
+  "sessionWorkspaceMutations": 0,
+  "pluginMutations": 0,
+  "nativeAttachRequests": 0,
+  "actorMutations": 0,
+  "pageErrors": [],
+  "documents": [
+    {
+      "origin": "https://exocortex.net.colak.sh",
+      "path": "/",
+      "status": 200,
+      "continuation": false,
+      "overlay": null,
+      "panel": "actors"
+    },
+    {
+      "origin": "https://exocortex.net.colak.sh",
+      "path": "/",
+      "status": 303,
+      "continuation": true,
+      "overlay": null,
+      "panel": "actors"
+    },
+    {
+      "origin": "https://exocortex.net.colak.sh",
+      "path": "/",
+      "status": 200,
+      "continuation": false,
+      "overlay": null,
+      "panel": "actors"
+    },
+    {
+      "origin": "https://exocortex.net.colak.sh",
+      "path": "/",
+      "status": 200,
+      "continuation": false,
+      "overlay": "fable-panes",
+      "panel": "actors"
+    },
+    {
+      "origin": "https://exocortex.net.colak.sh",
+      "path": "/",
+      "status": 303,
+      "continuation": true,
+      "overlay": "fable-panes",
+      "panel": "actors"
+    },
+    {
+      "origin": "https://exocortex.net.colak.sh",
+      "path": "/",
+      "status": 404,
+      "continuation": false,
+      "overlay": "fable-panes",
+      "panel": "actors"
+    },
+    {
+      "origin": "https://exocortex.net.colak.sh",
+      "path": "/",
+      "status": 200,
+      "continuation": false,
+      "overlay": null,
+      "panel": "actors"
+    }
+  ]
+}

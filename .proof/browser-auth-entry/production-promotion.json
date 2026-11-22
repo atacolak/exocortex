@@ -1,0 +1,49 @@
+{
+  "startedAt": "2026-11-22T14:12:09.484969+00:00",
+  "status": "passed",
+  "phase": "complete",
+  "productionMutation": true,
+  "gateAcceptance": "Original broad run retained:723 files green,9 timeout files; all9 unchanged-code files rechecked green443/443. Root explicitly approved this acceptance.",
+  "commit": "410431c1379f5beb9ea5f5526e3afe6192b1854a",
+  "before": {
+    "webPid": "66583",
+    "nativeOwners": 26,
+    "bundles": 53,
+    "plugins": 230
+  },
+  "initialGuardResult": {
+    "status": "failed",
+    "phase": "postflight",
+    "errorCode": "plugin-enablements-or-modules-drift"
+  },
+  "resolvedAt": "2026-11-22T14:14:15.390876+00:00",
+  "after": {
+    "webPid": "1089730",
+    "nativeOwners": 26,
+    "bundles": 53,
+    "plugins": 230
+  },
+  "changedNativeOwners": [],
+  "checks": [
+    "candidate web owner active",
+    "all current profile and original service preimage bytes unchanged",
+    "all53 bundle projections unchanged",
+    "all230 plugin module/enablement tuples identical with multiplicity",
+    "all26 native PID/starttime/cgroup identities unchanged",
+    "actual public cross-site entry reaches Actors with Strict cookie",
+    "missing overlay returns honest404 with explicit recovery to actual Actors200",
+    "actual Actors0.4.0 Overview, roles, and thinking UI verified without mutation"
+  ],
+  "runtimeEntryIdResolution": {
+    "rawDelta": "production-plugin-delta.json",
+    "source": "packages/host/directory-picker-auto/src/index.ts",
+    "explanation": "The auto chooser calls ctx.loader.create({name}) for both backend and surface without an ID; these root-tree rows are in memory and never persisted. Only these two regenerated IDs changed; module names, multiplicity and enabled values are equal."
+  },
+  "preExistingCookieProbe": {
+    "status": "not-run",
+    "reason": "The first postflight guard stopped the one-shot process before this probe; the in-memory old cookie jar was not retained."
+  },
+  "completedAt": "2026-11-22T14:16:29.602148+00:00",
+  "publicEntryProof": "production-public-entry/receipt.json",
+  "actorsUiProof": "production-actors-receipt.json"
+}

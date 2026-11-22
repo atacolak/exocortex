@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Apply the reviewed host-only switch after all gates, with exact pre/post receipts."""
-import datetime, hashlib, importlib.util, json, os, pathlib, subprocess, sys, time, urllib.request
+import collections, datetime, hashlib, importlib.util, json, os, pathlib, subprocess, sys, time, urllib.request
 ROOT=pathlib.Path('/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122')
 PROOF=ROOT/'.proof/browser-auth-entry'
 DROP=pathlib.Path('/home/sf/.config/systemd/user/dsh-web.service.d/95-browser-entry-20261122.conf')
@@ -13,7 +13,7 @@ def require(value,code):
  if not value:raise RuntimeError(code)
 def cmd(args,timeout=40):subprocess.run(args,check=True,timeout=timeout,stdout=subprocess.DEVNULL)
 def normalized_plugins(rows):
- return {k:{**v,'moduleName':v.get('moduleName').replace(str(ROOT),str(helper.LIVE)) if isinstance(v.get('moduleName'),str) else v.get('moduleName')} for k,v in rows.items()}
+ return collections.Counter(json.dumps({**v,'moduleName':v.get('moduleName').replace(str(ROOT),str(helper.LIVE)) if isinstance(v.get('moduleName'),str) else v.get('moduleName')},sort_keys=True) for v in rows.values())
 save()
 try:
  require(sys.argv[1:]==['--promote-reviewed'],'explicit-promotion-flag-required')

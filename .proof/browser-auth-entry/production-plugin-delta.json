@@ -1,0 +1,38 @@
+{
+  "pluginDelta": [
+    {
+      "entryId": "2dc1b940",
+      "before": {
+        "enabled": true,
+        "moduleName": "@deepseek-ai/dsh-host-directory-picker-browse"
+      },
+      "after": null
+    },
+    {
+      "entryId": "3f1a15dc",
+      "before": null,
+      "after": {
+        "enabled": true,
+        "moduleName": "@deepseek-ai/dsh-host-directory-picker-browse"
+      }
+    },
+    {
+      "entryId": "3fef3e58",
+      "before": null,
+      "after": {
+        "enabled": true,
+        "moduleName": "@deepseek-ai/dsh-client-ui-directory-picker-browse"
+      }
+    },
+    {
+      "entryId": "8a2259ef",
+      "before": {
+        "enabled": true,
+        "moduleName": "@deepseek-ai/dsh-client-ui-directory-picker-browse"
+      },
+      "after": null
+    }
+  ],
+  "nativeUnchanged": 26,
+  "nativeChanged": []
+}
