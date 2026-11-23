@@ -301,6 +301,9 @@ export function createOverlayRoutes({ root, bundlesRoot, promoter, verifier, pol
           return true
         }
         const runId = segments[0]
+        if (runId === 'workbench' && segments.length === 2 && ['promote', 'discard'].includes(segments[1])) {
+          throw new OverlayError(403, 'persistent-view-protected', 'persistent workbench cannot be promoted or discarded as a temporary candidate')
+        }
         if (segments.length === 2 && Object.hasOwn(routes, segments[1])) {
           const route = routes[segments[1]]
           const method = request?.method ?? 'GET'

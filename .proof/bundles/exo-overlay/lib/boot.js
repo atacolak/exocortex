@@ -7,15 +7,27 @@ import { missingOverlayResponse } from './entry-recovery.js'
 import { assertRunId, candidateDirectory } from './runs.js'
 
 /** Resolve this document's initial composition without changing the canonical graph. */
-export function selectOverlayBoot(graph, documentUrl, root) {
+export function selectOverlayBoot(graph, documentUrl, root, includeMainSelector = false) {
   if (documentUrl === undefined) return graph
   const url = new URL(documentUrl)
-  if (!url.searchParams.has('exo_overlay')) return graph
+  if (!url.searchParams.has('exo_overlay')) {
+    if (!includeMainSelector) return graph
+    // Reuse the EXACT existing sidebar selector on Main: one original module,
+    // never an additional plugin or a Main -> Workbench client transition.
+    const viewControls = new Set(['@exocortex/exo-overlay', '@exocortex/session-chrome'])
+    const selected = overlayRows(root, 'workbench').filter(row => viewControls.has(row.id))
+    if (selected.length !== viewControls.size) return graph
+    return withOverlayEntries(graph, selected, root, 'workbench')
+  }
   const values = url.searchParams.getAll('exo_overlay')
   if (values.length !== 1 || !values[0]) throw new OverlayError(400, 'invalid-run-id', 'Choose one non-empty overlay name or return to the normal URL')
   const runId = assertRunId(values[0])
   const rows = overlayRows(root, runId)
   if (rows.length === 0) throw missingOverlayResponse(url, runId)
+  return withOverlayEntries(graph, rows, root, runId)
+}
+
+function withOverlayEntries(graph, rows, root, runId) {
   const canonical = new Set(graph.entries.map(row => row.id))
   const bootstrap = graph.batches.filter(batch => batch.phase === 'bootstrap')
   const bootstrapIds = new Set(bootstrap.flatMap(batch => batch.entries))

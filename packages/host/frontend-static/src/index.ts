@@ -40,6 +40,13 @@ export const Config: z<Config> = z.object({
   distIndex: z.string().required(),
 })
 
+declare module '@deepseek-ai/cordis' {
+  interface Events {
+    /** An authenticated document's final navigation decision, before boot injection. @mode bail */
+    'webserver/index-route'(request: Request): Response | undefined
+  }
+}
+
 const HTML_MIME = 'text/html; charset=utf-8'
 
 const MIME: Record<string, string> = {
@@ -174,8 +181,14 @@ export function apply(ctx: Context, config: Config): void {
       // The browser authentication admits the owner's shared browser Peer. The
       // base goes in after all index transforms, so it precedes every resource
       // reference they insert.
-      html => ctx.webServer.renderIndex(html, peer ?? ctx.connection.browserPeer, request.url)
-        .replace(/<head(?:\s[^>]*)?>/i, open => `${open}<base href="./">`),
+      html => {
+        // The request was already authenticated. Other host plugins can now
+        // redirect this document without ever shipping a Main boot graph.
+        const navigation = ctx.bail(ctx, 'webserver/index-route', request)
+        if (navigation !== undefined) throw navigation
+        return ctx.webServer.renderIndex(html, peer ?? ctx.connection.browserPeer, request.url)
+          .replace(/<head(?:\s[^>]*)?>/i, open => `${open}<base href="./">`)
+      },
     ),
   }), 'frontend-static: fallback seat')
 }

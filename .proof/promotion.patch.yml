@@ -7,9 +7,10 @@
     "insert": [
       {
         "id": "exo-overlay-normal-startup",
-        "name": "/home/sf/worktrees/dsh/cap/browser-auth-entry-20261122/.proof/bundles/exo-overlay/index.js",
+        "name": "/home/sf/worktrees/dsh/cap/persistent-workspaces-20261123/.proof/bundles/exo-overlay/index.js",
         "config": {
           "overlayRoot": "/tmp/exo-overlay",
+          "persistentWorkbenchDirectory": "/home/sf/.dsh/exocortex-views/workbench",
           "bundlesRoot": "/home/sf/workspace/exocortex-bundles",
           "buildRunner": "/home/sf/workspace/exocortex-bundles/hmr-runner/build-bundles.mjs",
           "bun": "bun",

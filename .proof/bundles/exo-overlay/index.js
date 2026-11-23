@@ -6,7 +6,7 @@
  * carries `?exo_overlay=<runId>`.
  */
 import { spawn } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, mkdirSync, realpathSync, cpSync, rmSync, lstatSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -21,6 +21,72 @@ export const inject = ['webServer', 'clientModules']
 export { ROUTE_PREFIX }
 
 const BUNDLE_DIRECTORY = path.dirname(fileURLToPath(import.meta.url))
+
+// Only the named workbench is persistent. All other overlay run IDs remain
+// disposable development candidates rooted under the existing /tmp directory.
+export function prepareWorkbenchLink(temporaryRoot, persistentWorkbenchDirectory) {
+  if (persistentWorkbenchDirectory === undefined) return
+  const saved = absolutePath(persistentWorkbenchDirectory, 'persistentWorkbenchDirectory')
+  const candidate = path.join(temporaryRoot, 'workbench')
+  if (!existsSync(path.join(saved, '@exocortex', 'exo-workbench', 'client.js'))) {
+    throw new Error('persistent workbench is missing its built client; refusing an empty view')
+  }
+  mkdirSync(temporaryRoot, { recursive: true })
+  let present
+  try { present = lstatSync(candidate) } catch (error) {
+    if (error?.code !== 'ENOENT') throw error
+  }
+  if (present?.isSymbolicLink()) {
+    if (realpathSync(candidate) !== realpathSync(saved)) throw new Error('workbench points to an unexpected location')
+    rmSync(candidate)
+    present = undefined
+  }
+  if (present && !present.isDirectory()) throw new Error('workbench path is not a directory')
+  if (!present) cpSync(saved, candidate, { recursive: true })
+  if (!existsSync(path.join(candidate, '@exocortex', 'exo-workbench', 'client.js'))) throw new Error('workbench staged client is missing')
+}
+
+// A workspace choice changes the *initial document*, not an already running
+// main graph. The cookie is a non-secret UI preference; authorization remains
+// with Connection on the next request.
+export function preferredWorkspaceResponse(request) {
+  let status, headers
+  const handled = preferredWorkspaceRedirect({
+    method: request.method,
+    url: request.url,
+    headers: Object.fromEntries(request.headers),
+  }, {
+    writeHead(nextStatus, nextHeaders) { status = nextStatus; headers = nextHeaders },
+    end() {},
+  })
+  return handled ? new Response(null, {status, headers}) : undefined
+}
+
+export function preferredWorkspaceRedirect(request, response) {
+  if (!['GET', 'HEAD'].includes(request?.method || 'GET')) return false
+  const url = new URL(typeof request?.url === 'string' ? request.url : '/', 'http://localhost')
+  if (url.pathname !== '/' && url.pathname !== '/index.html') return false
+  const overlay = url.searchParams.getAll('exo_overlay')
+  let chosen
+  if (overlay.length === 1 && overlay[0] === 'fable-panes') chosen = 'workbench'
+  else if (overlay.length === 1 && overlay[0] === 'main') chosen = 'main'
+  else if (overlay.length === 0) {
+    const raw = String(request.headers?.cookie || '')
+    chosen = /(?:^|;\s*)exo_last_view=workbench(?:;|$)/.test(raw) ? 'workbench' : undefined
+  }
+  if (chosen === undefined) return false
+  if (chosen === 'main') url.searchParams.delete('exo_overlay')
+  else url.searchParams.set('exo_overlay', chosen)
+  const target = url.pathname + url.search + url.hash
+  const headers = { Location: target, 'Cache-Control': 'no-store', Vary: 'Cookie' }
+  if (overlay.length === 1 && ['main','fable-panes'].includes(overlay[0])) {
+    const secure = String(request.headers?.['x-forwarded-proto'] || '').split(',')[0].trim() === 'https'
+    headers['Set-Cookie'] = 'exo_last_view=' + chosen + '; Path=/; SameSite=Lax; Max-Age=31536000' + (secure ? '; Secure' : '')
+  }
+  response.writeHead(302, headers)
+  response.end()
+  return true
+}
 
 function absolutePath(value, field) {
   if (typeof value !== 'string' || value === '' || !path.isAbsolute(value)) {
@@ -52,6 +118,7 @@ export function resolveConfig(config = {}, { env = process.env, bundleDirectory 
     bundlesRoot: absolutePath(bundlesRoot, 'bundlesRoot'),
     buildRunner: absolutePath(buildRunner, 'buildRunner'),
     bun: typeof config.bun === 'string' && config.bun !== '' ? config.bun : env.BUN_BIN ?? 'bun',
+    persistentWorkbenchDirectory: config.persistentWorkbenchDirectory === undefined ? undefined : absolutePath(config.persistentWorkbenchDirectory, 'persistentWorkbenchDirectory'),
     pollIntervalMs: positiveInteger(config.pollIntervalMs, 'pollIntervalMs', 250),
     buildTimeoutMs: positiveInteger(config.buildTimeoutMs, 'buildTimeoutMs', 120_000),
   }
@@ -118,6 +185,7 @@ export function createOverlayPlugin({ build, probe, now, createId } = {}) {
     inject,
     apply(ctx, config = {}) {
       const resolved = resolveConfig(config)
+      prepareWorkbenchLink(resolved.overlayRoot, resolved.persistentWorkbenchDirectory)
       const promoter = createPromoter({
         root: resolved.overlayRoot,
         bundlesRoot: resolved.bundlesRoot,
@@ -139,8 +207,15 @@ export function createOverlayPlugin({ build, probe, now, createId } = {}) {
         ...(now === undefined ? {} : { now }),
       })
       ctx.effect(
-        () => ctx.clientModules.registerBootSelector((graph, documentUrl) => selectOverlayBoot(graph, documentUrl, resolved.overlayRoot)),
+        () => ctx.clientModules.registerBootSelector((graph, documentUrl) => {
+          prepareWorkbenchLink(resolved.overlayRoot, resolved.persistentWorkbenchDirectory)
+          return selectOverlayBoot(graph, documentUrl, resolved.overlayRoot, true)
+        }),
         'exocortex-exo-overlay: initial document composition',
+      )
+      ctx.effect(
+        () => ctx.on('webserver/index-route', request => preferredWorkspaceResponse(request)),
+        'exocortex-exo-overlay: pre-document workspace selection',
       )
       ctx.effect(
         () => ctx.on('connection/request', (request, response, next) => routes.handle(request, response, next)),
