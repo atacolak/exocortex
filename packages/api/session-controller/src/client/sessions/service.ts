@@ -354,11 +354,14 @@ export class ClientSessions implements ISessions {
   }
 
   /**
-   * Refresh the real Session baseline, reusing an in-flight pull.
-   * @returns completion of the current or newly started baseline pull.
+   * Refresh the full catalog, or upsert one authoritative Host summary.
+   * @param sessionId - exact identity; omission preserves full-refresh behavior.
+   * @returns when a targeted identity is immediately retainable, or the full refresh settles.
    */
-  refresh(): Promise<void> {
-    return this.manager.refreshList()
+  async refresh(sessionId?: SessionId): Promise<void> {
+    if (sessionId === undefined) return this.manager.refreshList()
+    await this.manager.refreshSummary(sessionId)
+    this.projectList()
   }
 
   /**

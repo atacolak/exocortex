@@ -21,7 +21,7 @@ import type { PluginTab } from '../src/client/tab-ledger.ts'
 import type { ConfigLedger } from '../src/client/config-ledger.ts'
 import { rowKey, type InstallState, type PackageRow, type PackageView, type PluginManagerState, type UpdateState, type VersionCheck } from '../src/client/manager-store.ts'
 import { INSTALL_GIT_EXAMPLE, INSTALL_PATH_EXAMPLE, en, zh, type PluginManagerLocaleKey } from '../src/client/locales.ts'
-import type { PluginActivationOwnerProps, PluginAddActionsProps, PluginDetailProps, PluginTabProps, PluginsSubject } from '../src/client/slot-contract.ts'
+import type { PluginActivationOwnerProps, PluginAddActionsProps, PluginDetailProps, PluginListProps, PluginTabProps, PluginsSubject } from '../src/client/slot-contract.ts'
 
 beforeEach(() => { localStorage.clear() })
 afterEach(cleanup)
@@ -93,7 +93,7 @@ const READY: PluginManagerState = {
  * (a list slot's cell is empty), the view asked for — `detail` for a detail
  * contribution — and the owner props.
  */
-type SlotBodies = Record<string, (view: 'summary' | 'page' | 'activation' | 'detail' | 'add' | 'tab', owner: unknown, form?: ConfigPageForm) => ReactNode>
+type SlotBodies = Record<string, (view: 'summary' | 'page' | 'activation' | 'detail' | 'add' | 'tab' | 'list', owner: unknown, form?: ConfigPageForm) => ReactNode>
 
 /** The subject a detail contribution was rendered with. */
 function subjectOf(owner: unknown): PluginsSubject | undefined {
@@ -188,10 +188,11 @@ function renderTab(
     },
     renderSlot: (name, owner, opts) => {
       const body = bodies[`${name}:${opts?.only ?? opts?.entryKey ?? ''}`]
-      if (body === undefined) return null
+      if (body === undefined) return opts?.fallback ?? null
       if (name === 'plugins.bundle.activation') return body('activation', owner)
       if (name === 'plugins.add.actions') return body('add', owner)
       if (name === 'plugins.tab') return body('tab', owner)
+      if (name === 'plugins.list') return body('list', owner)
       if (name.startsWith('plugins.detail.')) return body('detail', owner)
       if (!('view' in owner) || (owner.view !== 'summary' && owner.view !== 'page')) {
         throw new Error('Plugin configuration fixture requires a summary or page view')
@@ -228,6 +229,78 @@ function renderTab(
 }
 
 describe('PluginManagerPage', () => {
+  it('lets one list reorder native cards without losing settings, disabled bundles, mutations, or detail origins', () => {
+    const worktree = '@deepseek-ai/dsh-experimental-tool-worktree'
+    const alpha = pkg({ name: '@exocortex/alpha', meta: { title: 'Alpha' } })
+    const beta = pkg({ name: worktree, official: true, optional: true, installed: false, enabled: false, meta: { title: 'Beta' }, rows: [row({ moduleName: worktree })] })
+    const zulu = pkg({ name: '@exocortex/zulu', meta: { title: 'Zulu' } })
+    const b = renderTab(
+      { packages: [zulu, beta, alpha] },
+      { items: [{ id: 'bash', label: 'Shell' }], rows: new Set([`${worktree}#sidebar`]) },
+      {
+        'plugins.row.config:@deepseek-ai/dsh-experimental-tool-worktree#sidebar': view => view === 'page' ? <form aria-label="Beta settings" /> : 'Beta settings',
+        'plugins.item:bash': view => view === 'summary' ? 'Shell settings' : <form aria-label="Shell settings" />,
+        'plugins.list:': (_view, owner) => {
+          const entries = (owner as PluginListProps).entries
+          return <ul aria-label="Unified plugins">{[...entries].sort((a, b) => a.label.localeCompare(b.label)).map(entry => entry.content)}</ul>
+        },
+      },
+    )
+    const list = screen.getByRole('list', { name: 'Unified plugins' })
+    expect(within(list).getAllByRole('button', { name: /^View / }).map(button => button.getAttribute('aria-label'))).toEqual(
+      ['Alpha', 'Beta', 'Shell', 'Zulu'].map(name => en.openDetail.replace('{name}', name)),
+    )
+    expect(document.querySelector('[data-plugin-group]')).toBeNull()
+    fireEvent.click(within(list).getByRole('switch', { name: en.enableToggle.replace('{name}', 'Alpha') }))
+    expect(b.actions.setEnabled).toHaveBeenCalledWith(alpha.name, false)
+    b.set({ busy: [alpha.name] })
+    expect(within(list).getByRole('switch', { name: en.enableToggle.replace('{name}', 'Alpha') }).hasAttribute('disabled')).toBe(true)
+    b.set({ busy: [], packages: [{ ...alpha, enabled: false }, beta, zulu] })
+    expect(within(list).getByRole('switch', { name: en.enableToggle.replace('{name}', 'Alpha') }).getAttribute('aria-checked')).toBe('false')
+    expect(within(list).getByRole('button', { name: en.openDetail.replace('{name}', 'Alpha') })).toBeTruthy()
+    fireEvent.click(within(list).getByRole('button', { name: en.openDetail.replace('{name}', 'Beta') }))
+    expect(document.querySelector('[data-plugin-detail]')?.getAttribute('data-plugin-detail')).toBe(worktree)
+    fireEvent.click(screen.getByRole('button', { name: en.configureRow.replace('{name}', worktree) }))
+    expect(screen.getByRole('form', { name: 'Beta settings' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: en.backToPackage.replace('{name}', 'Beta') }))
+    fireEvent.click(screen.getByRole('button', { name: en.backToList }))
+    expect(screen.getByRole('list', { name: 'Unified plugins' })).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: en.moreTitle })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: en.openDetail.replace('{name}', 'Shell') }))
+    expect(screen.getByRole('form', { name: 'Shell settings' })).toBeTruthy()
+  })
+
+  it('places summaries and native configuration before collapsed documentation and keeps source', () => {
+    const b = renderTab(
+      { packages: [pkg()] },
+      { bundles: new Set(['dsh-better-sidebar']) },
+      {
+        'plugins.detail.summary:': (_view, owner) => <section aria-label="Maintainer">{subjectOf(owner)?.kind}</section>,
+        'plugins.bundle.config:dsh-better-sidebar': () => <form aria-label="Bundle settings" />,
+      },
+    )
+    fireEvent.click(screen.getByRole('button', { name: en.openDetail.replace('{name}', 'dsh-better-sidebar') }))
+    b.setDetails({ [bundleDetailKey('dsh-better-sidebar', '0.16.0', 'en')]: {
+      status: 'ready', detail: { status: 'found', origin: 'locale', path: 'README.md', markdown: '# Plugin guide' },
+    } })
+    const summary = screen.getByRole('region', { name: 'Maintainer' })
+    const config = screen.getByRole('form', { name: 'Bundle settings' })
+    const docs = screen.getByRole('button', { name: en.detailTitle })
+    expect(summary.textContent).toBe('bundle')
+    expect(summary.compareDocumentPosition(config) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(config.compareDocumentPosition(docs) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(docs.getAttribute('aria-expanded')).toBe('false')
+    expect(screen.queryByRole('heading', { name: 'Plugin guide' })).toBeNull()
+    fireEvent.click(docs)
+    expect(config.compareDocumentPosition(screen.getByRole('heading', { name: 'Plugin guide' })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    fireEvent.click(docs)
+    b.setDetails({ [bundleDetailKey('dsh-better-sidebar', '0.16.0', 'en')]: { status: 'error', failure: 'network' } })
+    expect(screen.getByRole('alert').textContent).toBe(en.detailNetwork)
+    fireEvent.click(screen.getByRole('button', { name: en.retry }))
+    expect(b.actions.retryDetail).toHaveBeenCalledWith('dsh-better-sidebar', '0.16.0', 'en', false)
+    expect(document.querySelector('[data-plugin-source]')).not.toBeNull()
+  })
+
   it('shows no tabs without contributions, and switches between Installed and a contributed tab', () => {
     const { actions, navigation, setTabs } = renderTab({ packages: [pkg()] }, {}, {
       'plugins.tab:discover': (_view, owner) => {
@@ -499,10 +572,12 @@ describe('PluginManagerPage', () => {
     expect(document.querySelector('[data-plugin-package="dsh-better-sidebar"]')).not.toBeNull()
   })
 
-  it('shows a bundle\'s detail document first among its sections, and its failures with a retry', () => {
+  it('opens a bundle\'s collapsed documentation and shows failures with a retry', () => {
     const b = renderTab({ packages: [pkg()] })
     act(() => { b.navigation.actions.setView({ kind: 'package', name: 'dsh-better-sidebar' }) })
     expect(b.actions.loadDetail).toHaveBeenCalledWith('dsh-better-sidebar', '0.16.0', 'en', false)
+    expect(screen.queryByRole('status', { name: en.detailLoading })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: en.detailTitle }))
     expect(screen.getByRole('status', { name: en.detailLoading })).toBeTruthy()
     const key = bundleDetailKey('dsh-better-sidebar', '0.16.0', 'en')
     b.setDetails({ [key]: { status: 'ready', detail: { status: 'found', origin: 'locale', path: 'guide/DETAIL.md', markdown: '# Sidebar\n\n![shot](img/a.png)' } } })

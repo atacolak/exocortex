@@ -182,6 +182,19 @@ describe('Session Controller access', () => {
     }
   })
 
+  it('admits an exact list read through its Session role without granting global catalog access', async () => {
+    const { ctx } = await harness()
+    await ctx.plugin(TypertGatewayService)
+    guestPolicy(ctx, READS_SHARED)
+    vi.spyOn(ctx.sessionQuery, 'listSessions').mockRejectedValue(new Error('must not enumerate'))
+    await expect(guestCall(ctx, 'list', { _request: { sessionId: SHARED } }))
+      .resolves.toMatchObject({ items: [{ sessionId: SHARED }] })
+    await expect(guestCall(ctx, 'list', { _request: { sessionId: PRIVATE } }))
+      .rejects.toMatchObject({ code: 'remote-access/denied', details: { reason: 'no-allow' } })
+    await expect(guestCall(ctx, 'list', { _request: {} }))
+      .rejects.toMatchObject({ code: 'remote-access/denied', details: { reason: 'no-allow' } })
+  })
+
   it('lets a global role call session/list and lists only the Sessions a Session role admits', async () => {
     const { ctx, as } = await harness()
     await ctx.plugin(TypertGatewayService)

@@ -106,10 +106,13 @@ export interface ISessions {
   refreshProjections(sessionId: SessionId): Promise<void>
 
   /**
-   * Refresh the Host-authoritative Session list.
-   * @returns completion of the current or newly started Session-list refresh.
+   * Refresh the Host-authoritative catalog, or admit one exact Host summary.
+   * A targeted refresh preserves other rows and does not open history or an Agent.
+   * @param sessionId - exact identity; omission preserves full-refresh behavior.
+   * @returns when the requested row is immediately retainable, or the full refresh settles.
+   * @throws when a targeted read fails, is superseded, or does not return exactly the requested identity.
    */
-  refresh(): Promise<void>
+  refresh(sessionId?: SessionId): Promise<void>
   /**
    * Search the Host's visible message-content index. Results stay
    * request-local; the list snapshot remains the metadata authority.

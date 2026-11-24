@@ -5,7 +5,7 @@
  * `session/follow` opening snapshot keeps serving them.
  */
 
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-preset-registry'
@@ -141,5 +141,48 @@ describe('session.list summary payload', () => {
       expect(row?.projections?.values, `attempt ${String(attempt)}`).not.toHaveProperty('todos')
       expect(row?.projections?.values, `attempt ${String(attempt)}`).not.toHaveProperty('imageLimits')
     }
+  })
+})
+
+describe('targeted session.list', () => {
+  it('returns exactly one live summary without scanning the catalog or opening history', async () => {
+    const { ctx } = await harness()
+    const { id } = seedSession(ctx)
+    seedSession(ctx)
+    const query = vi.spyOn(ctx.sessionQuery, 'listSessions')
+      .mockRejectedValue(new Error('targeted reads must not scan the catalog'))
+
+    const response = await (await remote(ctx)).list({ sessionId: id })
+    expect(response.ok).toBe(true)
+    if (!response.ok) return
+    expect(response.value.items).toHaveLength(1)
+    expect(response.value.items[0]).toMatchObject({
+      sessionId: id, cwd: '/workspace', running: false, blank: false,
+      projections: { values: { sessionListMetadata: { blank: false } } },
+    })
+    expect(response.value.items[0]?.projections?.values).not.toHaveProperty('turnOutline')
+    expect(query).not.toHaveBeenCalled()
+    expect(ctx.agents.get(id)).toBeUndefined()
+  })
+
+  it('reads only the exact cold header and refuses a missing identity without activating it', async () => {
+    const { ctx } = await harness()
+    const id = SessionId('cold-native')
+    const stat = vi.fn(async (requested: SessionId) => requested === id ? {
+      header: { id, cwd: '/cold', createdAt: 1 },
+      revision: 'cold-revision', formatStatus: 'current',
+    } : undefined)
+    const forbidden = () => { throw new Error('targeted header read must not open or enumerate history') }
+    ctx.provide('sessionPersistence', { stat, list: forbidden, open: forbidden } as never)
+
+    const response = await (await remote(ctx)).list({ sessionId: id })
+    expect(response).toMatchObject({ ok: true, value: { items: [{
+      sessionId: id, cwd: '/cold', running: false, blank: false, agentAvailable: false, formatStatus: 'current',
+    }] } })
+    expect(stat.mock.calls.map(([requested]) => requested)).toEqual([id])
+    expect(ctx.sessions.get(id)).toBeUndefined()
+    expect(ctx.agents.get(id)).toBeUndefined()
+    await expect((await remote(ctx)).list({ sessionId: SessionId('missing') }))
+      .resolves.toMatchObject({ ok: false, error: { code: 'session/not-found' } })
   })
 })

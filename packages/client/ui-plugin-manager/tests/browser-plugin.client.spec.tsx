@@ -262,9 +262,10 @@ describe('ui-plugin-manager browser plugin', () => {
     // The page declares the slots a plugin's configuration arrives through, and binds their projection beside its state.
     expect(b.slots.spec('plugins.add.actions')).toMatchObject({ kind: 'list', scope: 'root' })
     expect(b.slots.spec('plugins.item')).toMatchObject({ kind: 'list', scope: 'root' })
+    expect(b.slots.spec('plugins.list')).toMatchObject({ kind: 'single', scope: 'root' })
     expect(b.slots.spec('plugins.bundle.config')).toMatchObject({ kind: 'keyed', scope: 'root' })
     expect(b.slots.spec('plugins.row.config')).toMatchObject({ kind: 'keyed', scope: 'root' })
-    for (const name of ['plugins.detail.actions', 'plugins.detail.badge', 'plugins.detail.section'] as const) {
+    for (const name of ['plugins.detail.actions', 'plugins.detail.badge', 'plugins.detail.summary', 'plugins.detail.section'] as const) {
       expect(b.slots.spec(name)).toMatchObject({ kind: 'list', scope: 'root' })
     }
     const injected: object = entry.inject!()

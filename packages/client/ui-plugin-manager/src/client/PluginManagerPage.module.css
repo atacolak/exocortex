@@ -1494,6 +1494,17 @@ label.registryOption {
   margin-top: 32px;
 }
 
+/* The native document keeps its own read/retry state while its body is folded. */
+.documentation {
+  gap: 12px;
+}
+
+.documentationError {
+  margin-inline-start: 8px;
+  color: var(--dsw-alias-state-error-primary);
+  font-size: 12px;
+}
+
 .detailSection {
   display: flex;
   flex-direction: column;

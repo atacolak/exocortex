@@ -1,8 +1,9 @@
 /** A bundle's long description on its page: the Markdown document the Host reads for it. */
-import { useEffect, useMemo, type ReactNode } from 'react'
-import { DetailDocument, detailDocumentState, useDetailDocumentLabels, type MarkdownPathImages } from '@deepseek-ai/dsh-client-ui-primitives'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { Button, DetailDocument, DisclosureRow, IconChevronRightOutlineRegular, detailDocumentState, useDetailDocumentLabels, type MarkdownPathImages } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import { bundleDetailKey, type BundleDetailFailure, type BundleDetailsState } from './detail-store.ts'
+import css from './PluginManagerPage.module.css'
 
 type Translate = PropsLocale<'pluginManager'>['t']
 
@@ -31,11 +32,13 @@ export interface BundleDetailSectionProps {
 
 /**
  * Read and render a bundle's detail document in the active language; relative images load from the Host beside it.
+ * The existing disclosure keeps documentation secondary; its read state stays with this owner while collapsed.
  * @param props - the bundle, the language, the reads, and the page's callbacks.
- * @returns the section, or null when the bundle has no document.
+ * @returns the collapsed documentation section, or null when the bundle has no document.
  */
 export function BundleDetailSection(props: BundleDetailSectionProps): ReactNode {
   const { name, version, fromNpm, language, details, t, load, retry, image } = props
+  const [expanded, setExpanded] = useState(false)
   const key = bundleDetailKey(name, version, language)
   const state = details[key]
   useEffect(() => { load(name, version, language, fromNpm) }, [key, details])
@@ -52,5 +55,22 @@ export function BundleDetailSection(props: BundleDetailSectionProps): ReactNode 
   const shown = detailDocumentState(state?.status === 'error'
     ? { status: 'error', message: t(FAILURE_KEYS[state.failure]) }
     : state === undefined || state.status === 'loading' ? state : { status: 'ready', markdown: detail?.status === 'found' ? detail.markdown : undefined })
-  return <DetailDocument state={shown} labels={labels} images={images} onRetry={() => { retry(name, version, language, fromNpm) }} />
+  if (shown.status === 'none') return null
+  const retryRead = (): void => { retry(name, version, language, fromNpm) }
+  return (
+    <DisclosureRow
+      className={css.documentation}
+      icon={<IconChevronRightOutlineRegular size={14} />}
+      title={t('detailTitle')}
+      open={expanded}
+      expandable
+      expandOnRowClick
+      previewChevron={false}
+      onToggle={() => { setExpanded(value => !value) }}
+      collapsedContent={shown.status === 'error' ? <span className={css.documentationError} role="alert">{shown.message}</span> : undefined}
+      headerAccessory={!expanded && shown.status === 'error' ? <Button variant="outline" size="sm" onClick={retryRead}>{t('retry')}</Button> : undefined}
+    >
+      <DetailDocument state={shown} labels={labels} images={images} onRetry={retryRead} />
+    </DisclosureRow>
+  )
 }

@@ -32,7 +32,7 @@ import {
   type PluginManagerFace, type PluginManagerState, type RegistryChoice, type VersionCheck,
 } from './manager-store.ts'
 import { managementText, noticeText, packageText, registryText, restartText, rowText, type Translate } from './presentation.ts'
-import type { PluginPackageRef, PluginRowRef, PluginsSubject } from './slot-contract.ts'
+import type { PluginListEntry, PluginPackageRef, PluginRowRef, PluginsSubject } from './slot-contract.ts'
 import type { ConfigPageForm } from './slot-contract.ts'
 import { UpdateDialog, VersionSection } from './versions.tsx'
 import { BundleDetailSection } from './BundleDetailSection.tsx'
@@ -44,8 +44,8 @@ export type PluginManagerPageProps =
   & PropsLocale<'pluginManager'>
   & PropsRenderSlots<
     | 'plugins.item' | 'plugins.bundle.config' | 'plugins.row.config' | 'plugins.bundle.activation'
-    | 'plugins.add.actions' | 'plugins.tab'
-    | 'plugins.detail.actions' | 'plugins.detail.badge' | 'plugins.detail.section'
+    | 'plugins.add.actions' | 'plugins.tab' | 'plugins.list'
+    | 'plugins.detail.actions' | 'plugins.detail.badge' | 'plugins.detail.summary' | 'plugins.detail.section'
   >
   & InjectFace<PluginManagerFace & PluginHeaderLayoutFace>
   & PropsStore<ReturnType<typeof createNavigationStore>>
@@ -637,6 +637,7 @@ function ItemDetail({ item, t, onBack, renderSlot, form }: {
         <p className={css.detailDesc}>{renderSlot('plugins.item', { view: 'summary' }, { only: item.id })}</p>
       </div>
       <div className={css.detailSections}>
+        {renderSlot('plugins.detail.summary', { subject })}
         <section className={css.detailSection} data-plugin-config>
           {renderSlot('plugins.item', { view: 'page', form }, { only: item.id })}
         </section>
@@ -684,6 +685,7 @@ function RowDetail({ pkg, row, t, resolveText, onBack, renderSlot, form }: {
       <MetadataError error={row.meta?.error} t={t} />
       <RuntimeError error={row.diagnostic} t={t} />
       <div className={css.detailSections} data-plugin-config>
+        {renderSlot('plugins.detail.summary', { subject })}
         {renderSlot('plugins.row.config', { view: 'page', form }, { entryKey: key })}
         {renderSlot('plugins.detail.section', { subject })}
       </div>
@@ -791,7 +793,7 @@ function PackageDetail({
       {pkg.error === undefined ? null : <p className={css.reason} role="status">{t('reasonLabel')}: {managementText(pkg.error, t)}</p>}
       {pkg.readOnlyReason === undefined ? null : <p className={css.reason} role="status">{managementText({ code: pkg.readOnlyReason }, t)}</p>}
       <div className={css.detailSections}>
-        {detail}
+        {renderSlot('plugins.detail.summary', { subject })}
         {configured
           ? (
             <section className={css.detailSection} data-plugin-config>
@@ -799,6 +801,7 @@ function PackageDetail({
             </section>
           )
           : null}
+        {detail}
         {pkg.availability === 'missing' ? null : (<RowsSection
           rows={pkg.rows}
           t={t}
@@ -1594,14 +1597,15 @@ export function PluginManagerPage(props: PluginManagerPageProps): ReactNode {
   const onInstalled = tab === INSTALLED_TAB
   const showsCards = !onInstalled || (openPkg === undefined && openItem === undefined)
   const detailFromMore = (view.kind === 'package' || view.kind === 'row')
-    && (view.from === 'more' || (openPkg !== undefined && MORE_BUNDLES.includes(view.name) && !pinned.has(view.name)))
+    && (view.from === 'more' || (view.from !== 'list' && openPkg !== undefined && MORE_BUNDLES.includes(view.name) && !pinned.has(view.name)))
   const showsMoreList = onInstalled && showsCards && (view.kind === 'more' || detailFromMore)
   const showsMainList = showsCards && !showsMoreList
   const installedCards = onInstalled && showsCards
   const openPkgInMore = openPkg !== undefined && openPkg.official && detailFromMore
   const returnTab = view.kind === 'package' || view.kind === 'row' ? view.returnTab : undefined
   const backToMore = openPkgInMore && returnTab === undefined
-  const pkgOrigin = returnTab !== undefined ? { returnTab } : backToMore ? { from: 'more' as const } : {}
+  const pkgOrigin = returnTab !== undefined ? { returnTab } : backToMore ? { from: 'more' as const }
+    : (view.kind === 'package' || view.kind === 'row') && view.from === 'list' ? { from: 'list' as const } : {}
   // The Installed tab's panel, whatever it currently shows; the More list is not a tab panel.
   const installedPanel = tabs.length === 0 || showsMoreList
     ? {}
@@ -1622,7 +1626,7 @@ export function PluginManagerPage(props: PluginManagerPageProps): ReactNode {
   const updates = updatesNote(mine, state.versions, t)
   const updatePkg = state.update === null ? undefined : state.packages.find(pkg => pkg.name === state.update?.packageName)
   const packageBusy = (pkg: PackageView): boolean => bundleBusy(state, pkg.name)
-  const packageCard = (pkg: PackageView): ReactNode => (
+  const packageCard = (pkg: PackageView, from?: 'list'): ReactNode => (
     <PackageCard
       key={pkg.name}
       pkg={pkg}
@@ -1631,13 +1635,20 @@ export function PluginManagerPage(props: PluginManagerPageProps): ReactNode {
       busy={packageBusy(pkg)}
       highlighted={state.highlight === pkg.name}
       newer={versionUpdate(state.versions[pkg.name])}
-      onOpen={() => { setActivation(null); setView({ kind: 'package', name: pkg.name, ...showsMoreList ? { from: 'more' } : {} }) }}
+      onOpen={() => { setActivation(null); setView({ kind: 'package', name: pkg.name, ...showsMoreList ? { from: 'more' } : from === undefined ? {} : { from } }) }}
       onSetEnabled={(enabled) => { setBundleEnabled(pkg.name, enabled) }}
     />
   )
-  const basicCards = ledger.items.map(item => (
-    <ItemCard key={`item:${item.id}`} item={item} t={t} renderSlot={renderSlot} onOpen={() => { setView({ kind: 'item', id: item.id }) }} />
-  ))
+  const basicEntries: readonly PluginListEntry[] = ledger.items.map(item => ({
+    key: `item:${item.id}`,
+    label: item.label,
+    content: <ItemCard key={`item:${item.id}`} item={item} t={t} renderSlot={renderSlot} onOpen={() => { setView({ kind: 'item', id: item.id }) }} />,
+  }))
+  const basicCards = basicEntries.map(entry => entry.content)
+  const listEntries: readonly PluginListEntry[] = [
+    ...basicEntries,
+    ...listed.map(pkg => ({ key: `package:${pkg.name}`, label: packageText(pkg, resolveText).title, content: packageCard(pkg, 'list') })),
+  ]
   const renderGroup = (id: 'basic' | 'extensions' | 'bundles', heading: string, cards: readonly ReactNode[]): ReactNode => {
     const offersMore = id === 'extensions' && more.length > 0
     if (cards.length === 0 && !offersMore) return null
@@ -1795,7 +1806,7 @@ export function PluginManagerPage(props: PluginManagerPageProps): ReactNode {
               renderSlot={renderSlot}
               inMore={backToMore}
               detail={(
-                <BundleDetailSection name={openPkg.name} version={openPkg.version} fromNpm={openPkg.availability === 'missing'}
+                <BundleDetailSection key={openPkg.name} name={openPkg.name} version={openPkg.version} fromNpm={openPkg.availability === 'missing'}
                   language={language} details={bundleDetails} t={t}
                   load={props.loadDetail} retry={props.retryDetail} image={props.detailImage} />
               )}
@@ -1824,14 +1835,18 @@ export function PluginManagerPage(props: PluginManagerPageProps): ReactNode {
               <div className={css.installedPanel} {...installedPanel}>
                 {showsMoreList ? (
                   <section className={css.group} data-plugin-scope="global" data-plugin-group="more">
-                    <ul className={css.cards}>{more.map(packageCard)}</ul>
+                    <ul className={css.cards}>{more.map(pkg => packageCard(pkg))}</ul>
                   </section>
                 ) : (
-                  <>
-                    {renderGroup('basic', t('basicTitle'), basicCards)}
-                    {renderGroup('extensions', t('extensionsTitle'), extensions.map(packageCard))}
-                    {renderGroup('bundles', t('bundlesTitle'), mine.map(packageCard))}
-                  </>
+                  renderSlot('plugins.list', { entries: listEntries }, {
+                    fallback: (
+                      <>
+                        {renderGroup('basic', t('basicTitle'), basicCards)}
+                        {renderGroup('extensions', t('extensionsTitle'), extensions.map(pkg => packageCard(pkg)))}
+                        {renderGroup('bundles', t('bundlesTitle'), mine.map(pkg => packageCard(pkg)))}
+                      </>
+                    ),
+                  })
                 )}
                 {/* A failed package read trails the groups it left incomplete: right under the groups on a
                     first-load failure, and after the kept cards when a refresh fails over stale data. */}

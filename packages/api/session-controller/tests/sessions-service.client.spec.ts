@@ -146,6 +146,99 @@ describe('list store projection', () => {
   })
 })
 
+describe('targeted catalog refresh', () => {
+  it('admits one authoritative identity for immediate retain without replacing other rows', async ({ bench }) => {
+    const b = bench()
+    await feedList(b, [{ id: 'existing' }])
+    b.mock.remote.session.list.mockImplementation(async (request) => ok({
+      items: request.sessionId === sid('native') ? [{
+        sessionId: sid('native'), updatedAt: 2, running: false, blank: true,
+        agentAvailable: true, cwd: '/native',
+      }] : [],
+    }))
+
+    await b.svc.refresh(sid('native'))
+
+    expect(new Set(b.svc.list.getSnapshot().ids)).toEqual(new Set(['existing', 'native']))
+    expect(b.svc.list.getSnapshot().byId[sid('native')]?.cwd).toBe('/native')
+    using reference = b.svc.retain(sid('native'), { source: 'controllerOperation' })
+    await reference.ready
+    expect(reference.binding.session.getSnapshot().openState).toBe('open')
+    expect(b.svc.retainInfo(sid('native')).getSnapshot().referenceCount).toBe(1)
+  })
+
+  it.for(['missing', 'foreign', 'duplicate', 'failed'] as const)(
+    'refuses a %s targeted response without inventing membership or dropping existing rows',
+    async (response, { bench }) => {
+      const b = bench()
+      await feedList(b, [{ id: 'existing' }])
+      const row = {
+        sessionId: sid(response === 'foreign' ? 'foreign' : 'native'),
+        updatedAt: 2, running: false, blank: true, agentAvailable: true,
+      }
+      b.mock.remote.session.list.mockResolvedValue(response === 'failed'
+        ? { ok: false, error: { code: 'session/not-found', message: 'missing', details: { sessionId: sid('native') } } }
+        : ok({ items: response === 'missing' ? [] : response === 'duplicate' ? [row, row] : [row] }))
+
+      await expect(b.svc.refresh(sid('native'))).rejects.toBeDefined()
+      expect(b.svc.list.getSnapshot().ids).toEqual(['existing'])
+      expect(() => b.svc.retain(sid('native'), { source: 'controllerOperation' })).toThrow('unknown session')
+      expect(b.svc.list.getSnapshot().byId[sid('foreign')]).toBeUndefined()
+    },
+  )
+
+  it('shares one target read, replays newer state, and survives an older full baseline', async ({ bench }) => {
+    const b = bench()
+    await feedList(b, [{ id: 'existing' }])
+    const full = Promise.withResolvers<Awaited<ReturnType<typeof b.mock.remote.session.list>>>()
+    const target = Promise.withResolvers<Awaited<ReturnType<typeof b.mock.remote.session.list>>>()
+    b.unblock.push(() => { full.resolve(ok({ items: [] })); target.resolve(ok({ items: [] })) })
+    let targetReads = 0
+    b.mock.remote.session.list.mockImplementation(request => {
+      if (request.sessionId === sid('native')) { targetReads++; return target.promise }
+      return full.promise
+    })
+    const refreshing = b.svc.refresh()
+    const first = b.svc.refresh(sid('native'))
+    const second = b.svc.refresh(sid('native'))
+    b.svc.handleSessionStatus(sid('native'), true)
+    target.resolve(ok({ items: [{
+      sessionId: sid('native'), updatedAt: 2, running: false, blank: true, agentAvailable: true,
+    }] }))
+    await Promise.all([first, second])
+    expect(targetReads).toBe(1)
+    expect(b.svc.list.getSnapshot().byId[sid('native')]).toMatchObject({ running: true, blank: false })
+    full.resolve(ok({ items: [{
+      sessionId: sid('existing'), updatedAt: 1, running: false, blank: false, agentAvailable: true,
+    }] }))
+    await refreshing
+    expect(new Set(b.svc.list.getSnapshot().ids)).toEqual(new Set(['existing', 'native']))
+    expect(b.svc.list.getSnapshot().byId[sid('native')]?.running).toBe(true)
+  })
+
+  it.for(['removed', 'reconnected', 'disposed'] as const)(
+    'does not admit a late target response after the owner is %s',
+    async (interruption, { bench }) => {
+      const b = bench()
+      const target = Promise.withResolvers<Awaited<ReturnType<typeof b.mock.remote.session.list>>>()
+      b.unblock.push(() => { target.resolve(ok({ items: [] })) })
+      b.mock.remote.session.list.mockImplementation(request => request.sessionId
+        ? target.promise : Promise.resolve(ok({ items: [] })))
+      const pending = b.svc.refresh(sid('native'))
+      const rejection = expect(pending).rejects.toBeDefined()
+      if (interruption === 'removed') b.svc.handleSessionRemoved(sid('native'))
+      if (interruption === 'reconnected') b.svc.handleConnected()
+      const disposal = interruption === 'disposed' ? b.ctx.fiber.dispose() : undefined
+      target.resolve(ok({ items: [{
+        sessionId: sid('native'), updatedAt: 2, running: false, blank: true, agentAvailable: true,
+      }] }))
+      await rejection
+      await disposal
+      expect(b.svc.list.getSnapshot().byId[sid('native')]).toBeUndefined()
+    },
+  )
+})
+
 describe('search', () => {
   it('delegates transient content search without changing the list snapshot', async ({ bench }) => {
     const b = bench()

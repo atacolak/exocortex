@@ -112,6 +112,8 @@ export class SessionManager {
   private listInflight: Promise<void> | null = null
   /** Active list request's mutation log; its identity also fences completion after reconnect. */
   private listMutations: SessionListMutation[] | null = null
+  /** Exact summary reads share only their pending request within this Host generation. */
+  private readonly summaryInflight = new Map<SessionId, ProjectionInflight & { mutations: SessionListMutation[] }>()
   private readonly addresses = new Map<SessionId, SubagentAddress>()
   private readonly projectionLoads = new Map<SessionId, ProjectionLoad>()
   private readonly projectionInflight = new Map<SessionId, ProjectionInflight>()
@@ -211,6 +213,10 @@ export class SessionManager {
     this.listMutations = null
     this.listInflight = null
     this.engagedSessions.clear()
+    const summaries = [...this.summaryInflight.values()]
+    for (const { controller } of summaries) controller.abort()
+    this.summaryInflight.clear()
+    await Promise.allSettled(summaries.map(read => read.promise))
     const reads = [...this.projectionInflight.values()]
     for (const { controller } of reads) controller.abort()
     this.projectionInflight.clear()
@@ -414,6 +420,40 @@ export class SessionManager {
 
   // ---- List API ----
 
+  /**
+   * Admit one exact Host summary without replacing the catalog or opening history.
+   * @param sessionId - identity already supplied by an authoritative Host operation.
+   * @returns when the requested identity is catalogued.
+   */
+  refreshSummary(sessionId: SessionId): Promise<void> {
+    if (this.disposed) return Promise.reject(new Error('sessions.refresh: service disposed'))
+    const pending = this.summaryInflight.get(sessionId)
+    if (pending !== undefined) return pending.promise
+    const controller = new AbortController()
+    const mutations: SessionListMutation[] = []
+    const promise = Promise.resolve().then(async () => {
+      try {
+        controller.signal.throwIfAborted()
+        const result = await this.remote.session.list({ sessionId }, controller.signal)
+        controller.signal.throwIfAborted()
+        if (!result.ok) throw result.error
+        const summary = result.value.items[0]
+        if (result.value.items.length !== 1 || summary?.sessionId !== sessionId) {
+          throw new Error(`sessions.refresh: expected one authoritative summary for ${sessionId}`)
+        }
+        const current = mutations.reduce(applyMutation, [summary])[0]
+        if (current === undefined) throw new Error(`sessions.refresh: session removed ${sessionId}`)
+        this.summaryInflight.delete(sessionId)
+        this.handleSessionAdded(current)
+        this.sessions.get(sessionId)?.handleRunning(current.running)
+      } finally {
+        if (this.summaryInflight.get(sessionId)?.controller === controller) this.summaryInflight.delete(sessionId)
+      }
+    })
+    this.summaryInflight.set(sessionId, { promise, controller, mutations })
+    return promise
+  }
+
   /** Full refresh via session.list (single-flight within one Host generation). */
   refreshList(): Promise<void> {
     if (this.listInflight !== null) return this.listInflight
@@ -606,6 +646,8 @@ export class SessionManager {
   private recordMutation(mutation: SessionListMutation): void {
     if (this.disposed) return
     this.listMutations?.push(mutation)
+    const sessionId = 'summary' in mutation ? mutation.summary.sessionId : mutation.sessionId
+    this.summaryInflight.get(sessionId)?.mutations.push(mutation)
     this.summaries = applyMutation(this.summaries, mutation)
     this.notifier.markDirty()
   }
@@ -704,6 +746,8 @@ export class SessionManager {
    * @param sessionId - removed Session identity.
    */
   handleSessionRemoved(sessionId: SessionId): void {
+    this.summaryInflight.get(sessionId)?.controller.abort()
+    this.summaryInflight.delete(sessionId)
     const durableSubagent = this.subagentAddress(sessionId) !== undefined
       || this.summaries.some(summary => summary.sessionId === sessionId && summary.origin === 'subagent')
     this.recordMutation(durableSubagent
@@ -763,6 +807,8 @@ export class SessionManager {
    * Opened Session follow streams resume independently through API Gateway.
    */
   handleConnected(): void {
+    for (const { controller } of this.summaryInflight.values()) controller.abort()
+    this.summaryInflight.clear()
     for (const store of this.projectionStores.values()) store.clear()
     this.listMutations = null
     this.listInflight = null

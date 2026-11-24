@@ -240,9 +240,11 @@ export interface SkillListValue {
   readonly skills: readonly SkillEntry[]
 }
 
-/** Session list request. */
+/** Full catalog read, or one exact authoritative summary without enumeration. */
 export interface SessionListRequest {
   readonly cursor?: string
+  /** When present, return only this identity; a missing target is an error. */
+  readonly sessionId?: SessionId
 }
 
 /** Session list response value. */

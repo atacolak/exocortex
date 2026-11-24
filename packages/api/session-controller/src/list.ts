@@ -130,12 +130,25 @@ export class ApiSessionList {
   }
 
   /**
-   * Read every visible attached and persisted Session without activating an Agent.
+   * Read visible Session summaries without activating an Agent.
    * @param signal - optional cancellation for persistence reads and summary generation.
-   * @returns visible Session summaries ordered by activity.
+   * @param sessionId - exact identity to read without enumerating the catalog.
+   * @returns every visible summary, or one live/header-and-cache summary.
    */
-  async list(signal?: AbortSignal): Promise<SessionSummary[]> {
+  async list(signal?: AbortSignal, sessionId?: SessionId): Promise<SessionSummary[]> {
     signal?.throwIfAborted()
+    if (sessionId !== undefined) {
+      const live = this.ctx.sessions.get(sessionId)
+      if (live !== undefined) return [this.summaryFor(live)]
+      const stored = await this.ctx.get('sessionPersistence')?.stat(sessionId, { ...(signal === undefined ? {} : { signal }) })
+      signal?.throwIfAborted()
+      if (stored === undefined || stored.header.id !== sessionId || stored.header.cwd === undefined) {
+        throw new RemoteError('session/not-found', 'Session not found', { sessionId })
+      }
+      // A targeted read uses only this header and already-cached projections.
+      // The full-list title fallback may enumerate the persisted corpus.
+      return [this.summarizeCold({ ...stored, live: false, persisted: true })]
+    }
     const records = await this.ctx.sessionQuery.listSessions(signal)
     signal?.throwIfAborted()
     const items: SessionSummary[] = []

@@ -270,14 +270,14 @@ export class SessionController extends TypertRemoteService {
   }
 
   /**
-   * Read all visible Session rows without resuming an Agent.
-   * @param _request - reserved empty list request.
+   * Read visible Session rows without resuming an Agent.
+   * @param _request - optional exact identity; omission reads the full catalog.
    * @param signal - cancellation for persistence reads and summary generation.
-   * @returns visible Session summaries ordered by activity.
+   * @returns all visible summaries, or the one requested authoritative summary.
    */
   @Remote('list')
   async list(_request: SessionListRequest, signal: AbortSignal): Promise<SessionListValue> {
-    const items = await this.listState.list(signal)
+    const items = await this.listState.list(signal, _request.sessionId)
     return { items: items.filter(item => this.ctx.remoteAccess.allows({ kind: 'session', id: item.sessionId })) }
   }
 

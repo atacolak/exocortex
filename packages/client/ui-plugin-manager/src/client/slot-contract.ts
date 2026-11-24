@@ -2,8 +2,8 @@
  * The slots the Plugins page declares for other plugins. Three carry a
  * plugin's own configuration: the official plugins listed beside the official
  * bundles, one bundle's configuration on its page, and one row's configuration
- * opened from that row. Three more take contributions to any detail page —
- * its head actions, the badges beside its title, and the sections under its
+ * opened from that row. Four more take contributions to any detail page —
+ * its head actions, the badges beside its title, a summary before its body, and sections under its
  * own content — from a plugin that has something to say about bundles, rows,
  * or official plugins it does not own. A registrant merges this contract with
  * `import type` and registers through `ctx.slots`; it never imports this
@@ -18,6 +18,7 @@
  * all. The page draws the title, icon, and crumb itself.
  */
 
+import type { ReactNode } from 'react'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import type { BundleInfo } from '@deepseek-ai/dsh-api-remotes/client'
 import type { ConfigForm, ConfigFormSnapshot } from '@deepseek-ai/dsh-client-ui-settings/client'
@@ -28,6 +29,22 @@ export interface PluginConfigViewProps {
   readonly view: 'summary' | 'page'
   /** Host-owned configuration values and write actions for this page's entry. */
   readonly form?: ConfigPageForm | undefined
+}
+
+/** One existing card the Plugins page supplies to its list presentation. */
+export interface PluginListEntry {
+  /** Stable identity across locale and enabled-state changes. */
+  readonly key: string
+  /** The native card's title, already resolved in the active locale. */
+  readonly label: string
+  /** Native list-item content with the page's current state, actions, and detail navigation. */
+  readonly content: ReactNode
+}
+
+/** Native list contents supplied by the Plugins page; presentation owns no inventory or lifecycle state. */
+export interface PluginListProps {
+  /** Settings cards and all eligible bundles, including disabled optional bundles from More. */
+  readonly entries: readonly PluginListEntry[]
 }
 
 /** One row of a bundle as a detail contribution sees it. */
@@ -122,6 +139,12 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
      * through the owner's `install`.
      */
     'plugins.tab': { kind: 'list'; scope: 'root'; owner: PluginTabProps }
+    /**
+     * The main list presentation. Entries are the page's existing native cards:
+     * render their content in a list to preserve configuration, toggles, and navigation.
+     * Without a contribution the page retains its grouped list. The More list is unchanged.
+     */
+    'plugins.list': { kind: 'single'; scope: 'root'; owner: PluginListProps }
     /** Optional guidance after the user enables a bundle from the list, keyed by npm package name. */
     'plugins.bundle.activation': { kind: 'keyed'; scope: 'root'; owner: PluginActivationOwnerProps }
     /**
@@ -159,6 +182,12 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
      * tags the page draws itself, rendered with the page's subject.
      */
     'plugins.detail.badge': { kind: 'list'; scope: 'root'; owner: PluginDetailProps }
+    /**
+     * Summaries below a detail page's identity and status, before its README or
+     * configuration. Entries receive the same subject as other detail slots;
+     * they render null for subjects they do not own.
+     */
+    'plugins.detail.summary': { kind: 'list'; scope: 'root'; owner: PluginDetailProps }
     /**
      * Sections under a detail page's own content: after the source on a bundle's
      * page, after the configuration on a row's or an official plugin's page.

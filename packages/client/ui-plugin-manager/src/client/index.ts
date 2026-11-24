@@ -66,7 +66,7 @@ export type { PluginManagerFace } from './manager-store.ts'
 export type { PluginManagerLocaleKey } from './locales.ts'
 export type {
   ConfigPageForm, PluginActivationOwnerProps, PluginAddActionsProps, PluginTabInstall, PluginTabProps,
-  PluginConfigViewProps, PluginDetailProps, PluginPackageRef, PluginRowRef, PluginsSubject,
+  PluginConfigViewProps, PluginDetailProps, PluginListEntry, PluginListProps, PluginPackageRef, PluginRowRef, PluginsSubject,
 } from './slot-contract.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -139,11 +139,13 @@ export function apply(ctx: ClientContext): void {
           'plugins.add.actions': { kind: 'list', scope: 'root' },
           'plugins.tab': { kind: 'list', scope: 'root' },
           'plugins.item': { kind: 'list', scope: 'root' },
+          'plugins.list': { kind: 'single', scope: 'root' },
           'plugins.bundle.activation': { kind: 'keyed', scope: 'root' },
           'plugins.bundle.config': { kind: 'keyed', scope: 'root' },
           'plugins.row.config': { kind: 'keyed', scope: 'root' },
           'plugins.detail.actions': { kind: 'list', scope: 'root' },
           'plugins.detail.badge': { kind: 'list', scope: 'root' },
+          'plugins.detail.summary': { kind: 'list', scope: 'root' },
           'plugins.detail.section': { kind: 'list', scope: 'root' },
         },
       }, PluginManagerPage)
