@@ -161,21 +161,18 @@ export function apply(ctx: ClientContext): void {
     children: { 'sidebar.right.tab.menu.item': { kind: 'list', scope: 'session' } },
     inject: () => ({ hooks: { views: views.source } }),
   }, TabMenuContent)), 'sidebar: menu extensions')
-  // The Session on screen: the selected one while the Conversation fills the
-  // main column. Both sources notify before React renders their change, so the
-  // service names the arriving Session before any component of that commit
-  // reads it, and its seat mints the Session's store in the same render.
+  // The selected Session owns the Sidebar even while a global main panel is
+  // open. Selection notifies before React renders, so commands see the arriving
+  // Session before its seat mints the store in the same render. Changing the
+  // main panel neither replaces this owner nor creates another Session view.
   ctx.effect(() => {
     const sync = (): void => {
-      const selected = views.source.getSnapshot().find(view => view.selected)
-      show(layout.panelInfo.getSnapshot().activePanelId === null ? selected?.sessionId : undefined)
+      show(views.source.getSnapshot().find(view => view.selected)?.sessionId)
     }
     const unsubscribeViews = views.source.subscribe(sync)
-    const unsubscribePanel = layout.panelInfo.subscribe(sync)
     sync()
     return () => {
       unsubscribeViews()
-      unsubscribePanel()
       show(undefined)
     }
   }, 'ui-sidebar-right: on-screen Session')

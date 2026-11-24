@@ -155,16 +155,23 @@ describe('ui-sidebar-right apply', () => {
     expect(seat('conversation.session.header.corner').store).toBe(seat('rightbar.session').store)
   })
 
-  it('names the selected Session as on screen while the Conversation fills the main column', async () => {
+  it('keeps the selected Session as the sidebar host across global panels without inventing a selection', async () => {
     const { ctx, layout, current } = await boot()
+    onTestFinished(async () => { await ctx.fiber.dispose() })
+    layout.panelInfo.set({ activePanelId: 'plugins' })
     expect(ctx.sidebarRight.mounted.getSnapshot()).toBeUndefined()
     current.set({ key: SESSION })
     expect(ctx.sidebarRight.mounted.getSnapshot()).toBe(SESSION)
-    layout.panelInfo.set({ activePanelId: 'plugins' })
-    expect(ctx.sidebarRight.mounted.getSnapshot()).toBeUndefined()
     layout.panelInfo.set({ activePanelId: null })
     expect(ctx.sidebarRight.mounted.getSnapshot()).toBe(SESSION)
+    layout.panelInfo.set({ activePanelId: 'plugins' })
+    expect(ctx.sidebarRight.mounted.getSnapshot()).toBe(SESSION)
+    const other = 's-other' as SessionId
+    current.set({ key: other })
+    expect(ctx.sidebarRight.mounted.getSnapshot()).toBe(other)
     current.set({ key: undefined })
+    expect(ctx.sidebarRight.mounted.getSnapshot()).toBeUndefined()
+    layout.panelInfo.set({ activePanelId: null })
     expect(ctx.sidebarRight.mounted.getSnapshot()).toBeUndefined()
   })
 
@@ -221,8 +228,11 @@ describe('ui-sidebar-right apply', () => {
     injected.toggleFullscreen()
     expect(layoutOf()?.expanded).toBe(false)
     expect(layoutOf()?.mode).toBe('push')
-    // A global panel takes the Conversation's place: no Session is on screen.
+    // A global panel leaves the selected Session's adopted surface available.
     layout.panelInfo.set({ activePanelId: 'plugins' })
+    ctx.sidebarRight.toggleExpanded()
+    expect(layoutOf()?.expanded).toBe(true)
+    current.set({ key: undefined })
     expect(() => { ctx.sidebarRight.toggleExpanded() }).toThrow('no session surface is mounted')
   })
 

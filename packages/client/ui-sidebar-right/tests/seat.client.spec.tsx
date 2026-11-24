@@ -469,17 +469,28 @@ describe('RightbarSeat presentation', () => {
     expect(input.closest<HTMLElement>('[data-dockkit-pane]')?.dataset.dockkitPane).toBe(h.layout().activePaneId)
   })
 
-  it('hides for a global main panel and retains the Session sidebar state', async () => {
-    const h = await mountSeat()
-    h.open('retained.txt')
+  it('keeps the existing selected Session sidebar mounted and opens beside it from Plugins', async () => {
+    const h = await mountSeat(1440, true, 0, false, true)
+    const first = h.open('retained.txt')
+    const body = element(h.view.container, `[data-tab-body="${first.id}"]`)
     const retained = h.layout()
-    act(() => { h.runtime.panelInfo.set({ activePanelId: 'other-panel' as MainPanelId }) })
-    expect(element(h.view.container, '[data-sidebar-right-session]').hidden).toBe(true)
-    expect(h.frame.closeRightbar).toHaveBeenCalled()
+    act(() => { h.runtime.panelInfo.set({ activePanelId: 'plugins' as MainPanelId }) })
+    expect(element(h.view.container, '[data-sidebar-right-session]').hidden).toBe(false)
+    expect(h.controller.mounted.getSnapshot()).toBe(SESSION)
     expect(h.layout()).toBe(retained)
+    expect(element(h.view.container, `[data-tab-body="${first.id}"]`)).toBe(body)
+    const second = h.open('maintainer.txt')
+    expect(second.id).not.toBe(first.id)
+    expect(h.runtime.ctx.uiSession.adapter.current.getSnapshot().key).toBe(SESSION)
+    expect(h.runtime.panelInfo.getSnapshot().activePanelId).toBe('plugins')
+    expect(h.layout().tabs[first.id]).toBe(retained.tabs[first.id])
+    expect(h.view.container.querySelectorAll(`[data-tab-body="${first.id}"]`)).toHaveLength(1)
+    expect(element(h.view.container, `[data-tab-body="${first.id}"]`)).toBe(body)
+    const withSecond = h.layout()
     act(() => { h.runtime.panelInfo.set({ activePanelId: null }) })
-    expect(h.view.container.querySelector('[data-sidebar-right-panel]')).not.toBeNull()
-    expect(h.layout()).toBe(retained)
+    expect(element(h.view.container, '[data-sidebar-right-session]').hidden).toBe(false)
+    expect(h.layout()).toBe(withSecond)
+    expect(element(h.view.container, `[data-tab-body="${first.id}"]`)).toBe(body)
   })
 
   it('names the on-screen Session before a Conversation opener acts in the commit that returns from a global panel', async () => {
@@ -490,10 +501,10 @@ describe('RightbarSeat presentation', () => {
     act(() => { h.arm(true) })
     expect(h.opened).toHaveLength(1)
     expect(Object.values(h.layout().tabs).map(tab => tab.contentId)).toEqual(h.opened)
-    // A global panel takes the Conversation's place and hides the Sidebar.
+    // The main Conversation unmounts; its selected Session still owns the Sidebar.
     act(() => { h.runtime.panelInfo.set({ activePanelId: 'other-panel' as MainPanelId }) })
-    expect(element(h.view.container, '[data-sidebar-right-session]').hidden).toBe(true)
-    expect(h.controller.mounted.getSnapshot()).toBeUndefined()
+    expect(element(h.view.container, '[data-sidebar-right-session]').hidden).toBe(false)
+    expect(h.controller.mounted.getSnapshot()).toBe(SESSION)
     // Returning names the Session before the Conversation renders, so the
     // opener's effect in that commit opens into the Session's store.
     act(() => { h.runtime.panelInfo.set({ activePanelId: null }) })
@@ -619,7 +630,8 @@ describe('RightbarSeat presentation', () => {
   })
 
   it('marks the panel as opening from the opening render until its slide ends', async () => {
-    const h = await mountSeat()
+    const h = await mountSeat(1440, true, 0, false, true)
+    await h.runtime.sessions.add({ id: OTHER })
     const panel = element(h.view.container, '[data-sidebar-right-panel]')
     expect(panel.hasAttribute('data-sidebar-right-opening')).toBe(false)
     h.open()
@@ -637,11 +649,14 @@ describe('RightbarSeat presentation', () => {
     // Closing before the slide ends clears the mark.
     fireEvent.click(element(h.view.container, '[data-sidebar-right-toggle]'))
     expect(panel.hasAttribute('data-sidebar-right-opening')).toBe(false)
-    // Leaving the screen cancels the slide, so returning shows the items in place.
+    // A global main panel leaves the Sidebar's slide running in place.
     act(() => { h.actions.setExpanded(SESSION, true) })
     expect(panel.hasAttribute('data-sidebar-right-opening')).toBe(true)
-    act(() => { h.runtime.panelInfo.set({ activePanelId: 'other-panel' as MainPanelId }) })
-    act(() => { h.runtime.panelInfo.set({ activePanelId: null }) })
+    act(() => { h.runtime.panelInfo.set({ activePanelId: 'plugins' as MainPanelId }) })
+    expect(panel.hasAttribute('data-sidebar-right-opening')).toBe(true)
+    // Hiding this Session by selecting another cancels the slide; returning does not replay it.
+    await act(async () => { h.selectSession(OTHER) })
+    await act(async () => { h.selectSession(SESSION) })
     expect(panel.hasAttribute('data-sidebar-right-opening')).toBe(false)
   })
 
@@ -1152,23 +1167,24 @@ describe('the reveal glow', () => {
   })
 
   it('plays each request once and only on screen: a hidden Session ends its glow and never replays it, and a later mount skips it', async () => {
-    const h = await mountSeat()
+    const h = await mountSeat(1440, true, 0, false, true)
+    await h.runtime.sessions.add({ id: OTHER })
     h.open('a.txt')
     h.open('b.txt')
     const marked = (): HTMLElement[] => [...document.querySelectorAll<HTMLElement>('[data-sidebar-right-flash]')]
     h.open('b.txt')
     expect(marked()).toHaveLength(1)
-    act(() => { h.runtime.panelInfo.set({ activePanelId: 'other-panel' as MainPanelId }) })
+    await act(async () => { h.selectSession(OTHER) })
     expect(marked()).toEqual([])
-    act(() => { h.runtime.panelInfo.set({ activePanelId: null }) })
+    await act(async () => { h.selectSession(SESSION) })
     expect(marked()).toEqual([])
     // A request whose Session is hidden in the same commit is dropped, not deferred.
-    act(() => {
+    await act(async () => {
       h.controller.openResource('dsh-resource://file/session/s-test/b.txt')
-      h.runtime.panelInfo.set({ activePanelId: 'other-panel' as MainPanelId })
+      h.selectSession(OTHER)
     })
     expect(marked()).toEqual([])
-    act(() => { h.runtime.panelInfo.set({ activePanelId: null }) })
+    await act(async () => { h.selectSession(SESSION) })
     expect(marked()).toEqual([])
     // A second panel for the Session mounts after the request and leaves it unplayed.
     const again = h.runtime.renderSlot('rightbar', { width: 420, viewportWidth: 1440, canShow: true })

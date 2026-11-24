@@ -14,11 +14,11 @@ export interface RightbarRootInjected {
 
 type RootProps = PropsRuntime<'rightbar'> & PropsRenderSlots<'rightbar.session'> & InjectFace<RightbarRootInjected>
 
-function SessionView({ view, visible, SessionProvider, renderSlot, mountView, width, viewportWidth, canShow }:
+function SessionView({ view, SessionProvider, renderSlot, mountView, width, viewportWidth, canShow }:
   Pick<RootProps, 'SessionProvider' | 'renderSlot' | 'mountView' | 'width' | 'viewportWidth' | 'canShow'>
-  & { readonly view: SidebarSessionViewSnapshot; readonly visible: boolean }) {
+  & { readonly view: SidebarSessionViewSnapshot }) {
   useLayoutEffect(() => mountView(view.reference), [mountView, view.reference])
-  const active = visible && view.selected
+  const active = view.selected
   return <div className={css.session} hidden={!active} data-sidebar-right-session={view.sessionId}>
     <SessionProvider session={view.reference}>
       {renderSlot('rightbar.session', { width, viewportWidth, canShow, active, retainTab: view.retainTab })}
@@ -27,12 +27,11 @@ function SessionView({ view, visible, SessionProvider, renderSlot, mountView, wi
 }
 
 /**
- * Keep independent Session subtrees and hide those outside the selected Conversation.
+ * Keep the selected Session Sidebar visible beside any main panel; hide background Sessions.
  * @param props - frame geometry, view targets and the authorized Session renderer.
  * @returns the foreground and retained background Sidebars.
  */
-export function RightbarRoot({ usePanelInfo, useViews, ...props }: RootProps) {
-  const visible = usePanelInfo(info => info.activePanelId === null)
+export function RightbarRoot({ useViews, ...props }: RootProps) {
   const views = useViews(value => value)
-  return <>{views.map(view => <SessionView key={view.sessionId} {...props} view={view} visible={visible} />)}</>
+  return <>{views.map(view => <SessionView key={view.sessionId} {...props} view={view} />)}</>
 }
