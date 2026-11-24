@@ -161,6 +161,7 @@ interface ScopeRecord {
   binding: SessionBinding
   session: Session
   retention: SessionRetainInfo
+  activatingReferences: number
   live: boolean
 }
 
@@ -236,6 +237,7 @@ class ClientSessionReference implements SessionReference {
 
 /** Host catalog and local reference allocator; view selection remains outside the Controller. */
 export class ClientSessions implements ISessions {
+  readonly capabilities = Object.freeze(['passive-observation'] as const)
   /**
    * The wire schema's own result bound, re-exposed for presentation plugins as
    * injected data. Not per-connection state: the `session.search` response
@@ -291,7 +293,7 @@ export class ClientSessions implements ISessions {
     signal?.throwIfAborted()
     if (this.closed) throw new Error('Session Controller is disposed')
     const id = this.manager.resolveTarget(target)
-    const reference = this.retainScope(id, source)
+    const reference = this.retainScope(id, source, options.activate !== false)
     try {
       reference.attachOpening(this.manager.get(id).open(), signal)
       return reference
@@ -547,9 +549,11 @@ export class ClientSessions implements ISessions {
     return this.scopes.get(id)?.binding
   }
 
-  private retainScope(id: SessionId, source: SessionReferenceSource): ClientSessionReference {
+  private retainScope(id: SessionId, source: SessionReferenceSource, activate = false): ClientSessionReference {
     const record = this.scopes.get(id) ?? this.materializeScope(id)
     const previous = record.retention
+    if (activate) record.activatingReferences++
+    record.session.setActivationRequested(record.activatingReferences > 0)
     record.retention = Object.freeze({
       referenceCount: previous.referenceCount + 1,
       retainedBy: freezeRetainedBy({ ...previous.retainedBy, [source]: (previous.retainedBy[source] ?? 0) + 1 }),
@@ -557,13 +561,17 @@ export class ClientSessions implements ISessions {
     const reference = new ClientSessionReference(id, record, () => {
       if (!record.live) return
       const count = record.retention.referenceCount - 1
+      if (activate) record.activatingReferences--
       const { [source]: sourceCount = 0, ...otherSources } = record.retention.retainedBy
       const retainedBy = sourceCount > 1 ? { ...otherSources, [source]: sourceCount - 1 } : otherSources
       record.retention = count === 0
         ? EMPTY_RETAIN_INFO
         : Object.freeze({ referenceCount: count, retainedBy: freezeRetainedBy(retainedBy) })
       if (count === 0) this.retireScope(id, record)
-      else this.publishRetention(id)
+      else {
+        record.session.setActivationRequested(record.activatingReferences > 0)
+        this.publishRetention(id)
+      }
     })
     if (this.list.getSnapshot().byId[id] === undefined && this.manager.subagentAddress(id) !== undefined) {
       this.projectList()
@@ -615,6 +623,7 @@ export class ClientSessions implements ISessions {
       binding,
       session,
       retention: EMPTY_RETAIN_INFO,
+      activatingReferences: 0,
       live: true,
     }
     this.scopes.set(id, record)

@@ -4,12 +4,14 @@ import { describe, expect, onTestFinished, vi } from 'vitest'
 import type {
   SessionReference, SessionReferenceSource, SessionRetainInfo,
 } from '@deepseek-ai/dsh-api-session-controller/client'
-import { SessionId } from '@deepseek-ai/dsh-session/types'
+import { SessionId, SessionSeq } from '@deepseek-ai/dsh-session/types'
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import { ok, type RemoteMock } from '@deepseek-ai/dsh-remote-mock'
 import { createClientTest, webApp, type TestClient } from '@deepseek-ai/dsh-client-test-runtime/src/assembly/index.ts'
 import { ClientSessions } from '../src/client/sessions/service.ts'
-import { FOLLOW, followScript, type HistoryAnswer } from './remote/session.client.ts'
+import { FOLLOW, followScript, history, type HistoryAnswer } from './remote/session.client.ts'
+import type { SessionFollowRequest } from '../src/types.ts'
+import { ev } from './event-script.client.ts'
 
 declare module '@deepseek-ai/dsh-api-session-controller/client' {
   interface SessionReferenceSourceMap {
@@ -320,5 +322,121 @@ describe('ClientSessions.using', () => {
     const info: SessionRetainInfo = b.svc.retainInfo(ID).getSnapshot()
     expect(info).toEqual({ referenceCount: 0, retainedBy: {} })
     expect(b.svc.binding(ID)).toBeUndefined()
+  })
+})
+
+describe('passive Session observation', () => {
+  it('opens one shared passive history stream and advertises the finite owner capability', async ({ mock, start }) => {
+    const b = await bench(mock, start)
+    const requests: SessionFollowRequest[] = []
+    mock.stream(FOLLOW, followScript(request => { requests.push(request); return EMPTY_HISTORY }))
+    using card = b.svc.retain(ID, { source: workSource, activate: false })
+    using otherCard = b.svc.retain(ID, { source: workSource, activate: false })
+    await Promise.all([card.ready, otherCard.ready])
+    expect(requests.map(request => request.activate)).toEqual([false])
+    expect(requests[0]?.assistantStream).toBe(true)
+    expect(card.binding).toBe(otherCard.binding)
+    expect(card.binding.session.getSnapshot().openState).toBe('open')
+    expect(b.svc.capabilities).toEqual(['passive-observation'])
+    expect(Object.isFrozen(b.svc.capabilities)).toBe(true)
+  })
+
+  it('upgrades the same binding for chats and reconnects passively after the last activating reference releases', async ({ mock, start }) => {
+    const b = await bench(mock, start)
+    const requests: SessionFollowRequest[] = []
+    const answer = history([ev.turnStart(SessionSeq(0), 1), ev.user(SessionSeq(1), 'existing conversation')])
+    mock.stream(FOLLOW, followScript(request => { requests.push(request); return answer }))
+    using card = b.svc.retain(ID, { source: workSource, activate: false })
+    const binding = await card.ready
+    const source = binding.eventSource
+    const lengths: number[] = []
+    const stop = source.subscribe(() => { lengths.push(source.getSnapshot().entries.length) })
+    onTestFinished(stop)
+    const chat = b.svc.retain(ID, { source: viewSource })
+    const otherChat = b.svc.retain(ID, { source: viewSource })
+    onTestFinished(() => { chat.release(); otherChat.release() })
+    await Promise.all([chat.ready, otherChat.ready])
+    await vi.waitFor(() => { expect(requests).toHaveLength(2) })
+    expect(requests.map(request => request.activate)).toEqual([false, true])
+    expect(chat.binding).toBe(binding)
+    expect(otherChat.binding).toBe(binding)
+    expect(binding.eventSource).toBe(source)
+    expect(source.getSnapshot().entries.map(entry => entry.event.seq)).toEqual([0, 1])
+    chat.release()
+    await mock.streams.drained(FOLLOW)
+    expect(mock.streams.end(FOLLOW)).toBe(1)
+    await vi.waitFor(() => { expect(requests).toHaveLength(3) })
+    expect(requests[2]?.activate).toBe(true)
+    otherChat.release()
+    expect(b.svc.retainInfo(ID).getSnapshot().referenceCount).toBe(1)
+    await mock.streams.drained(FOLLOW)
+    expect(mock.streams.end(FOLLOW)).toBe(1)
+    await vi.waitFor(() => { expect(requests).toHaveLength(4) })
+    expect(requests[3]?.activate).toBe(false)
+    expect(card.binding).toBe(binding)
+    expect(binding.eventSource).toBe(source)
+    expect(source.getSnapshot().entries.map(entry => entry.event.seq)).toEqual([0, 1])
+    expect(lengths.every(length => length >= 2)).toBe(true)
+  })
+
+  it('upgrades an in-flight passive opening without replacing its binding or stranding either waiter', async ({ mock, start }) => {
+    const b = await bench(mock, start)
+    const requests: SessionFollowRequest[] = []
+    const entered = Promise.withResolvers<void>()
+    const blocked = Promise.withResolvers<Awaited<HistoryAnswer>>()
+    b.unblock.push(() => { blocked.resolve(EMPTY_HISTORY) })
+    mock.stream(FOLLOW, followScript(request => {
+      requests.push(request)
+      if (requests.length === 1) { entered.resolve(); return blocked.promise }
+      return EMPTY_HISTORY
+    }))
+    using card = b.svc.retain(ID, { source: workSource, activate: false })
+    const binding = card.binding
+    await entered.promise
+    using chat = b.svc.retain(ID, { source: viewSource })
+    await vi.waitFor(() => { expect(requests).toHaveLength(2) })
+    await expect(card.ready).resolves.toBe(binding)
+    await expect(chat.ready).resolves.toBe(binding)
+    expect(requests.map(request => request.activate)).toEqual([false, true])
+  })
+
+  it('cancels and releases one passive waiter without activating or aborting the surviving card', async ({ mock, start }) => {
+    const b = await bench(mock, start)
+    const requests: SessionFollowRequest[] = []
+    const opening = Promise.withResolvers<Awaited<HistoryAnswer>>()
+    b.unblock.push(() => { opening.resolve(EMPTY_HISTORY) })
+    mock.stream(FOLLOW, followScript(request => { requests.push(request); return opening.promise }))
+    const controller = new AbortController()
+    const cancelled = b.svc.retain(ID, { source: workSource, activate: false, signal: controller.signal })
+    using survivor = b.svc.retain(ID, { source: workSource, activate: false })
+    const reason = new Error('card left viewport')
+    const rejected = expect(cancelled.ready).rejects.toBe(reason)
+    controller.abort(reason)
+    await rejected
+    cancelled.release()
+    opening.resolve(EMPTY_HISTORY)
+    await survivor.ready
+    expect(requests.map(request => request.activate)).toEqual([false])
+    expect(b.svc.retainInfo(ID).getSnapshot().referenceCount).toBe(1)
+    expect(survivor.binding.session.getSnapshot().openState).toBe('open')
+  })
+
+  it('keeps a failed passive snapshot local and retries it without activating', async ({ mock, start }) => {
+    const b = await bench(mock, start)
+    const requests: SessionFollowRequest[] = []
+    mock.stream(FOLLOW, followScript(request => {
+      requests.push(request)
+      return Promise.reject(new RemoteError('session/not-found', 'snapshot unavailable', { sessionId: ID }))
+    }))
+    using card = b.svc.retain(ID, { source: workSource, activate: false })
+    const binding = await card.ready
+    expect(binding.session.getSnapshot().openState).toBe('error')
+    expect(b.svc.binding(ID)).toBe(binding)
+    mock.stream(FOLLOW, followScript(request => { requests.push(request); return EMPTY_HISTORY }))
+    using retry = b.svc.retain(ID, { source: workSource, activate: false })
+    await retry.ready
+    expect(retry.binding).toBe(binding)
+    expect(binding.session.getSnapshot().openState).toBe('open')
+    expect(requests.map(request => request.activate)).toEqual([false, false])
   })
 })

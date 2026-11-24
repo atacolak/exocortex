@@ -32,9 +32,20 @@ export interface SessionReference extends Disposable {
   release(): void
 }
 
-/** Consumer identity and optional cancellation of one acquisition waiter. */
+/** Optional Session behaviors that a loaded owner explicitly implements. */
+export type SessionCapability = 'passive-observation'
+
+/** Consumer identity, activation policy, and optional cancellation of one acquisition waiter. */
 export interface SessionRetainOptions {
   readonly source: SessionReferenceSource
+  /**
+   * Permit Host Agent activation while this reference is held; defaults to true.
+   * False observes history and live events without waking a cold Agent. Check
+   * `capabilities` for `passive-observation` before using false with a loaded owner.
+   * Active and passive references share one binding; an active reference upgrades its follow.
+   */
+  readonly activate?: boolean
+  /** Cancels this acquisition waiter; the caller still owns and must release the reference. */
   readonly signal?: AbortSignal | undefined
 }
 
@@ -47,12 +58,14 @@ export interface SessionRetainInfo {
 
 /** The sessions-service face injected as `ctx.sessions`. */
 export interface ISessions {
+  /** Finite, immutable opt-ins; absence means the loaded owner does not advertise them. */
+  readonly capabilities?: readonly SessionCapability[]
   /** Host catalog and local reference-source counts; navigation belongs to view owners. */
   readonly list: ObservableSnapshot<SessionListState>
   /**
    * Retain an exact Client generation and start its shared initial history opening.
    * @param target - known identity or durable direct-parent address.
-   * @param options - required consumer source and optional independent waiter cancellation.
+   * @param options - required source, activation permission, and optional independent waiter cancellation.
    * @returns an owned reference immediately; await `reference.ready` when the initial open attempt must settle first.
    */
   retain(target: SessionTarget, options: SessionRetainOptions): SessionReference

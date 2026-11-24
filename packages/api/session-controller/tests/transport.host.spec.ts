@@ -409,7 +409,7 @@ describe('Session history and Web follow', () => {
     await ctx.fiber.dispose()
   })
 
-  it('does not activate a prepared Session when the request omits activate', async () => {
+  it.each([undefined, false])('does not activate a prepared Session on passive follow (activate=%s)', async (activate) => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)
     const sessionId = SessionId('passive-activation-default')
@@ -431,7 +431,7 @@ describe('Session history and Web follow', () => {
     const promote = vi.fn()
     const { web } = controllers(ctx, promote)
     const abort = new AbortController()
-    const iterator = web.follow({ address: { kind: 'session', sessionId } }, abort.signal)[Symbol.asyncIterator]()
+    const iterator = web.follow({ address: { kind: 'session', sessionId }, ...activate === undefined ? {} : { activate } }, abort.signal)[Symbol.asyncIterator]()
     await expect(iterator.next()).resolves.toMatchObject({ value: { type: 'snapshot' } })
     expect(promote).not.toHaveBeenCalled()
     abort.abort()

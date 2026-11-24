@@ -98,6 +98,7 @@ export class Session implements SessionFace {
   private baseSeq = SessionLogOffset(0)
   private hasMore = false
   private openState: OpenState = 'cold'
+  private activationRequested = true
   private openError: RemoteFailure | null = null
   private openPromise: Promise<void> | null = null
   /** Bumped by stream replacement to invalidate an in-flight doOpen. Stale
@@ -413,6 +414,18 @@ export class Session implements SessionFace {
     return { ok: true, value: { matched: result.value !== undefined } }
   }
 
+  /**
+   * Update activation demand from the owning references. An upgrade reconnects
+   * the same journal without clearing its published window; a downgrade applies
+   * to subsequent reconnects and does not stop an already active Host Agent.
+   * @param activate - whether any current reference permits activation.
+   */
+  setActivationRequested(activate: boolean): void {
+    if (this.activationRequested === activate) return
+    this.activationRequested = activate
+    if (activate) this.events?.restart()
+  }
+
   /** First open: pull the tail page (idempotent — in-flight/already-open returns the existing promise). */
   open(): Promise<void> {
     if (this.openState === 'open') return Promise.resolve()
@@ -641,6 +654,7 @@ export class Session implements SessionFace {
     this.openError = null
     this.notifier.markDirty()
     const events = new SessionEventStream(this.remote, this.sessionAddress(), {
+      activate: () => this.activationRequested,
       publish: (change) => {
         if (generation !== this.openGeneration || this.events !== events) return
         this.acceptEventChange(change)

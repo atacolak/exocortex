@@ -98,6 +98,8 @@ export interface SessionControlStreamOptions {
 
 /** Domain sinks used by one addressed Session event journal. */
 export interface SessionEventStreamOptions {
+  /** Activation permission sampled for every physical follow, including reconnects; defaults to true. */
+  readonly activate?: () => boolean
   /** Apply one complete event-window change. */
   readonly publish: (change: SessionJournalChange) => void
   /** Observe a retryable carrier loss before reconnection. */
@@ -144,12 +146,12 @@ export class SessionEventStream extends RemoteJournalStream<
   /**
    * @param remote - generated Session namespace and Gateway stream factory.
    * @param address - durable ordinary-Session or direct-subagent address.
-   * @param options - Session event-window destinations.
+   * @param eventOptions - Session event-window destinations and activation policy.
    */
   constructor(
     private readonly remote: SessionRemotes,
     private readonly address: SessionAddress,
-    options: SessionEventStreamOptions,
+    private readonly eventOptions: SessionEventStreamOptions,
   ) {
     super(remote, {
       name: 'session event stream',
@@ -160,11 +162,11 @@ export class SessionEventStream extends RemoteJournalStream<
       last: historyRecordLastSeq,
       compare: (left, right) => left - right,
       follows: (left, right) => right === left + 1,
-      publish: (change) => { options.publish(toSessionJournalChange(change)) },
-      ...(options.carrierFailed === undefined
+      publish: (change) => { eventOptions.publish(toSessionJournalChange(change)) },
+      ...(eventOptions.carrierFailed === undefined
         ? {}
-        : { carrierFailed: options.carrierFailed }),
-      failed: options.failed,
+        : { carrierFailed: eventOptions.carrierFailed }),
+      failed: eventOptions.failed,
     })
   }
 
@@ -178,7 +180,7 @@ export class SessionEventStream extends RemoteJournalStream<
     let assistantRevision: number | undefined
     for await (const frame of this.remote.session.follow({
       address: this.address,
-      activate: true,
+      activate: this.eventOptions.activate?.() ?? true,
       assistantStream: true,
       ...this.repairRequest(request),
     }, signal)) {
