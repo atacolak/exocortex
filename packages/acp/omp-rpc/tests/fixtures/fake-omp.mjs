@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { appendFileSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -11,6 +11,8 @@ const transcriptPath = process.env.OMP_TEST_TRANSCRIPT
 const markers = process.env.OMP_TEST_MARKERS
 const sessionId = process.env.OMP_TEST_SESSION_ID ?? randomUUID()
 const toolDelayMs = Number(process.env.OMP_TEST_TOOL_DELAY_MS ?? '600')
+const toolGate = process.env.OMP_TEST_TOOL_GATE
+const bootId = randomUUID()
 if (publicationDir === undefined || transcriptPath === undefined || markers === undefined) {
   throw new Error('fake omp needs OMP_TEST_PUBLICATION_DIR, OMP_TEST_TRANSCRIPT, and OMP_TEST_MARKERS')
 }
@@ -68,6 +70,14 @@ function runTurn(promptId, text) {
     timestamp: stamp(),
     message: { role: 'user', content: [{ type: 'text', text }] },
   })
+  const openingMessage = {
+    role: 'assistant', provider: 'fake', model: 'fake', stopReason: 'toolUse',
+    usage: { input: 10, output: 5, totalTokens: 15 },
+    content: [
+      { type: 'text', text: 'Starting the slow tool.' },
+      { type: 'toolCall', id: 'call-slow', name: 'bash', arguments: { command: 'sleep 1' }, intent: 'run the slow tool' },
+    ],
+  }
   broadcast({ type: 'agent_start' })
   broadcast({ type: 'message_start', messageId: 'a1', message: { role: 'assistant' } })
   broadcast({
@@ -91,6 +101,7 @@ function runTurn(promptId, text) {
       ],
     },
   })
+  broadcast({ type: 'message_end', messageId: 'a1', message: openingMessage })
   broadcast({
     type: 'tool_execution_start',
     toolCallId: 'call-slow',
@@ -99,7 +110,7 @@ function runTurn(promptId, text) {
     intent: 'run the slow tool',
   })
   marker('tool-started')
-  setTimeout(() => {
+  const complete = () => {
     appendEntry({
       type: 'message',
       id: 'entry-t1',
@@ -131,14 +142,23 @@ function runTurn(promptId, text) {
     broadcast({ type: 'agent_end', isTerminal: true })
     streaming = false
     marker('turn-finished')
-  }, toolDelayMs)
+  }
+  if (toolGate === undefined) setTimeout(complete, toolDelayMs)
+  else {
+    const timer = setInterval(() => {
+      if (!existsSync(toolGate)) return
+      clearInterval(timer)
+      complete()
+    }, 5)
+  }
 }
 
 function answer(frame, socket) {
+  appendFileSync(join(markers, 'commands.jsonl'), JSON.stringify({ type: frame.type }) + '\n')
   const data = (() => {
     switch (frame.type) {
       case 'get_state':
-        return { sessionId, sessionFile: transcriptPath, cwd: process.cwd(), isStreaming: streaming, todoPhases: [] }
+        return { sessionId, sessionFile: transcriptPath, bootId, pid: process.pid, cwd: process.cwd(), isStreaming: streaming, todoPhases: [] }
       case 'get_available_models':
         return { models: [] }
       case 'get_available_commands':

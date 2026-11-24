@@ -26,6 +26,10 @@ interface OmpContent {
   readonly type?: string
   readonly text?: string
   readonly thinking?: string
+  readonly id?: string
+  readonly name?: string
+  readonly arguments?: unknown
+  readonly intent?: string
 }
 
 interface OmpAssistantMessage {
@@ -98,6 +102,20 @@ export type OmpToolEvent =
     readonly content: readonly OmpToolContentBlock[]
     readonly isError: boolean
   }
+
+/**
+ * Native mirror callbacks for one stream cycle. The owning Agent commits the
+ * completed assistant declaration before it accepts live tool lifecycles.
+ * Consumers without this capability retain the completed-cycle tool buffer.
+ */
+export interface OmpStreamObserver {
+  assistant(message: {
+    readonly tools: readonly Extract<OmpToolEvent, { kind: 'start' }>[]
+    readonly usage?: TokenUsage
+  }): void
+  /** Return false only for an already observed duplicate lifecycle frame. */
+  tool(event: OmpToolEvent): boolean
+}
 
 /** Terminal status carried by `prompt_result`, independent of its wire shape. */
 export interface OmpPromptOutcome {
@@ -323,7 +341,7 @@ export class OmpEventTranslator {
     const finish = chunks.at(-1)
     if (finish?.type === 'finish' && outcome !== undefined) {
       finish.reason = outcome.status === 'aborted'
-        ? { kind: 'aborted', failure: { code: 'ABORTED', message: 'the OMP run was aborted' } }
+        ? { kind: 'aborted', failure: { code: 'ABORTED', message: outcome.message ?? 'the OMP run was aborted' } }
         : outcome.status === 'error'
           ? { kind: 'error', failure: { code: 'PROVIDER_ERROR', message: outcome.message ?? this.failure?.errorMessage ?? UNKNOWN_FAILURE } }
           : finish.reason
@@ -397,6 +415,27 @@ export class OmpEventTranslator {
     if (content === undefined) return ''
     return (kind === 'text' ? content.text : content.thinking) ?? ''
   }
+}
+
+/** Complete native declarations; a mid-attach or incomplete message keeps buffering. */
+function toolDeclarationsOf(message: OmpAssistantMessage | undefined): Extract<OmpToolEvent, { kind: 'start' }>[] | undefined {
+  if (message?.stopReason !== 'toolUse' && message?.stopReason !== 'stop') return undefined
+  const blocks = message.content?.filter(block => block.type === 'toolCall') ?? []
+  if (blocks.length === 0) return undefined
+  const ids = new Set<string>()
+  const declarations: Extract<OmpToolEvent, { kind: 'start' }>[] = []
+  for (const block of blocks) {
+    const args = objectOf(block.arguments)
+    if (typeof block.id !== 'string' || block.id.length === 0
+      || typeof block.name !== 'string' || block.name.length === 0
+      || args === undefined || ids.has(block.id)) return undefined
+    ids.add(block.id)
+    declarations.push({
+      kind: 'start', toolCallId: block.id, toolName: block.name,
+      arguments: { ...typeof block.intent === 'string' && block.intent.length > 0 ? { i: block.intent } : {}, ...args },
+    })
+  }
+  return declarations
 }
 
 function usageOf(usage: OmpUsage | undefined): TokenUsage | undefined {
@@ -907,9 +946,10 @@ export class OmpAgentDriver {
    * Stream one step from the attached OMP session.
    * @param request - the assembled request.
    * @param signal - the step's abort signal.
+   * @param observer - native owner that commits declarations before live tool events; omitted consumers retain buffered tools.
    * @returns the assistant chunk stream.
    */
-  async *stream(request: GenerateOptions, signal: AbortSignal): AsyncIterable<StreamChunk> {
+  async *stream(request: GenerateOptions, signal: AbortSignal, observer?: OmpStreamObserver): AsyncIterable<StreamChunk> {
     this.userCancelled = false
     signal.throwIfAborted()
     const pending = this.pendingTurns(request.messages)
@@ -934,6 +974,7 @@ export class OmpAgentDriver {
     const translator = new OmpEventTranslator()
     translator.beginCycle()
     const tools: OmpToolEvent[] = []
+    let liveTools = false
     let openTools = 0
     let sawAssistant = false
     let cycleEnded = false
@@ -954,7 +995,9 @@ export class OmpAgentDriver {
         if (frame === undefined) {
           finalOutcome ??= state.outcome
           if (finalOutcome === undefined) {
-            if (cycleEnded || sawAssistant) {
+            if (this.detaching) {
+              finalOutcome = { status: 'aborted', message: 'the OMP mirror detached; native execution outcome is unknown' }
+            } else if (cycleEnded || sawAssistant) {
               finalOutcome = { status: signal.aborted ? 'aborted' : 'completed' }
             } else if (signal.aborted) {
               finalOutcome = { status: 'aborted' }
@@ -1004,22 +1047,42 @@ export class OmpAgentDriver {
               signal.throwIfAborted()
               yield chunk
             }
-            translator.endMessage(end.message)
+            for (const chunk of translator.endMessage(end.message)) yield chunk
+            if (observer !== undefined && !liveTools && tools.length === 0) {
+              const declarations = toolDeclarationsOf(end.message)
+              if (declarations !== undefined) {
+                const usage = usageOf(end.message?.usage)
+                observer.assistant({ tools: declarations, ...usage === undefined ? {} : { usage } })
+                liveTools = true
+              }
+            }
             cycleEnded = true
             if (openTools === 0) awaitingDecision = true
             break
           }
           case 'tool_execution_start': {
             awaitingDecision = false
-            openTools += 1
             const event = this.toolStart(frame)
-            if (event !== undefined) tools.push(event)
+            if (event !== undefined) {
+              if (liveTools) {
+                if (observer!.tool(event)) openTools += 1
+              } else {
+                openTools += 1
+                tools.push(event)
+              }
+            }
             break
           }
           case 'tool_execution_end': {
-            openTools = Math.max(0, openTools - 1)
             const event = this.toolEnd(frame)
-            if (event !== undefined) tools.push(event)
+            if (event !== undefined) {
+              if (liveTools) {
+                if (observer!.tool(event)) openTools = Math.max(0, openTools - 1)
+              } else {
+                openTools = Math.max(0, openTools - 1)
+                tools.push(event)
+              }
+            }
             if (awaitingDecision && openTools === 0) stepFinished = true
             break
           }

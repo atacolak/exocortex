@@ -246,6 +246,157 @@ function inboxSplices(events: readonly SessionEvent[]): Extract<SessionEvent, { 
 }
 
 describe('OmpAgentFactory runs one turn per human prompt', () => {
+
+  it('publishes the executing native tool intent before its result, with one replayable lifecycle', async () => {
+    const h = await harness()
+    const created = await createAgent(h, 'session-factory-live-tool')
+    try {
+      created.agent.followup(userInput('read the current contract'))
+      await tick()
+      acceptPrompt(h)
+      const frames = assistantCycle('live-tool-message', 'Checking the contract', 'toolUse')
+      const end = frames.at(-1)!
+      const message = end.message as { content: unknown[] }
+      message.content.push({
+        type: 'toolCall', id: 'live-call-1', name: 'read',
+        arguments: { path: '/tmp/contract' }, intent: 'Read the current API contract',
+      })
+      emit(h, frames)
+      h.rpc.receive({
+        type: 'tool_execution_start', toolCallId: 'live-call-1', toolName: 'read',
+        args: { path: '/tmp/contract' }, intent: 'Read the current API contract',
+      })
+      await tick()
+
+      const during = created.agent.session.snapshotEvents()
+      const call = during.find(event => event.type === 'tool/call')
+      expect(call).toMatchObject({
+        type: 'tool/call',
+        data: { turn: 1, step: 1, callId: 'live-call-1', name: 'read',
+          arguments: JSON.stringify({ i: 'Read the current API contract', path: '/tmp/contract' }) },
+      })
+      expect(during.filter(event => event.type === 'tool/result')).toHaveLength(0)
+      expect(during.filter(event => event.type === 'step/end')).toHaveLength(0)
+      expect(created.agent.status).toBe('running')
+
+      h.rpc.receive({
+        type: 'tool_execution_end', toolCallId: 'live-call-1', toolName: 'read',
+        result: { content: [{ type: 'text', text: 'contract contents' }] }, isError: false,
+      })
+      await tick()
+      const afterResult = created.agent.session.snapshotEvents()
+      expect(afterResult.filter(event => event.type === 'tool/result')).toHaveLength(1)
+      settle(h)
+      await created.agent.whenIdle()
+      const complete = created.agent.session.snapshotEvents()
+      expect(complete.filter(event => event.type === 'tool/call')).toHaveLength(1)
+      expect(complete.filter(event => event.type === 'tool/result')).toHaveLength(1)
+      const assistant = complete.filter(event => event.type === 'assistant/message')
+      expect(assistant).toHaveLength(1)
+      expect(assistant[0]?.data.message.content).toEqual([
+        { type: 'text', text: 'Checking the contract' },
+        { type: 'tool-call', id: 'live-call-1', name: 'read',
+          arguments: JSON.stringify({ i: 'Read the current API contract', path: '/tmp/contract' }) },
+      ])
+      expect(assistant[0]?.data.usage).toMatchObject({ inputTokens: 10, outputTokens: 5 })
+      const stored = await coldRead(h.ctx, created.agent.id)
+      expect(() => assertReleasedV4Relationships(
+        { header: created.agent.session.header, inheritedEventCount: 0, events: stored } as unknown as Parameters<typeof assertReleasedV4Relationships>[0],
+        KNOWN_SESSION_EVENT_TYPES,
+      )).not.toThrow()
+      expect(h.rpc.written.filter(line => line.includes('"type":"prompt"'))).toHaveLength(1)
+    } finally {
+      await created.dispose()
+    }
+  })
+
+  it('keeps parallel native calls distinct and ignores repeated start/result frames', async () => {
+    const h = await harness()
+    const created = await createAgent(h, 'session-factory-parallel-live')
+    try {
+      created.agent.followup(userInput('inspect two independent files'))
+      await tick()
+      acceptPrompt(h)
+      const frames = assistantCycle('parallel-message', 'Reading both files', 'toolUse')
+      const message = frames.at(-1)!.message as { content: unknown[] }
+      message.content.push(
+        { type: 'toolCall', id: 'parallel-a', name: 'read', arguments: { path: '/tmp/a' }, intent: 'Read file A' },
+        { type: 'toolCall', id: 'parallel-b', name: 'read', arguments: { path: '/tmp/b', mode: 'text' }, intent: 'Read file B' },
+      )
+      emit(h, frames)
+      const startA = { type: 'tool_execution_start', toolCallId: 'parallel-a', toolName: 'read', args: { path: '/tmp/a' }, intent: 'Read file A' }
+      h.rpc.receive(startA)
+      h.rpc.receive({ type: 'tool_execution_start', toolCallId: 'parallel-b', toolName: 'read', args: { mode: 'text', path: '/tmp/b' }, intent: 'Read file B' })
+      h.rpc.receive(startA)
+      await tick()
+      const during = created.agent.session.snapshotEvents()
+      expect(during.filter(event => event.type === 'tool/call').map(event => event.data.callId)).toEqual(['parallel-a', 'parallel-b'])
+      expect(during.filter(event => event.type === 'tool/result')).toHaveLength(0)
+      const endB = { type: 'tool_execution_end', toolCallId: 'parallel-b', toolName: 'read', result: { content: [{ type: 'text', text: 'B' }] }, isError: false }
+      h.rpc.receive(endB)
+      h.rpc.receive(endB)
+      await tick()
+      expect(created.agent.session.snapshotEvents().filter(event => event.type === 'tool/result').map(event => event.data.message.source.callId)).toEqual(['parallel-b'])
+      h.rpc.receive({ type: 'tool_execution_end', toolCallId: 'parallel-a', toolName: 'read', result: { content: [{ type: 'text', text: 'A' }] }, isError: false })
+      settle(h)
+      await created.agent.whenIdle()
+      const stored = await coldRead(h.ctx, created.agent.id)
+      expect(stored.filter(event => event.type === 'tool/call')).toHaveLength(2)
+      expect(stored.filter(event => event.type === 'tool/result').map(event => event.data.message.source.callId)).toEqual(['parallel-b', 'parallel-a'])
+      expect(stored.filter(event => event.type === 'assistant/message')).toHaveLength(1)
+      expect(() => assertReleasedV4Relationships(
+        { header: created.agent.session.header, inheritedEventCount: 0, events: stored } as unknown as Parameters<typeof assertReleasedV4Relationships>[0],
+        KNOWN_SESSION_EVENT_TYPES,
+      )).not.toThrow()
+    } finally {
+      await created.dispose()
+    }
+  })
+
+  it.each(['detach', 'cancel', 'bridge-close'] as const)('balances a live declared tool on %s without inventing its remote outcome', async (action) => {
+    const h = await harness()
+    const created = await createAgent(h, 'session-factory-live-' + action)
+    let disposed = false
+    try {
+      created.agent.followup(userInput('start a long native tool'))
+      await tick()
+      acceptPrompt(h)
+      const frames = assistantCycle('interrupted-message', 'Starting the work', 'toolUse')
+      const message = frames.at(-1)!.message as { content: unknown[] }
+      message.content.push(
+        { type: 'toolCall', id: 'started-call', name: 'bash', arguments: { command: 'sleep 60' }, intent: 'Wait for the worker' },
+        { type: 'toolCall', id: 'unstarted-call', name: 'read', arguments: { path: '/tmp/next' } },
+      )
+      emit(h, frames)
+      h.rpc.receive({ type: 'tool_execution_start', toolCallId: 'started-call', toolName: 'bash', args: { command: 'sleep 60' }, intent: 'Wait for the worker' })
+      await tick()
+      expect(created.agent.session.snapshotEvents().filter(event => event.type === 'tool/call')).toHaveLength(1)
+      if (action === 'detach') {
+        await created.dispose()
+        disposed = true
+      } else {
+        if (action === 'cancel') created.agent.cancel({ kind: 'user' })
+        else h.driver.close()
+        await created.agent.whenIdle()
+      }
+      const stored = await coldRead(h.ctx, created.agent.id)
+      expect(stored.findLast(event => event.type === 'turn/end')?.data.reason.kind).not.toBe('completed')
+      const results = stored.filter(event => event.type === 'tool/result')
+      expect(results.map(event => [event.data.message.source.callId, event.data.error?.code])).toEqual([
+        ['started-call', 'TOOL_OUTCOME_UNKNOWN'],
+        ['unstarted-call', 'TOOL_NOT_STARTED'],
+      ])
+      expect(stored.filter(event => event.type === 'assistant/message')).toHaveLength(1)
+      expect(h.rpc.written.filter(line => line.includes('"type":"abort"'))).toHaveLength(action === 'cancel' ? 1 : 0)
+      expect(() => assertReleasedV4Relationships(
+        { header: created.agent.session.header, inheritedEventCount: 0, events: stored } as unknown as Parameters<typeof assertReleasedV4Relationships>[0],
+        KNOWN_SESSION_EVENT_TYPES,
+      )).not.toThrow()
+    } finally {
+      if (!disposed) await created.dispose()
+    }
+  })
+
   it('projects a multi-step tool turn into one turn with two steps and no synthetic continue', async () => {
     const h = await harness()
     const created = await createAgent(h, 'session-factory-steps')

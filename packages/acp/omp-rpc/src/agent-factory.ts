@@ -7,6 +7,7 @@
  * @module @deepseek-ai/dsh-omp-rpc/agent-factory
  */
 
+import { isDeepStrictEqual } from 'node:util'
 import type { Context } from '@deepseek-ai/cordis'
 import {
   AgentModel,
@@ -46,6 +47,7 @@ import {
 import { createScope } from '@deepseek-ai/dsh-scope'
 import {
   SessionLogOffset,
+  ToolCallRecovery,
   interruptedTurnClosers,
   type Session,
   type SessionEvent,
@@ -59,7 +61,7 @@ import type { SessionHandle, SessionPersistence } from '@deepseek-ai/dsh-session
 import type { ProjectionDefinition } from '@deepseek-ai/dsh-session-projection'
 import { z } from 'zod'
 import type { OmpBridge, OmpExternalWake } from './bridge.ts'
-import type { OmpAgentDriver, OmpToolEvent } from './driver.ts'
+import type { OmpAgentDriver, OmpStreamObserver, OmpToolEvent } from './driver.ts'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
@@ -565,13 +567,79 @@ export class OmpSessionAgent implements Agent {
           this.session.append('step/start', { turn: phase.turn, step })
           stepOpen = true
         }
+        const recoveryFrom = this.session.seq
+        const liveCalls = new Map<string, { declaration: Extract<OmpToolEvent, { kind: 'start' }>; state: 'declared' | 'started' | 'ended' }>()
+        const normalizedStart = (event: Extract<OmpToolEvent, { kind: 'start' }>): Extract<OmpToolEvent, { kind: 'start' }> => {
+          const args = { ...event.arguments }
+          if (args.i === undefined) args.i = event.toolName
+          return { ...event, arguments: args }
+        }
+        const commitAssistant = (calls: readonly Extract<OmpToolEvent, { kind: 'start' }>[]): void => {
+          openStep()
+          if (!started) { started = true; attempt.start() }
+          const blocks: ContentBlock[] = [...attempt.blocks(), ...calls.map(event => ({
+            type: 'tool-call' as const, id: callId(event.toolCallId),
+            name: event.toolName, arguments: JSON.stringify(event.arguments),
+          }))]
+          const selection = this.model.current() ?? { provider: 'cpa', model: 'unknown' }
+          const message = createAssistantMessage({
+            content: phase.controller.signal.aborted ? attempt.interruptedBlocks() : blocks,
+            source: {
+              provider: selection.provider,
+              model: selection.model,
+              ...attempt.replayState === undefined ? {} : { replayState: attempt.replayState },
+            },
+          })
+          attempt.settle('assistant/message', () => this.session.append('assistant/message', {
+            turn: phase.turn, step, message,
+            ...attempt.usage === undefined ? {} : { usage: attempt.usage },
+            stream: attempt.stream,
+            ...phase.controller.signal.aborted ? { interrupted: true } : {},
+          }, { surfaceOp: 'append' }).seq)
+        }
+        const observer: OmpStreamObserver = {
+          assistant: ({ tools, usage }) => {
+            const calls = tools.map(normalizedStart)
+            openStep()
+            if (!started) { started = true; attempt.start() }
+            if (usage !== undefined) attempt.push({ type: 'usage', usage })
+            commitAssistant(calls)
+            for (const call of calls) liveCalls.set(call.toolCallId, {
+              declaration: call, state: 'declared',
+            })
+          },
+          tool: (event) => {
+            const call = liveCalls.get(event.toolCallId)
+            if (call === undefined || call.declaration.toolName !== event.toolName) {
+              throw new Error('OMP tool lifecycle does not match its completed assistant declaration')
+            }
+            if (event.kind === 'start') {
+              const startedCall = normalizedStart(event)
+              if (!isDeepStrictEqual(call.declaration.arguments, startedCall.arguments)) {
+                throw new Error('OMP tool arguments changed after the completed assistant declaration')
+              }
+              if (call.state !== 'declared') return false
+              this.host.projectTools(this.id, phase.turn, step, [call.declaration])
+              call.state = 'started'
+            } else {
+              if (call.state === 'ended') return false
+              if (call.state !== 'started') throw new Error('OMP tool result arrived before its execution start')
+              this.host.projectTools(this.id, phase.turn, step, [event])
+              call.state = 'ended'
+            }
+            return true
+          },
+        }
         try {
-          for await (const chunk of driver.stream(this.request(), phase.controller.signal)) {
+          for await (const chunk of driver.stream(this.request(), phase.controller.signal, observer)) {
             if (phase.controller.signal.aborted) break
             if (chunk.type === 'finish') {
               finish = chunk.reason
               continue
             }
+            // The completed native message may already be committed while its
+            // tools run. Later usage/finish chunks cannot reopen that attempt.
+            if (attempt.ended) continue
             openStep()
             if (!started) { started = true; attempt.start() }
             sawChunks = true
@@ -579,48 +647,33 @@ export class OmpSessionAgent implements Agent {
           }
           if (phase.controller.signal.aborted) break
           const tools = this.host.takeTools(this.id)
-          if (tools.length > 0 || started || sawChunks) {
-            openStep()
-            if (!started) { started = true; attempt.start() }
-            const blocks = [...attempt.blocks()]
-            for (const event of tools) {
-              if (event.kind !== 'start') continue
-              if (event.arguments.i === undefined) event.arguments.i = event.toolName
-              blocks.push({
-                type: 'tool-call',
-                id: callId(event.toolCallId),
-                name: event.toolName,
-                arguments: JSON.stringify(event.arguments),
-              })
-            }
-            const selection = this.model.current() ?? { provider: 'cpa', model: 'unknown' }
-            const message = createAssistantMessage({
-              content: phase.controller.signal.aborted ? attempt.interruptedBlocks() : blocks,
-              source: {
-                provider: selection.provider,
-                model: selection.model,
-                ...attempt.replayState === undefined ? {} : { replayState: attempt.replayState },
-              },
-            })
-            attempt.settle('assistant/message', () => this.session.append('assistant/message', {
-              turn: phase.turn,
-              step,
-              message,
-              ...attempt.usage === undefined ? {} : { usage: attempt.usage },
-              stream: attempt.stream,
-              ...phase.controller.signal.aborted ? { interrupted: true } : {},
-            }, { surfaceOp: 'append' }).seq)
-            this.host.projectTools(this.id, phase.turn, step, tools)
+          if (!attempt.ended && (tools.length > 0 || started || sawChunks)) {
+            const calls = tools.flatMap(event => event.kind === 'start' ? [normalizedStart(event)] : [])
+            commitAssistant(calls)
+            this.host.projectTools(this.id, phase.turn, step, tools.map(event => event.kind === 'start' ? normalizedStart(event) : event))
           }
           if (finish?.kind === 'error') {
             outcomeFailure = { message: finish.failure.message, code: finish.failure.code }
           }
+          if (finish?.kind === 'aborted') outcome = { kind: 'aborted', reason: { kind: 'legacy' } }
           if (finish?.kind === 'max-tokens') stickyMaxTokens = true
         } catch (error: unknown) {
           if (!attempt.ended) attempt.abandon()
           if (phase.controller.signal.aborted) break
           throw error
         } finally {
+          // A detached mirror cannot attest that remote work stopped. Read
+          // only this step's committed events through the native recovery owner.
+          if ([...liveCalls.values()].some(call => call.state !== 'ended')) {
+            const recovery = new ToolCallRecovery()
+            for (const event of this.session.snapshotEvents(recoveryFrom)) recovery.observe(event)
+            for (const event of recovery.results()) {
+              this.session.append('tool/result', event.data, {
+                surfaceOp: 'append',
+                ...event.sourceEventSeqs === undefined ? {} : { sourceEventSeqs: event.sourceEventSeqs },
+              })
+            }
+          }
           if (stepOpen) {
             this.session.append('step/end', { turn: phase.turn, step })
             stepOpen = false
@@ -635,7 +688,7 @@ export class OmpSessionAgent implements Agent {
       } else if (stickyMaxTokens) {
         outcome = { kind: 'max-tokens' }
       } else {
-        outcome = { kind: 'completed' }
+        outcome ??= { kind: 'completed' }
       }
     } catch (error: unknown) {
       outcome = phase.controller.signal.aborted

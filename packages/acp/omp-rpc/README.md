@@ -15,6 +15,36 @@ first. A harness preset built this way composes only the Harness discovery
 plugins (`cordis_inspect_*`, `plugin_manager`) so OMP's host-tool surface can
 see them; OMP serves the whole step.
 
+## Live native tool activity
+
+The native OMP Agent commits the completed assistant message's full tool
+declarations before projecting execution starts. Each native start then reaches
+the ordinary Session `tool/call` event immediately, with the same call id and
+producer-supplied intent; its result arrives once when OMP reports completion.
+Parallel calls keep their own identities. Equivalent argument objects retain
+the exact declaring representation in the journal.
+
+This uses the existing attached socket and Session event stream. It does not
+activate an owner while reading cards. A mid-attach or incomplete assistant
+declaration conservatively keeps the prior completed-cycle buffering. The
+legacy bridge consumer also retains that behavior. On mirror interruption,
+native Session recovery marks unresolved calls as not started or outcome
+unknown; detaching does not imply the remote tool stopped or send an abort.
+The local turn is interrupted when the mirror disconnects, even if the native
+owner continues its tool.
+
+The isolated artifact acceptance test uses the actual app Loader, Agent/Session
+and JSONL owners with a real Unix-socket child and a held deterministic tool:
+
+```sh
+node packages/acp/omp-rpc/tests/live-tools.loader.mjs /absolute/staged/lib/index.js /absolute/receipt.json
+```
+
+It proves the call is visible before tool completion, unload preserves the
+external process identity without aborting it, and both in-memory and cold
+journal replay remain valid. The external inference producer is a fixture;
+this does not substitute for a live browser verification.
+
 ## Native commands before attach
 
 Every `omp:*` Session receives OMP's real command surface (`/compact`,
